@@ -1,0 +1,141 @@
+# .github/workflows/ci.yml
+# GitHub Actions CI 流水线
+#
+# 任务:
+#   1. lint      - ruff 静态检查 + SemVer bump 校验（双轨制，见 AGENTS.md 版本管理条）
+#   2. unit-test - unittest（uv 同步依赖）
+#
+# 约定:
+#   - pyproject.toml 在仓库根，依赖用 uv 管理；
+#   - 测试目录是 `test/`（不带 s），用 unittest 而非 pytest；
+#   - `__version__` 只存在于 `src/` 与 `main.py`，`__init__.py` 除外
+#     （与 `bump_version.py::collect_components` 的扫描范围一致）。
+#
+# 【触发配置】
+#   - **仅 pull_request 到 main**；
+#   - **没有 `push` 触发器** ⇒ 推分支不会起 run、不烧 Actions 分钟；
+#     理由：PR 合并走 squash 会产生新 SHA，GitHub 当成一次全新提交，
+#     于是同一份代码在 PR 里验过一遍、squash 后又跑一遍，纯浪费。
+#   - 加了 `paths:` 过滤 ⇒ 只有碰代码/依赖/CI 自身的提交才跑；
+#     文档提交（README.md / AGENTS.md / progress/ / docs/）不过下面任何一道门禁，
+#     不该烧分钟。
+#
+# ⚠️ **推之前先本地跑一遍本文件里的四道门禁**（AGENTS.md 的 CI 条）：
+#    `ruff check src/ test/ main.py` ·
+#    `ruff format --check src/ test/ main.py` ·
+#    SemVer bump 校验 ·
+#    `uv run python -m unittest discover -t . -s test -v`
+#    —— 别用「推上去看 CI 报什么」来验证，那是拿 Actions 分钟换本地就能查出的信息。
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    # 只在这些路径变了才跑。文档(README.md AGENTS.md progress/ docs/)
+    # 不在其中 —— 它们既不过 ruff 也不参与 SemVer 检查。
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/**"
+  # 手动触发保留：老宅要能随时手动验一次（不触发就不烧 Actions 分钟）。
+  workflow_dispatch:
+
+# 取消上一次尚未完成的同 PR run，节省 CI 资源
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------
+  # 1) Lint — 静态检查 + SemVer 校验
+  # -----------------------------------------------------------------
+  lint:
+    name: Lint (ruff + semver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SemVer diff 需要与 origin/main 比对
+
+      # ⚠️ **ruff 必须从 `uv.lock` 装，不能用 `pip install ruff`** ——
+      # 后者装的是**最新版**，与本地 `uv.lock` 锁定的版本可能不同；
+      # 而本仓 `[tool.ruff]` 开了 `preview = true` ⇒ 预览规则的**格式化行为**
+      # 在版本之间会漂移 ⇒ 「本地绿、CI 红」，且红的原因与你的改动无关。
+      # ⇒ 统一走 `uv sync` ⇒ CI 与本地**同一个 ruff 版本**。
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Ruff check
+        run: uv run ruff check src/ test/ main.py
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ test/ main.py
+
+      # SemVer bump check：本次 diff 修改的 .py 文件必须 bump __version__；
+      # 未修改的文件 __version__ 必须保持不变（双轨制）。
+      - name: SemVer bump check
+        run: |
+          set -e
+          MODIFIED=$(git diff --name-only origin/main HEAD -- 'src/*.py' 'src/**/*.py' 'main.py' | grep -v __pycache__ | grep -v '__init__.py' || true)
+          if [ -z "$MODIFIED" ]; then
+            echo "No versioned Python files modified — skipping SemVer check."
+            exit 0
+          fi
+          echo "Modified versioned files:"
+          echo "$MODIFIED"
+          FAIL=0
+          for f in $MODIFIED; do
+            # 已删除的文件不再需要 bump：git diff 仍会把它列进 MODIFIED，
+            # 但文件不存在，grep 必然失败 → 误报 "has no __version__ line"。
+            if [ ! -f "$f" ]; then
+              echo "skip(deleted): $f"
+              continue
+            fi
+            OLD=$(git show "origin/main:$f" 2>/dev/null | grep -E '^__version__\s*=' | head -1 || echo "")
+            NEW=$(grep -E '^__version__\s*=' "$f" | head -1 || echo "")
+            if [ -z "$NEW" ]; then
+              echo "::error file=$f::file is modified but has no __version__ line."
+              FAIL=1
+            elif [ "$OLD" = "$NEW" ]; then
+              echo "::error file=$f::file is modified but __version__ unchanged: $OLD"
+              FAIL=1
+            else
+              echo "ok: $f  $OLD -> $NEW"
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::bump the __version__ of every modified script, or revert the change."
+            exit 1
+          fi
+          echo "All modified Python files have bumped __version__."
+
+  # -----------------------------------------------------------------
+  # 2) Unit tests — unittest
+  # -----------------------------------------------------------------
+  unit-test:
+    name: Unit tests (unittest)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Run unittest
+        run: uv run python -m unittest discover -t . -s test -v

@@ -1,0 +1,44 @@
+# ---- Python 虚拟环境 ----
+# ⚠️ **两种形式都要写，缺一不可**（老宅 AGENTS.md 规则 17 同款处置）：
+#   .venv   不带斜杠 —— 同时匹配**符号链接**（git 把软链当普通文件跟踪）；
+#   .venv/  带斜杠   —— 匹配**目录**。
+# 只写 `.venv/` 时，在 worktree 里把 `.venv` 做成软链指向主目录复用依赖，
+# 那条软链会被当成文件跟踪入库，而 `.venv/.gitignore`（uv 自建，内容为 `*`）
+# 只在 `.venv` 是真目录时生效、对软链无效 ⇒ CI 全新 runner 上 `uv sync`
+# 报 `failed to create directory .../.venv: File exists`。
+# 加完后务必实测：`git check-ignore -v .venv .venv/`
+.venv
+.venv/
+
+# ---- Python 字节码与构建产物 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# ---- 环境变量（含真值，不入库）----
+.env
+.env.local
+.env.*.local
+
+# ---- 工具缓存 ----
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- Claude Code 运行态 ----
+.claude/scheduled_tasks.lock
+
+# ---- 本地工具产物（非本仓内容）----
+# 临时目录：测试的临时家目录 / 工作区。异常退出或 Ctrl-C 会残留，
+# 不 ignore 就会在 `git status` 里冒出来 ⇒ 可能被误提交进仓。
+.tmp-test-*/
+
+# ---- 运行期数据根（会话 / 输出，均可再生）----
+.data/
+output/
+logs/
+*.log

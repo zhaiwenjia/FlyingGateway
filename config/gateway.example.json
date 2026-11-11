@@ -1,0 +1,41 @@
+{
+  "strategy": "priority",
+  "endpoints": [
+    {
+      "name": "primary",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "context_window": 128000,
+      "timeout_s": 30,
+      "max_retries": 2,
+      "priority": 0
+    },
+    {
+      "name": "backup",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "gpt-4o-mini",
+      "context_window": 64000,
+      "timeout_s": 45,
+      "max_retries": 1,
+      "priority": 1
+    },
+    {
+      "name": "local",
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model": "gpt-4o-mini",
+      "context_window": 32768,
+      "timeout_s": 60,
+      "max_retries": 0,
+      "priority": 2
+    },
+    {
+      "name": "large-context",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o",
+      "context_window": 128000,
+      "timeout_s": 60,
+      "max_retries": 2,
+      "priority": 0
+    }
+  ]
+}
