@@ -42,3 +42,8 @@ htmlcov/
 output/
 logs/
 *.log
+# ---- macOS ----
+# Finder 会在目录里塞 .DS_Store（. 开头 ⇒ git 默认不跟踪它，
+# 但它会污染 `git status`，看着像有未跟踪改动）。
+.DS_Store
+
