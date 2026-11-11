@@ -1,0 +1,37 @@
+# .github/CODEOWNERS
+#
+# 匹配规则（GitHub 原生语义）：
+#   - 路径越具体优先级越高；**从下到上匹配，最后匹配者胜出**
+#   - `*` 只在最后一行作全局 fallback
+#
+# 本仓真实布局（`git ls-files` 顶层分布）：
+#   src/ test/ docs/ progress/ specs/ snapshots/ .github/
+#   + main.py / pyproject.toml / uv.lock / bump_version.py / README.md / AGENTS.md
+
+# ─── 全局默认 owner（所有 PR 都请其 review）───
+*    @zhaiwenjia
+
+# ─── 源码（改这里 = 改行为，必须走 PR + bump 版本号）──
+/src/            @zhaiwenjia
+/main.py         @zhaiwenjia
+
+# ─── 测试 ─────────────────────────────────────────────
+/test/           @zhaiwenjia
+
+# ─── 依赖与门禁（改动会影响 CI 判定）────────────────────
+/pyproject.toml  @zhaiwenjia
+/uv.lock         @zhaiwenjia
+/.github/        @zhaiwenjia
+
+# ─── 版本快照（bump_version.py 生成）────────────────────
+/snapshots/      @zhaiwenjia
+/bump_version.py @zhaiwenjia
+
+# ─── 文档 ─────────────────────────────────────────────
+/docs/           @zhaiwenjia
+/README.md       @zhaiwenjia
+/AGENTS.md       @zhaiwenjia
+/progress/       @zhaiwenjia
+
+# ─── 需求规格（spec 驱动开发）──────────────────────────
+/specs/          @zhaiwenjia
