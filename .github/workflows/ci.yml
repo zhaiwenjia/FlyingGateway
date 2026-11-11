@@ -58,18 +58,26 @@ jobs:
         with:
           fetch-depth: 0 # SemVer diff 需要与 origin/main 比对
 
-      - uses: actions/setup-python@v5
+      # ⚠️ **ruff 必须从 `uv.lock` 装，不能用 `pip install ruff`** ——
+      # 后者装的是**最新版**，与本地 `uv.lock` 锁定的版本可能不同；
+      # 而本仓 `[tool.ruff]` 开了 `preview = true` ⇒ 预览规则的**格式化行为**
+      # 在版本之间会漂移 ⇒ 「本地绿、CI 红」，且红的原因与你的改动无关。
+      # ⇒ 统一走 `uv sync` ⇒ CI 与本地**同一个 ruff 版本**。
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
+          enable-cache: true
 
-      - name: Install ruff
-        run: pip install --quiet ruff
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
 
       - name: Ruff check
-        run: ruff check src/ test/ main.py
+        run: uv run ruff check src/ test/ main.py
 
       - name: Ruff format check
-        run: ruff format --check src/ test/ main.py
+        run: uv run ruff format --check src/ test/ main.py
 
       # SemVer bump check：本次 diff 修改的 .py 文件必须 bump __version__；
       # 未修改的文件 __version__ 必须保持不变（双轨制）。
