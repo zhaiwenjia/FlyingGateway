@@ -200,15 +200,20 @@ func TestResponsesStreamTerminal(t *testing.T) {
 
 // TestUnsupportedCapabilityPreviousResponseID 断言会话态口径（A11）：
 // previous_response_id 打到不支持上游 ⇒ 400 unsupported_capability，⛔ 不静默丢弃。
+// （用 deepseek 端点：anthropic 端点有入口协议绑定在前，进不到本检查。）
 func TestUnsupportedCapabilityPreviousResponseID(t *testing.T) {
 	e := newEnv(t, func(base string) []epSpec {
-		return []epSpec{primaryEP(base), claudeEP(base)}
+		ds := epSpec{
+			name: "deepseek", base: base, model: "deepseek-chat", upstreamModel: "deepseek-chat",
+			provider: "deepseek", credRef: "TEST_KEY_OPENAI",
+			ctxWindow: 64000, maxOut: 4096, maxRetries: 0, priority: 1, timeoutS: 5,
+		}
+		return []epSpec{primaryEP(base), ds}
 	}, nil, nil)
 	e.up.setEventsFor("/responses", loadSSE(t, "openai_responses_stream.sse"))
-	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
 
 	resp := e.postJSON("/v1/responses",
-		`{"model":"claude-3-5-sonnet","input":"hi","previous_response_id":"prev_1"}`, nil)
+		`{"model":"deepseek-chat","input":"hi","previous_response_id":"prev_1"}`, nil)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("状态 = %d，期望 400", resp.StatusCode)
 	}
@@ -460,9 +465,10 @@ func TestAuthHeaderInjectionThreeForms(t *testing.T) {
 		t.Errorf("OpenAI 上游 X-Api-Key = %q，期望空（⛔ 不透传调用方凭据）", got)
 	}
 
-	// Anthropic 形：x-api-key + anthropic-version。
-	resp2 := e.postJSON("/v1/chat/completions",
-		`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`,
+	// Anthropic 形：x-api-key + anthropic-version（走 /v1/messages —— 协议绑定后
+	// anthropic 端点的唯一合法入口）。
+	resp2 := e.postJSON("/v1/messages",
+		`{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"Authorization": "Bearer caller-secret"})
 	readBody(t, resp2)
 	h1 := e.up.headersAt(1)
@@ -490,26 +496,29 @@ func TestAuthHeaderInjectionThreeForms(t *testing.T) {
 }
 
 // TestAnthropicResidualUsage 断言 Anthropic 残值语义（A6）：
-// InputTokens = input_tokens(20) + cache_creation(0) + cache_read(3) = 23。
+// 归一 InputTokens = input_tokens(20) + cache_creation(0) + cache_read(3) = 23；
+// Messages 出口按三项拆分承载（input_tokens 为未缓存输入 20、cache_read 单列 3）。
 func TestAnthropicResidualUsage(t *testing.T) {
 	e := newEnv(t, func(base string) []epSpec {
 		return []epSpec{claudeEP(base)}
 	}, nil, nil)
-	e.up.setEvents(loadSSE(t, "anthropic_messages_stream.sse"))
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
 
-	resp := e.postJSON("/v1/chat/completions",
-		`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`, nil)
+	resp := e.postJSON("/v1/messages",
+		`{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
 	m := readBody(t, resp)
 	usage, _ := m["usage"].(map[string]any)
-	if usage["prompt_tokens"] != float64(23) {
-		t.Errorf("prompt_tokens = %v，期望 23（残值合成 20+0+3，A6）", usage["prompt_tokens"])
+	if usage["input_tokens"] != float64(20) {
+		t.Errorf("input_tokens = %v，期望 20（未缓存输入，A6 拆分口径）", usage["input_tokens"])
 	}
-	details, _ := usage["prompt_tokens_details"].(map[string]any)
-	if details["cached_tokens"] != float64(3) {
-		t.Errorf("cached_tokens = %v，期望 3（缓存命中单列）", details["cached_tokens"])
+	if usage["cache_read_input_tokens"] != float64(3) {
+		t.Errorf("cache_read_input_tokens = %v，期望 3（缓存命中单列）", usage["cache_read_input_tokens"])
 	}
-	if usage["completion_tokens"] != float64(5) {
-		t.Errorf("completion_tokens = %v，期望 5", usage["completion_tokens"])
+	if usage["cache_creation_input_tokens"] != float64(0) {
+		t.Errorf("cache_creation_input_tokens = %v，期望 0", usage["cache_creation_input_tokens"])
+	}
+	if usage["output_tokens"] != float64(5) {
+		t.Errorf("output_tokens = %v，期望 5", usage["output_tokens"])
 	}
 }
 
@@ -721,4 +730,109 @@ func TestMaxInFlightSheds(t *testing.T) {
 		t.Fatalf("压力回落后 = %d，期望 200", resp2.StatusCode)
 	}
 	readBody(t, resp2)
+}
+
+// TestMessagesIngressEndToEnd 断言 Anthropic Messages 入口端到端（统一 SDD 3.1 第三入站形）：
+// Messages 形请求 ⇒ 管线 ⇒ Messages 形响应（type=message、stop_reason、usage 三项拆分）。
+func TestMessagesIngressEndToEnd(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{claudeEP(base)} }, nil, nil)
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
+	body := `{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+
+	resp := e.postJSON("/v1/messages", body, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	m := readBody(t, resp)
+	if m["type"] != "message" || m["role"] != "assistant" {
+		t.Fatalf("外壳失真（须 type=message/role=assistant）: %v", m)
+	}
+	if sr, _ := m["stop_reason"].(string); sr != "end_turn" {
+		t.Fatalf("stop_reason = %v，期望 end_turn（原值透传）", m["stop_reason"])
+	}
+	// usage 三项拆分：归一 Input=20+3（缓存读）⇒ 出参 input_tokens=20、cache_read=3、output=5。
+	u, _ := m["usage"].(map[string]any)
+	if u == nil || u["input_tokens"] != 20.0 || u["output_tokens"] != 5.0 ||
+		u["cache_read_input_tokens"] != 3.0 {
+		t.Fatalf("usage 三项拆分失真: %v", m["usage"])
+	}
+	if _, ok := m["content"].([]any); !ok {
+		t.Fatalf("缺 content 数组: %v", m)
+	}
+
+	// Anthropic 语义：max_tokens 必填 ⇒ 缺失 400。
+	resp2 := e.postJSON("/v1/messages", `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺 max_tokens = %d，期望 400", resp2.StatusCode)
+	}
+	readBody(t, resp2)
+}
+
+// TestMessagesIngressStream 断言 Messages 入口流式：Anthropic 事件序列完整。
+func TestMessagesIngressStream(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{claudeEP(base)} }, nil, nil)
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
+	body := `{"model":"claude-3-5-sonnet","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	resp := e.postJSON("/v1/messages", body, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("读流失败: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{"event: message_start", "event: content_block_delta",
+		"event: message_delta", "event: message_stop"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("流式缺 %q；实际尾部: %.300s", want, got[max(0, len(got)-300):])
+		}
+	}
+}
+
+// TestIngressProtocolMismatch 断言入口协议与模型族硬绑定（Claude 模型只走 /v1/messages，
+// 其它供应商只走 OpenAI 形入口）：违配显式 400 ingress_protocol_mismatch，⛔ 不静默翻译。
+func TestIngressProtocolMismatch(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		return []epSpec{claudeEP(base), primaryEP(base)}
+	}, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
+
+	// Claude 模型走 OpenAI 形入口 ⇒ 400。
+	resp := e.postJSON("/v1/chat/completions",
+		`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("chat+claude = %d，期望 400", resp.StatusCode)
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "ingress_protocol_mismatch" {
+		t.Fatalf("code = %q，期望 ingress_protocol_mismatch", code)
+	}
+
+	// 非 anthropic 模型走 Messages 入口 ⇒ 400。
+	resp2 := e.postJSON("/v1/messages",
+		`{"model":"gpt-4o-mini","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("messages+gpt = %d，期望 400", resp2.StatusCode)
+	}
+	_, code2, _ := errorFields(t, readBody(t, resp2))
+	if code2 != "ingress_protocol_mismatch" {
+		t.Fatalf("code = %q，期望 ingress_protocol_mismatch", code2)
+	}
+
+	// 同族两向放行。
+	resp3 := e.postJSON("/v1/messages",
+		`{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("messages+claude = %d，期望 200", resp3.StatusCode)
+	}
+	readBody(t, resp3)
+	resp4 := e.postJSON("/v1/chat/completions",
+		`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp4.StatusCode != http.StatusOK {
+		t.Fatalf("chat+gpt = %d，期望 200", resp4.StatusCode)
+	}
+	readBody(t, resp4)
 }

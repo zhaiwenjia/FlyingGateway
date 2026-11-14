@@ -15,7 +15,7 @@
 
 **设计要点**：
 
-- **统一入口、注册表映射** —— `/v1/chat/completions`、`/v1/responses` 双入口同管线；
+- **统一入口、注册表映射** —— `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（Anthropic Messages）三入口同管线；
   用户面只认注册表里的模型别名，别名 → 上游模型 / 端点 / 协议形状的映射全在注册表，
   新增供应商只加注册表条目与适配器，不改调用方。
 - **11 家供应商适配** —— OpenAI、Anthropic、Gemini、DeepSeek、Qwen、智谱、Kimi（moonshot）、
@@ -44,9 +44,9 @@ FlyingGateway/                  ← 仓库根
 ├── cmd/
 │   └── gateway/                程序入口（flag 解析、装配、启动）
 ├── internal/
-│   ├── server/                 HTTP 服务：双入口管线、调用方鉴权、取消注册表、管理面
+│   ├── server/                 HTTP 服务：三入口管线、调用方鉴权、取消注册表、管理面
 │   ├── core/                   核心契约（请求/响应/流帧/Provider 枚举）
-│   ├── codec/                  入站编解码（Chat / Responses 两形）
+│   ├── codec/                  入站编解码（Chat / Responses / Messages 三形）
 │   ├── stream/                 流式转发、SSE 扫描与帧编码
 │   ├── adapter/                11 家供应商适配器（出站协议转换、usage 归一）
 │   ├── registry/               端点注册表（路由的唯一真源）
@@ -109,10 +109,16 @@ curl http://127.0.0.1:8080/health
 OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 `Authorization: Bearer <key>`（缺失 / 无效 ⇒ 401）。
 
+**入口协议与模型族绑定（强制）**：Claude 模型（`provider_name: "anthropic"`）**只走**
+`/v1/messages`（Anthropic 形，由始至终 Anthropic SDK）；其它供应商模型**只走**
+`/v1/chat/completions` / `/v1/responses`（OpenAI 形）。违配 ⇒ `400 ingress_protocol_mismatch`，
+⛔ 不静默跨形状翻译 —— 同族全程协议零翻译（thinking / 签名 / 缓存控制保真）。
+
 | 方法与路径                    | 说明                                                                      |
 | ----------------------------- | ------------------------------------------------------------------------- |
 | `POST /v1/chat/completions` | Chat Completions 兼容（流式 / 非流式）。`model` 填注册表的模型别名      |
 | `POST /v1/responses`        | OpenAI Responses 兼容入口（同一转发管线）                                 |
+| `POST /v1/messages`        | Anthropic Messages 兼容入口（Anthropic SDK / Claude Code 类客户端可直连；同一转发管线） |
 | `GET /v1/models`            | 列出注册表模型别名与能力（tools / stream / vision、上下文窗口、输出上限） |
 | `POST /v1/cancel`           | 显式取消在途执行，请求体 `{"client_request_id": "..."}`                 |
 | `GET /health`               | 存活探针（不鉴权）                                                        |
@@ -256,6 +262,26 @@ part 数组：`{type:"text", text}` / `{type:"image_url", image_url:{url}}`）�
 分列在 `*_tokens_details`，不打折并入）；`output`/`completion` 侧含 `reasoning_tokens` 维度。
 所有 usage 经逐家归一（MiMo 两拍收口、Kimi `choices[0].usage` 等差异在适配层抹平）。
 
+**输入 / 输出 · `POST /v1/messages`（Anthropic Messages）**：
+
+输入（`application/json`）：`model` 与 `max_tokens` 必填；`messages[]` 的 `content` 为 string 或
+块数组（`text` / `image{source:{type:"base64"|"url", …}}` / `tool_use` / `tool_result` /
+`thinking{thinking, signature}` / `redacted_thinking`）；`system` 为 string 或 text 块数组；
+`tools[]` 用 `input_schema`（JSON Schema）；`tool_choice` 为 `{type: auto|any|tool|none, name?}`；
+采样与生成控制 `temperature` / `top_p` / `top_k` / `stop_sequences` / `stream` /
+`thinking{type, budget_tokens}`；`metadata` 接受但网关不消费。⚠️ 当前仅支持**单个**
+`cache_control` 断点（多断点显式报错，⛔ 不静默取一）。
+
+输出（非流式）为 Messages 响应体：`{id, type:"message", role:"assistant", model,
+content:[text|thinking|redacted_thinking|tool_use 块], stop_reason, stop_sequence, usage}`。
+`stop_reason` 取值：`end_turn` / `max_tokens` / `tool_use` / `stop_sequence` / `refusal`
+（Chat 家族值自动翻译：`stop`→`end_turn`、`length`→`max_tokens` 等）；`usage` 为 Anthropic
+三项口径（`input_tokens` 为**未缓存**输入，`cache_creation_input_tokens` /
+`cache_read_input_tokens` 分列缓存相）。流式为 Anthropic 事件流：`message_start` →
+`content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta` /
+`signature_delta` / `input_json_delta`）/ `content_block_stop` → `message_delta`（stop_reason +
+usage）→ `message_stop`。
+
 **辅助端点**：
 
 | 端点 | 输入 | 输出 |
@@ -291,6 +317,7 @@ part 数组：`{type:"text", text}` / `{type:"image_url", image_url:{url}}`）�
 | 400 | `context_exceeded` | 估算输入 + 输出上限超出 `context_window` |
 | 400 | `unsupported_capability` | 请求能力超出端点能力（如不支持的 `previous_response_id`） |
 | 400 | `detect_failed` | 端点供应商识别失败（`base_url` / `upstream_model` 推断不出供应商） |
+| 400 | `ingress_protocol_mismatch` | 入口协议与模型族错配（Claude 模型须走 `/v1/messages`，其它供应商须走 OpenAI 形入口） |
 | 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
 | 401 | `unauthorized` | 调用方 API key 缺失或无效（`GATEWAY_CALLER_KEYS` 非空时） |
 | 403 | `content_policy` | 护栏命中 |

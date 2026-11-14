@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/adapter"
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/chat"
+	"github.com/zhaiwenjia/FlyingGateway/internal/codec/messages"
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/responses"
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/detect"
@@ -40,6 +41,7 @@ type inboundMode int
 const (
 	modeChat inboundMode = iota
 	modeResponses
+	modeMessages
 )
 
 const (
@@ -58,6 +60,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // handleResponses 处理 POST /v1/responses。
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	s.handle(w, r, modeResponses)
+}
+
+// handleMessages 处理 POST /v1/messages（Anthropic Messages 入口，统一 SDD 3.1 第三入站形）。
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	s.handle(w, r, modeMessages)
 }
 
 // handle 是双入口共用管线。
@@ -93,6 +100,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	switch mode {
 	case modeChat:
 		req, err = chat.DecodeRequest(body)
+	case modeMessages:
+		req, err = messages.DecodeRequest(body)
 	default:
 		req, err = responses.DecodeRequest(body)
 	}
@@ -125,6 +134,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	ep, err := s.reg.Lookup(req.Model)
 	if err != nil {
 		s.writeDetail(w, gwerrors.New(core.ErrInvalidRequest, http.StatusNotFound, "model_not_found", security.Redact(err.Error())))
+		return
+	}
+
+	// 入口协议与模型族绑定（Claude 模型全程走 Anthropic Messages，其它供应商走 OpenAI 形）：
+	// 调用面（自研 agent runtime）按模型族选择 SDK，协议错配是调用方 bug ⇒ 显式 400，
+	// ⛔ 不静默跨形状翻译（跨形状的语义损失本可避免 —— 让调用方先纠正用法）。
+	// 判定取主端点（Lookup 结果）的 provider_name；降级链内部换供应商不受此限。
+	if isMsg := mode == modeMessages; isMsg != (ep.ProviderName == "anthropic") {
+		msg := fmt.Sprintf("Claude 模型 %q 只接受 /v1/messages 入口（Anthropic 形）", req.Model)
+		if isMsg {
+			msg = fmt.Sprintf("模型 %q（provider %s）须走 OpenAI 形入口（/v1/chat/completions 或 /v1/responses）；/v1/messages 仅接受 anthropic 模型",
+				req.Model, ep.ProviderName)
+		}
+		s.writeDetail(w, gwerrors.New(core.ErrInvalidRequest, http.StatusBadRequest, "ingress_protocol_mismatch", msg))
 		return
 	}
 
