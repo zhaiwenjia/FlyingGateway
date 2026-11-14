@@ -125,7 +125,7 @@ OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
+  -d '{"model": "gpt-luna", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
 ```
 
 **流式调用**（`"stream": true`，收 SSE 帧；末帧带 usage 归一后计量）：
@@ -134,7 +134,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
+  -d '{"model": "gpt-luna", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
 ```
 
 **请求标识与取消**：可选请求头 `X-Client-Request-Id` 携带本轮唯一标识（不传则网关生成），

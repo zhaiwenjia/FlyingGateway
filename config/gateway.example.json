@@ -4,8 +4,8 @@
     {
       "name": "primary",
       "base_url": "https://api.openai.com/v1",
-      "model": "gpt-4o-mini",
-      "upstream_model": "gpt-4o-mini",
+      "model": "gpt-luna",
+      "upstream_model": "gpt-luna",
       "provider_name": "openai",
       "context_window": 128000,
       "max_output_tokens": 16384,
@@ -29,7 +29,7 @@
     {
       "name": "backup",
       "base_url": "https://api.deepseek.com/v1",
-      "model": "gpt-4o-mini",
+      "model": "gpt-luna",
       "upstream_model": "deepseek-chat",
       "provider_name": "deepseek",
       "context_window": 64000,
@@ -47,7 +47,7 @@
     {
       "name": "local",
       "base_url": "http://127.0.0.1:8000/v1",
-      "model": "gpt-4o-mini",
+      "model": "gpt-luna",
       "upstream_model": "qwen2.5-7b-instruct",
       "provider_name": "qwen",
       "context_window": 32768,
