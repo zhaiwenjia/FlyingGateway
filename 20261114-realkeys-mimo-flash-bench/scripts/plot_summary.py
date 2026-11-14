@@ -52,16 +52,22 @@ def grouped(ax, xs, gw, ll, ylabel, fmt="{:g}"):
     ax.set_ylim(0, max(max(gw), max(ll)) * 1.28)
     style(ax)
 
+# 纳入图的轮次：网关 = P7/P8（生产形：契约桶开 + 并发闸 16000 + 过载闸 16500，
+# 新二进制）；LiteLLM = P5/P6（其配置与代码未变）。P3/P4 = 旧默认令牌桶反面教材
+#（454 rps 隐藏天花板），P5/P6 网关 = 关桶容量口径，均留 raw/ 不入图。
+ROUNDS = {"gateway": ("P7", "P8"), "litellm": ("P5", "P6")}
+
 def load_ladder():
     """raw/ladder/{tag}_{target}_c{c}.json → {target: {c: [每轮摘要]}}。
-    各指标取跨轮中位（图注口径「2 轮取中位」）。"""
+    吞吐取**成功口径** ok/wall_s（尝试口径含失败反弹，会虚高）；各指标跨轮取中位。"""
     data = {}
-    for f in sorted(glob.glob(os.path.join(LADDER, "*_c*.json"))):
-        name = os.path.basename(f)[:-len(".json")]
-        tag, target, c = name.split("_")
-        c = int(c[1:])
-        s = json.load(open(f))["summary"]
-        data.setdefault(target, {}).setdefault(c, []).append(s)
+    for target, tags in ROUNDS.items():
+        for tag in tags:
+            for f in sorted(glob.glob(os.path.join(LADDER, f"{tag}_{target}_c*.json"))):
+                name = os.path.basename(f)[:-len(".json")]
+                c = int(name.split("_")[2][1:])
+                s = json.load(open(f))["summary"]
+                data.setdefault(target, {}).setdefault(c, []).append(s)
     return data
 
 def median_of(recs, getter):
@@ -73,7 +79,7 @@ lv = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 lad = load_ladder()
 series = {}
 for target in ("gateway", "litellm"):
-    rps = [median_of(lad.get(target, {}).get(c, []), lambda r: r["throughput_rps"]) for c in lv]
+    rps = [median_of(lad.get(target, {}).get(c, []), lambda r: r["ok"] / r["wall_s"]) for c in lv]
     p50 = [median_of(lad.get(target, {}).get(c, []), lambda r: r["latency_ms"]["p50"]) for c in lv]
     series[target] = {"rps": rps, "p50": p50}
 
@@ -87,7 +93,7 @@ for ax, key, ylabel in ((axes[0], "rps", "吞吐量（req/s，越高越好）"),
     ax.plot(lv, ll[key], marker="s", ms=5, color=LL, label="LiteLLM")
     ax.set_xscale("log", base=2)
     ax.set_xticks(lv)
-    ax.set_xticklabels([str(v) for v in lv], fontsize=9)
+    ax.set_xticklabels([str(v) if i % 2 == 0 else "" for i, v in enumerate(lv)], fontsize=9)
     ax.set_xlabel("并发请求数（log2）")
     ax.set_ylabel(ylabel)
     ax.legend(fontsize=11)
@@ -99,18 +105,17 @@ axes[0].annotate(f"峰值 {gw_peak:.0f}", (lv[gw["rps"].index(gw_peak)], gw_peak
                  textcoords="offset points", xytext=(0, 8), ha="center", fontsize=10, color=GW)
 axes[0].annotate(f"峰值 {ll_peak:.0f}", (lv[ll["rps"].index(ll_peak)], ll_peak),
                  textcoords="offset points", xytext=(0, 8), ha="center", fontsize=10, color=LL)
-axes[0].text(0.5, -0.22, f"峰值吞吐量约为 LiteLLM 的 {gw_peak / ll_peak:.1f}×；LiteLLM 超出容量后断连丢请求、吞吐塌落",
+axes[0].text(0.5, -0.30, f"峰值吞吐量（成功 req/s）约为 LiteLLM 的 {gw_peak / ll_peak:.1f}×",
              transform=axes[0].transAxes, ha="center", fontsize=11, color="#333333")
 
 axes[1].set_title("延迟对比（P50）", fontsize=14, fontweight="bold")
 axes[1].axhline(300, color="#999999", linewidth=1, linestyle="--")
-axes[1].text(lv[0], 300, " 上游基线 300ms", fontsize=9, color="#777777", va="bottom")
-axes[1].text(0.5, -0.22, f"FlyingGateway 全程贴近基线（最高档附加 ≈{max(gw['p50']) - 300:.0f}ms）；"
-                         f"LiteLLM 高并发攀升至 {max(v for v in ll['p50'] if v == v):.0f}ms",
+axes[1].text(lv[-1], 240, "上游基线 300ms ", fontsize=9, color="#777777", va="top", ha="right")
+axes[1].text(0.5, -0.30, f"c≤1024 贴基线（附加 <20ms）；过载档排队至 {max(gw['p50']) / 1000:.1f}s（LiteLLM {max(v for v in ll['p50'] if v == v) / 1000:.1f}s）",
              transform=axes[1].transAxes, ha="center", fontsize=11, color="#333333")
-fig.suptitle("吞吐量 / 延迟 vs 并发（固定 300ms 上游延迟 · 闭合式 1→16384 指数阶梯 · 2 轮取中位）",
+fig.suptitle("吞吐量 / 延迟 vs 并发（固定 300ms 上游延迟 · 闭合式 1→16384 指数阶梯 · 2 轮取中位 · 生产形配置）",
              fontsize=14, fontweight="bold")
-fig.tight_layout(rect=[0, 0.04, 1, 0.94])
+fig.tight_layout(rect=[0, 0.17, 1, 0.94])
 p1 = os.path.join(IMG, "20261114-perf-throughput-latency.png")
 fig.savefig(p1, dpi=130)
 

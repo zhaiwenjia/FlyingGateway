@@ -1,160 +1,245 @@
 <div align="center">
 
-<img src="docs/images/flying-gateway-icon.jpg" alt="FlyingGateway" width="220">
+<img src="images/flying-gateway-icon.jpg" alt="FlyingGateway" width="220">
 
 # FlyingGateway
 
-**智能体 LLM 网关** —— 多模型端点注册、请求路由与分发、失败重试与降级。
+**智能体 LLM 网关** —— 多供应商端点注册、路由与降级、统一计量与治理。
 
 </div>
 
 ## 一、项目概述
 
-面向智能体（agent）的 LLM 网关。一个 agent 的请求往往要打到**不同模型**上
-（快的打热路径、强的打难任务、贵的要省着），网关就是中间那层：
+面向智能体（agent）的多供应商 LLM 网关：客户端用**一个 OpenAI 兼容入口**打任意注册模型，
+网关负责把请求映射到对应供应商上游，并在转发链路上补齐网关该有的治理语义。
 
-- **注册** —— 登记可用端点（地址、模型、上下文窗口、超时、重试预算、优先级）；
-- **路由** —— 按策略决定主端点（`priority` 优先级 / `round_robin` 轮转）；
-- **降级** —— 主端点失败时沿一条**显式有序**的降级链回退。
+**设计要点**：
 
-**技术栈：Go**（实现设计见 `docs/`）。当前进度：**约束体系与 CI 已就绪**
-（AGENTS.md 规则、Go 门禁流水线、git tag 版本机制），**实现代码待写**。
+- **统一入口、注册表映射** —— `/v1/chat/completions`、`/v1/responses` 双入口同管线；
+  用户面只认注册表里的模型别名，别名 → 上游模型 / 端点 / 协议形状的映射全在注册表，
+  新增供应商只加注册表条目与适配器，不改调用方。
+- **11 家供应商适配** —— OpenAI、Anthropic、Gemini、DeepSeek、Qwen、智谱、Kimi（moonshot）、
+  MiniMax、MiMo（xiaomi）、Grok（xai）、Ollama；出站统一 Chat Completions 形，
+  usage 逐家归一到统一口径，费用按费率表计量。
+- **路由与降级** —— `priority`（显式有序降级链）/ `round_robin` 两种策略；
+  路由决策可复现（同输入 + 同注册表 + 同配置 ⇒ 同一决策），降级目标不可用时显式报错、
+  不静默换端点。
+- **治理语义** —— 错误九分类与可重试性、重试与降级分账、token 级限流与预算、
+  超时 / 取消 / 上游错误三分、流式逐帧转发与断连检测、显式取消（`/v1/cancel`）。
+- **安全** —— 凭据只从环境变量读（注册表只存来源引用）、日志与轨迹统一脱敏
+  （`[REDACTED:<类型>]`）、出网目标校验（默认禁内网，环回需显式放行）。
+
+技术栈 **Go 1.27**，核心链路纯标准库（供应商 SDK 仅 3 个官方库）。
 
 ## 二、目录结构
 
-⚠️ **本段按实测写**（口径：`find . -name '*.go' -not -path './reference/*' | wc -l`），
-改动目录结构后请重新实测再改这里（`AGENTS.md` 铁律 2：文档描述必须与实况一致）。
-
-> 当前实测（2026-11-14 统一 SDD 实现落地后）：`.go` 文件 **94** 个（实现 55 + 测试 39），
-> 测试 **288** 项全绿（`go test -race ./...`）；模块划分与依赖方向见
-> 《docs/20261114-统一SDD实现-实现计划.md》，逐项测试清单见
-> 《docs/20261114-统一SDD实现-测试报告.md》。
-
 ```
-FlyingGateway/                ← 仓库根
-├── go.mod                    module github.com/zhaiwenjia/FlyingGateway（go 1.27；3 个官方 SDK：
-│                             openai-go/v3 + anthropic-sdk-go + google.golang.org/genai）
-├── .env                      运行配置（含真值，不提交）
-├── .env.example              配置模板（提交，告诉别人要配哪些项）
-├── .gitignore
-├── AGENTS.md                 ★ 协作规则的唯一来源
+FlyingGateway/                  ← 仓库根
+├── go.mod / go.sum             module github.com/zhaiwenjia/FlyingGateway（go 1.27）
+├── .env / .env.example         运行配置（真值只存 .env，⛔ 不入库）
+├── AGENTS.md                   ★ 协作规则的唯一来源
 ├── README.md
 ├── LICENSE
+├── images/                     logo 等静态资源
 ├── cmd/
-│   └── gateway/              进程入口（装配/标志/优雅关闭/-version）
+│   └── gateway/                程序入口（flag 解析、装配、启动）
 ├── internal/
-│   ├── core/                 规范模型（Request/Response/Usage/Cost/ErrorDetail/Resolution）
-│   ├── stream/               统一帧抽象 + SSE/NDJSON 容错解析核心
-│   ├── detect/               供应商识别（host 优先 / 前缀兜底 / 歧义消解）
-│   ├── routing/              上下文越界判定 + 按失败类型分链
-│   ├── registry/             端点注册表（9.2 schema，未知字段拒绝）
-│   ├── codec/
-│   │   ├── chat/             入站 Chat 形状 ⇄ 规范 + 客户端帧编码器
-│   │   └── responses/        入站 Responses 形状 ⇄ 规范 + 事件编码器
-│   ├── adapter/              11 家供应商适配器（请求构造/响应解析/usage/流式解码）
-│   ├── usage/                token 用量归一化（逐家口径）
-│   ├── cost/                 费用计算（峰谷/阶梯/缓存分档/费率加载自检）
-│   ├── errors/               错误分类（九值）+ 原始上游信息保留
-│   ├── security/             凭据解析 + 出网校验 + 出口层统一遮蔽
-│   ├── policy/               token 级限流 / 预算 / 护栏
-│   ├── telemetry/            gen_ai.* / gateway.* 属性单一映射层 + span + 指标
-│   ├── server/               路由/执行/取消注册表/响应收口/管理面
-│   └── version/              版本载体（ldflags 注入点）
+│   ├── server/                 HTTP 服务：双入口管线、调用方鉴权、取消注册表、管理面
+│   ├── core/                   核心契约（请求/响应/流帧/Provider 枚举）
+│   ├── codec/                  入站编解码（Chat / Responses 两形）
+│   ├── stream/                 流式转发、SSE 扫描与帧编码
+│   ├── adapter/                11 家供应商适配器（出站协议转换、usage 归一）
+│   ├── registry/               端点注册表（路由的唯一真源）
+│   ├── routing/                路由与降级链
+│   ├── detect/                 断连检测
+│   ├── policy/                 限流与预算（令牌桶、token 预算）
+│   ├── security/               出网校验、凭据脱敏
+│   ├── usage/                  用量归一
+│   ├── cost/                   费用计量（费率表驱动）
+│   ├── errors/                 错误九分类
+│   ├── telemetry/              日志与指标（异步批量）
+│   └── version/                版本载体（-ldflags 注入点）
 ├── config/
-│   ├── gateway.example.json  示例网关配置（9.2 完整字段 + fallback_chains）
-│   └── rates.json            费率数据（生成物，与统一 SDD 5.4 对账由单测钉住）
-├── docs/                     调研与结论文档（含统一 SDD、实现计划、测试报告）
-├── progress/                 事件流日文件（YYYY-MM-DD.md）
-├── specs/                    需求规格（spec 驱动）
-└── reference/                外部参考代码（只读，不参与构建/测试/CI）
+│   ├── gateway.example.json    端点注册表样例
+│   └── rates.json              费率表（费用计量数据源）
+├── progress/                   事件流日文件（YYYY-MM-DD.md）
+├── specs/                      需求规格
+├── reference/                  外部参考代码（只读，不参与构建/测试/CI）
+└── 20261114-*/                 实验与基准目录（一实验一目录：README + 原始产物 + 可复现脚本）
 ```
 
 ## 三、快速开始
 
 需 Go 1.27+（[go.dev](https://go.dev/dl/)）。
 
+**1. 构建**
+
 ```bash
-go build ./...                   # 编译
-go test -race ./...              # 全量测试（含竞态检测）
-go run ./cmd/gateway             # 运行入口（待建）
+go build -o bin/gateway ./cmd/gateway
 ```
 
-## 四、真实 API 实测与性能对比（2026-11-14）
+**2. 配环境变量**（凭据只从环境变量读，⛔ 不入库、不进命令行明文）
 
-> 8 个真实 key 实测定性 → 5 家有效 key 过全功能矩阵（**50/50 PASS**）→ Chat vs Responses 方法 A/B（**五家全部 Chat 胜出，出站已统一 Chat Completions**）→ mimo-v2.6-flash 高并发压测对比 LiteLLM。逐项数据/脚本/复现见 [`20261114-realkeys-mimo-flash-bench/`](20261114-realkeys-mimo-flash-bench/README.md)。
-
-**key 状态**（8 个）：✅ 有效 5（Qwen / 智谱 / DeepSeek / Kimi / MiMo，各家费率最低模型实调 200）；❌ OpenAI（403 区域封锁）、MiniMax（鉴权拒绝）、火山（鉴权有效但未开通任何模型）。有效 key 存 `.env`（⛔ 不入库）。
-
-**方法 A/B（同电池 4 项：基础/工具/reasoning/流式）**：
-
-| 供应商 | Chat 法 | Responses 法 | 裁定 |
-|---|---|---|---|
-| Qwen | 4/4 | 2/4（tools、stream 丢） | **Chat** |
-| 智谱 | 4/4 | 0/4（无 /responses 端点） | **Chat** |
-| DeepSeek | 4/4 | 2/4 | **Chat** |
-| Kimi | 4/4 | 2/4 | **Chat** |
-| MiMo | 4/4 | 3/4（stream 丢） | **Chat** |
-
-**mimo-v2.6-flash 真实网络压测**（同负载，每档 **6 轮取中位**；**成功率恒 100%** 为验收口径，不作图）：
-
-| 指标 | 并发 1 | 并发 8 | 并发 32 |
-|---|---|---|---|
-| FlyingGateway P50/P99 (ms) | 1305 / 11503 | 1964 / 6259 | 2356 / 8418 |
-| LiteLLM P50/P99 (ms) | 1638 / 6783 | 1746 / 5702 | 2297 / 8131 |
-| FlyingGateway 吞吐 (req/s) | 0.38 | 2.72 | 6.39 |
-| LiteLLM 吞吐 (req/s) | 0.46 | 2.94 | 6.13 |
-
-**本地隔离对比（固定 300ms 上游延迟，剥离上游波动，c=8 × 3 轮）**——网关自身开销仅 **≈4%**，LiteLLM ≈22%：
-
-| 链路 | 吞吐 (req/s) | P50 (ms) | 单请求开销 |
-|---|---|---|---|
-| 直连假上游 | 25.7–25.8 | ~308 | — |
-| **FlyingGateway** | **24.7–25.2** | ~315 | **+7~14ms（4%）** |
-| LiteLLM | 18.8–21.8 | ~369 | +60~67ms（22%） |
-
-**优化后性能对比（图表）**——受控基准（固定 300ms 上游延迟，2 轮取中位；两侧同假上游同脚本，仅各自处理开销不等）：
-
-![优化后吞吐量与延迟](docs/images/20261114-perf-throughput-latency.png)
-
-- 吞吐量（req/s，c1/c8/c32）：3.29 / 26.2 / 102.5，vs LiteLLM 3.14 / 23.1 / 69.4；32 并发约为 LiteLLM 的 1.48×。
-- 端到端延迟 P50（ms）：304 / 304 / 308——紧贴上游基线（300ms），网关附加延迟 ≈ 4ms；LiteLLM 314 / 346 / 432，高并发时附加 +124ms。
-- 过载特性：容量内吞吐随并发近线性增长、延迟稳定；超出容量后吞吐不再增长而延迟上升。
-
-**解读**：真实上游的 6 轮中位两侧基本打平（轮间波动主导，c8 单轮双方都在 0.8–4.2 rps 荡）；**受控隔离下网关开销显著低于 LiteLLM**。c=8 档曾单独落后，瓶颈定位为 **Go 默认传输层 `MaxIdleConnsPerHost=2`**（中等并发下连接用完即关、下一波全量 TLS 重连）——已修复（保活 100/host），修复后网关 c8 单轮 2.80→4.16 rps、P99 4709→2439ms。网关的差异化在**治理语义**（超时可重试保成功率、取消即停、重试与降级分账、token 级限流、usage 归一与费用计量）与**低自身开销**。
-
-**超高并发等价模拟（1k→100k 在途风暴，长持 30s）**——详见 [`20261114-ultra-concurrency-sim/`](20261114-ultra-concurrency-sim/README.md)：
-
-![并发容量与单连接内存](docs/images/20261114-perf-capacity-mem.png)
-
-- 最大并发容量（成功在途）：~16,500 vs ~2,000（约 3 倍）；单连接内存 146 vs 450 KB（RSS/连接）。
-- 超限语义：FlyingGateway 返回 502 优雅拒绝（连接正常关闭）；LiteLLM 断连丢弃在途请求。过载恢复 1.5ms vs 4.9s。
-
-| | FlyingGateway | LiteLLM |
-|---|---|---|
-| 成功在途封顶 | **~16–17k**（超限优雅 502） | **~2k**（超限 RST 丢连接） |
-| TTFB P50 | **1.7–2.4ms** | 654–721ms（~300×） |
-| RSS / 连接 | **~146KB** | ~450KB（~3×） |
-| 风暴后恢复 P50 | **1.5ms**（10 万过载后 123ms） | 267ms→4.9s |
-
-**决定性发现**：网关出站本地端口 bind 排他（Go Dialer 无 SO_REUSEADDR）⇒ 单源 IP 出站上限 = 临时端口池 **16,384**——100k 到不了的卡点是它（fd/内存均非瓶颈）；部署建议：多源 IP/多实例横向扩出站、fd 预算 ≈ 2× 在途、连接爬坡越过 `somaxconn=128`。
-
-**全链路性能优化（OPT-05~13 台账见 [`20261114-realkeys-mimo-flash-bench/OPT-LOG.md`](20261114-realkeys-mimo-flash-bench/OPT-LOG.md)）**：SSE 扫描器缓冲池化（alloc 54% 单点，B/op −57~64%）、帧编码器 5/4→1 allocs、chunk 解码去反射（ns 0.2×、allocs 52–55→4–7）、日志批量异步（−47% 且移出请求路径）、Redact 快路径（−94%、clean 0 alloc）、费用计算 −60%；330+ 测试全绿、逐项 `-benchmem` 前后对照。
-
-**实测驱动的修复**（真捕获样本钉死）：MiMo 流式 usage 两拍收口、Kimi `choices[0].usage` 非顶层探测、Grok/Qwen/MiMo 三处 usage 口径——详见测试报告第五节。
-
-## 五、文档索引
-
-| 文档 | 内容 |
+| 变量 | 用途 |
 |---|---|
-| [`docs/20261114-统一SDD.md`](docs/20261114-统一SDD.md) | ★ **开发唯一标准**：统一软件设计文档（目标与硬约束 + 五域设计 + 供应商契约 + 费用计量与 6.4 费率总表 + 配置 / 模块 / 测试 + 验收），自包含，冲突以它为准 |
-| [`docs/全文 SDD.md`](docs/全文%20SDD.md) | SDD 写作参考范例（课程文本，仅供文档结构与写法参考） |
-| [`docs/20261112-网关能力-调研-整体设计.md`](docs/20261112-网关能力-调研-整体设计.md) | 网关能力五域调研（协议/注册/执行、路由/上下文、错误/治理、可观测、安全），含流式取消专题（证据留档） |
-| [`docs/20261112-多供应商API-Schema-调研-接口与用量口径.md`](docs/20261112-多供应商API-Schema-调研-接口与用量口径.md) | 11 家供应商的 API schema 与 token 用量口径对照（证据留档） |
-| [`docs/20261112-多供应商网关-Go实现设计.md`](docs/20261112-多供应商网关-Go实现设计.md) | Go 实现设计（统一格式、出站优先级链、取消语义、费用计量；结论已吸收进统一 SDD） |
-| [`docs/20261113-供应商模型费率表.md`](docs/20261113-供应商模型费率表.md) | 供应商模型费率表（2026-11-13 快照留档；**费用数据的唯一真源是统一 SDD 6.4 费率总表**） |
+| `<credential_ref>` | 上游凭据。注册表每条 endpoint 的 `credential_ref` 写**环境变量名**（如 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`），真值由环境注入 |
+| `GATEWAY_CALLER_KEYS` | 调用方 API key 白名单（逗号 / 换行分隔）。非空 ⇒ `/v1/*` 强制鉴权；留空 = 开放模式 |
+| `GATEWAY_ADMIN_TOKEN` | 管理面鉴权 token（仅开管理面时需要） |
 
-## 六、协作
+**3. 配置文件**
 
-本仓的协作规则（禁止 mock / 占位、证据与复核、git tag 版本机制、CI 口径、
-调研纪律、代码规模两档等）全在 [`AGENTS.md`](AGENTS.md) —— **那是唯一来源**。
-事件流在 `progress/`，技术结论在 `docs/`。
+- `config/gateway.example.json` —— 端点注册表（字段说明见「四、出入口使用 / 出口」）；
+- `config/rates.json` —— 费率表（每模型各类 token 的绝对单价，费用计量数据源）。
+
+**4. 运行**
+
+```bash
+./bin/gateway -config config/gateway.example.json -rates config/rates.json -listen 127.0.0.1:8080
+```
+
+**5. 验证**
+
+```bash
+curl http://127.0.0.1:8080/health
+# {"status":"ok"}
+```
+
+## 四、出入口使用
+
+### 4.1 入口（客户端 → 网关）
+
+OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
+`Authorization: Bearer <key>`（缺失 / 无效 ⇒ 401）。
+
+| 方法与路径 | 说明 |
+|---|---|
+| `POST /v1/chat/completions` | Chat Completions 兼容（流式 / 非流式）。`model` 填注册表的模型别名 |
+| `POST /v1/responses` | OpenAI Responses 兼容入口（同一转发管线） |
+| `GET /v1/models` | 列出注册表模型别名与能力（tools / stream / vision、上下文窗口、输出上限） |
+| `POST /v1/cancel` | 显式取消在途执行，请求体 `{"client_request_id": "..."}` |
+| `GET /health` | 存活探针（不鉴权） |
+
+**非流式调用**：
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
+```
+
+**流式调用**（`"stream": true`，收 SSE 帧；末帧带 usage 归一后计量）：
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
+```
+
+**请求标识与取消**：可选请求头 `X-Client-Request-Id` 携带本轮唯一标识（不传则网关生成），
+后续用它取消：`POST /v1/cancel` 传 `{"client_request_id": "..."}`，返回 `{"cancelled": true|false}`
+（fire-and-forget：查不到 / 已收口静默忽略）。同 id 已有执行在途 ⇒ 409 `request_in_flight`；
+该 id 已进取消终态 ⇒ 409 `request_cancelled`。
+
+**错误形态**：统一 OpenAI 风格 error 对象（`code` / `type` / `message`），错误九分类
+（auth、invalid_request、request_too_large、request_in_flight、request_cancelled、
+rate_limited、timeout、cancelled、upstream_error 等）；凭据类信息一律脱敏。
+
+**请求上限**：请求体 32 MB（超出 413 `request_too_large`）。
+
+### 4.2 出口（网关 → 上游）
+
+出口由**端点注册表**（`-config` 指定的 JSON）描述，`strategy` 定路由策略，
+`endpoints[]` 每条登记一个上游端点：
+
+| 字段 | 含义 |
+|---|---|
+| `name` | 端点名（日志 / 指标用） |
+| `base_url` | 上游地址（含 `/v1`） |
+| `model` | **用户面模型别名**（客户端 `model` 字段填它） |
+| `upstream_model` | 上游真实模型名（网关出站时替换） |
+| `provider_name` | 适配器：`openai` / `anthropic` / `gemini` / `deepseek` / `qwen` / `zhipu` / `moonshot` / `minimax` / `xai` / `xiaomi` / `ollama` |
+| `context_window` | 上下文窗口（token） |
+| `max_output_tokens` | 输出上限（token） |
+| `capabilities` | 能力标记：`supports_tools` / `supports_stream` / `supports_vision` |
+| `credential_ref` | **凭据来源引用**（环境变量名，⛔ 不是凭据本身） |
+| `timeout_s` | 单次上游调用超时（秒） |
+| `max_retries` | 重试上限（重试打同一端点，与降级分开计数） |
+| `priority` | 降级优先级（`strategy=priority` 时数值小者先） |
+| `rate_limit` | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值 |
+| `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口） |
+| `limits_group` | 可选，配额共享组名：同组端点共享一份 `rate_limit` / `concurrency_limit` 计数（同供应商多模型 / 多 key / 多部署共享配额池的语义）；空 = 自成一组，同组声明必须逐字一致 |
+
+- **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
+  不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。
+- **配额与过载（锚点分离）**：限流锚定套餐契约（`rate_limit` / 顶层 `caller_rate_limits`
+  按 key 登记，`key_ref` = 环境变量名），过载保护锚定实测容量（`--max-in-flight`）；
+  两道闸并联判定，超限一律 `429` + `Retry-After`。多供应商混合流量下，每次上游尝试
+  占它命中端点（或其共享组）的并发位与配额 —— 降级换供应商即换计数主体。
+- **出站协议**：统一 Chat Completions 形（实测裁定），流式经 SSE 逐帧转发；
+  usage 逐家归一后计量费用（费率表）。
+- **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
+- **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
+  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）与
+  `GET /admin/health`。⛔ 管理面不绑公网。
+
+## 五、运行参数
+
+长选项与单字母缩写双形式等价（如 `--config` / `-c`）。
+
+| 参数 | 短 | 说明 | 默认 |
+|---|---|---|---|
+| `--config` | `-c` | 端点注册表配置路径（JSON） | `config/gateway.example.json` |
+| `--rates` | `-r` | 费率表路径（JSON） | `config/rates.json` |
+| `--listen` | `-l` | 数据面监听地址（host:port） | `127.0.0.1:8080` |
+| `--admin-listen` | `-a` | 管理面监听地址（须内网 IP，⛔ 不绑公网） | 关闭 |
+| `--allow-loopback` | `-L` | 出网校验放行环回地址（本地 Ollama 等） | 关 |
+| `--pprof-listen` | `-p` | pprof 排障端点（只绑环回，⛔ 不绑公网） | 关闭 |
+| `--cancel-grace` | `-g` | 延迟取消窗口（0 = 立即取消） | `0` |
+| `--cancel-grace-provider` | `-G` | 按 provider 覆盖延迟窗口（`provider=时长`，可重复） | — |
+| `--detect-bound` | `-d` | 断连检测延迟上界 | `1s` |
+| `--rate-capacity` | `-C` | token 限流桶容量（0 = 不限流） | `0` |
+| `--rate-refill` | `-R` | token 限流补充速率（token/秒） | `0` |
+| `--budget-tokens` | `-B` | 每调用方 token 预算上限（0 = 不限） | `0` |
+| `--caller-bucket-capacity` | `-K` | 每调用方令牌桶的全局兜底容量（契约配额走 `caller_rate_limits`；0 = 关闭） | `0` |
+| `--caller-bucket-refill` | `-E` | 每调用方令牌桶的全局兜底补充速率（token/秒） | `0` |
+| `--upstream-bucket-capacity` | `-U` | 每自有令牌的本地令牌桶容量（契约配额走注册表 `rate_limit`；0 = 关闭） | `0` |
+| `--upstream-bucket-refill` | `-u` | 每自有令牌的本地令牌桶补充速率（token/秒） | `0` |
+| `--rate-limit-cooldown` | `-k` | 上游 429 无 Retry-After 时的令牌默认冷却 | `30s` |
+| `--max-token-wait` | `-m` | 全部令牌受限时的最长等待（超上限 ⇒ 429 + Retry-After） | `3s` |
+| `--max-in-flight` | `-i` | 过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After） | `0` |
+| `--guardrail-pattern` | `-P` | 护栏正则（可重复） | — |
+| `--guardrail-webhook` | `-W` | 护栏 Webhook URL（空 = 只做正则） | — |
+| `--version` | — | 打印版本号后退出 | — |
+
+## 六、性能对比（与 LiteLLM，简要）
+
+受控基准（固定 300ms 上游延迟，闭合式 1→16384 并发指数阶梯，2 轮取中位；两侧同假上游同压测器；
+生产形配置 = 契约桶开 + 并发闸 16000 + 过载闸 16500）：
+
+![吞吐量与延迟](images/20261114-perf-throughput-latency.png)
+
+| 指标 | FlyingGateway | LiteLLM |
+|---|---|---|
+| 峰值吞吐量（成功 req/s，2 轮中位） | **5797**（c=4096） | 219（c=256） |
+| 端到端延迟 P50，c≤1024 | **301–316ms**（贴 300ms 上游基线） | 325ms 起爬升至 1.5s |
+| 最大并发容量（成功在途） | **~16.5k**（超限 502 优雅拒绝） | ~2k（超限断连丢请求） |
+| 单连接内存（RSS/连接） | **~146KB** | ~450KB |
+
+![并发容量与单连接内存](images/20261114-perf-capacity-mem.png)
+
+- 过载语义：FlyingGateway 超限返回 502 优雅拒绝、恢复 P50 1.5ms；LiteLLM 断连丢弃在途请求、恢复 267ms→4.9s。
+- 口径注记：吞吐为**成功口径**；顶档（c≥8192）轮间方差大（一轮出 502 浪潮、一轮排队无失败），图为 2 轮中位。
+- 单源 IP 出站本地端口 bind 排他（16384 端口池）是超高并发的硬上限；部署建议：多源 IP / 多实例横向扩出站。
+
+## 七、测试与版本
+
+```bash
+gofmt -l .            # 格式门禁（有输出即失败）
+go vet ./...          # 静态检查
+go test -race ./...   # 全量测试（含竞态检测）
+```
+
+版本 = **git tag**（`v主.大.小`），⛔ 不在源码硬编码版本常量；需要运行时版本的构建用
+`-ldflags` 注入 `internal/version` 的 `Version` 变量。协作规则见 [`AGENTS.md`](AGENTS.md)。
