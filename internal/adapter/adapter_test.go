@@ -181,8 +181,9 @@ func TestForShapeUnsupported(t *testing.T) {
 }
 
 // TestForDefaultShape 钉住 For() 的默认出站形状（SDD 3.6 / defaultShapeFor 注释口径）：
-// OpenAI / Grok / DeepSeek / Kimi / 智谱 / Qwen 兼容 / 小米 ⇒ Responses；
-// Claude ⇒ Messages；Gemini ⇒ 原生；MiniMax ⇒ OpenAI 形；Ollama ⇒ 原生 /api/chat。
+// OpenAI / Grok / Qwen 兼容 ⇒ Responses；DeepSeek / Kimi / 智谱 / 小米 ⇒ Chat Completions
+// （真实流为 chat.completion.chunk 形）；Claude ⇒ Messages；Gemini ⇒ 原生；MiniMax ⇒ OpenAI 形；
+// Ollama ⇒ 原生 /api/chat。
 // 错误实现会红：默认形状错配 ⇒ OutboundShape 断言不匹配即红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestForDefaultShape -v
 func TestForDefaultShape(t *testing.T) {
@@ -194,12 +195,12 @@ func TestForDefaultShape(t *testing.T) {
 		{core.ProviderAnthropic, ShapeAnthropicMessages},
 		{core.ProviderGemini, ShapeGeminiNative},
 		{core.ProviderXAI, ShapeResponses},
-		{core.ProviderDeepSeek, ShapeResponses},
-		{core.ProviderMoonshot, ShapeResponses},
-		{core.ProviderZhipu, ShapeResponses},
+		{core.ProviderDeepSeek, ShapeChatCompletions},
+		{core.ProviderMoonshot, ShapeChatCompletions},
+		{core.ProviderZhipu, ShapeChatCompletions},
 		{core.ProviderQwen, ShapeResponses},
 		{core.ProviderMiniMax, ShapeChatCompletions},
-		{core.ProviderXiaomi, ShapeResponses},
+		{core.ProviderXiaomi, ShapeChatCompletions},
 		{core.ProviderOllama, ShapeOllamaNative},
 	}
 	for _, c := range cases {

@@ -111,9 +111,10 @@ type execHandle struct {
 	mu            sync.Mutex
 	state         execState
 	reason        string
-	provider      string      // 当前尝试落到的 provider（按 provider 覆盖 cancel_grace_period 用）
-	upstreamModel string      // 当前执行的上游模型标识（费率查询用）
-	finalUsageVal *core.Usage // 终态用量（请求级记账用）
+	provider      string        // 当前尝试落到的 provider（按 provider 覆盖 cancel_grace_period 用）
+	upstreamModel string        // 当前执行的上游模型标识（费率查询用）
+	finalUsageVal *core.Usage   // 终态用量（请求级记账用）
+	retryHint     time.Duration // 本地池闸拒绝的最短等待（Retry-After 头取值）
 	grace         func(provider string) time.Duration
 	timer         *time.Timer // 延迟窗口定时器（三路径清理，⛔ 不泄漏）
 	detectedAt    time.Time   // 取消触发（检测）时刻
@@ -164,6 +165,21 @@ func (h *execHandle) markWritten() { h.written.Store(true) }
 
 // committed 返回是否已向客户端提交（写了响应头 / 分片 / 终止帧）。
 func (h *execHandle) committed() bool { return h.written.Load() }
+
+// setRetryAfterHint 记一次「本地池闸拒绝」的最短等待（token_pool_exhausted 的
+// Retry-After 头取值；core.ErrorDetail 无该槽位，经句柄带到写响应处）。
+func (h *execHandle) setRetryAfterHint(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.retryHint = d
+}
+
+// retryAfterHint 返回本地池闸拒绝的最短等待。
+func (h *execHandle) retryAfterHint() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.retryHint
+}
 
 // markUpstreamStarted 登记上游执行已发起。
 func (h *execHandle) markUpstreamStarted() { h.started.Store(true) }

@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:29:38.429
+// 日期: 2026-11-14 16:38:51.637
 // 作者: Zhai Wenjia
 
 package adapter
@@ -8,6 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
@@ -21,6 +25,12 @@ import (
 // 请求体：input[] 异构 item、instructions 顶层、reasoning 对象、prompt_cache_key 透传；
 // 响应体：output[] 异构联合（⛔ 不假设 output[0] 是 message）、encrypted_content 保留；
 // 流式：SSE `event:` + `data:` 双字段、response.* 事件、sequence_number；usage 在 response.completed。
+//
+// 请求构造走 openai-go/v3 的 typed 参数（统一 SDD 3.6 / 10.3：响应系共用 openai-go/v3）：
+// responses.ResponseNewParams 序列化出 Outbound.Body，BuildRequest / ParseResponse 的
+// body []byte 签名不变（SDK 返回值先序列化再传入）。流式 HTTP 执行保留 streamRequest
+//（Tier 2 兜底，依据见交付报告「每家 Tier」一节），流事件解析用 SDK 的
+// responses.ResponseStreamEventUnion（SDK 值经 RawJSON 序列化后进既有归一）。
 
 type openaiAdapter struct {
 	hc *http.Client
@@ -44,102 +54,228 @@ func (a *openaiAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderOpenAI, usageTreeShape(raw), raw)
 }
 
-// ---- 请求体（Responses 形状，4.3.1「Responses 第二模式请求体关键字段」逐字段）----
+// ---- 请求体（Responses 形状，SDK typed 参数：responses.ResponseNewParams）----
 
-type openAIReq struct {
-	Model              string            `json:"model"`
-	Input              []openAIInputItem `json:"input"`
-	Instructions       string            `json:"instructions,omitempty"`
-	Tools              []openAITool      `json:"tools,omitempty"`
-	ToolChoice         any               `json:"tool_choice,omitempty"`
-	Reasoning          *openAIReasoning  `json:"reasoning,omitempty"`
-	MaxOutputTokens    int               `json:"max_output_tokens,omitempty"`
-	PromptCacheKey     string            `json:"prompt_cache_key,omitempty"`
-	PreviousResponseID string            `json:"previous_response_id,omitempty"`
-	Stream             bool              `json:"stream,omitempty"`
+// openAIInputItems 把规范消息拆成 Responses input item（4.2.3：Chat → Responses = 一条 message
+// 拆多个 item；SDK union：responses.ResponseInputItemUnionParam）。
+// system 消息不出 item，返回给调用方并入顶层 instructions（4.2.2）。
+func openAIInputItems(m core.Message) (items []responses.ResponseInputItemUnionParam, sys string, err error) {
+	if m.Role == "system" {
+		return nil, contentText(m.Content), nil
+	}
+	if m.Role == "tool" {
+		// 工具结果 ⇒ function_call_output（4.2.2：Responses 的工具结果是独立 item）。
+		out := responses.ResponseInputItemFunctionCallOutputParam{}
+		if m.ToolCallID != "" {
+			out.CallID = param.NewOpt(m.ToolCallID)
+		}
+		if text := contentText(m.Content); text != "" {
+			out.Output.OfString = param.NewOpt(text)
+		}
+		return []responses.ResponseInputItemUnionParam{{OfFunctionCallOutput: &out}}, "", nil
+	}
+	// 推理链回放：EncryptedContent 是语义字段（⛔ 必须保留，4.2.5）。
+	if m.EncryptedContent != "" || m.ReasoningContent != "" {
+		ri := responses.ResponseReasoningItemParam{}
+		if m.EncryptedContent != "" {
+			ri.EncryptedContent = param.NewOpt(m.EncryptedContent)
+		}
+		if m.ReasoningContent != "" {
+			ri.Content = []responses.ResponseReasoningItemContentParam{{Text: m.ReasoningContent}}
+		}
+		// 旧 wire 的 reasoning item 不带 id（omitempty）；SDK 的必填 id 零值会序列化成
+		// "id":"" ⇒ 用 param.Omit 删键，保持请求体逐字不因 SDK 而变（3.6）。
+		ri.SetExtraFields(map[string]any{"id": param.Omit})
+		items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: &ri})
+	}
+	if m.Role == "assistant" {
+		// assistant 文本 part 是 output_text、图片 part 是 input_image（4.2.3 逐字）。
+		var parts []responses.ResponseOutputMessageContentUnionParam
+		for _, p := range m.Content {
+			switch {
+			case p.ImageURL != "":
+				part, err := openAIOutputImagePart(p.ImageURL)
+				if err != nil {
+					return nil, "", err
+				}
+				parts = append(parts, part)
+			case p.Text != "":
+				parts = append(parts, responses.ResponseOutputMessageContentUnionParam{
+					OfOutputText: &responses.ResponseOutputTextParam{Text: p.Text},
+				})
+			}
+		}
+		if len(parts) > 0 {
+			items = append(items, responses.ResponseInputItemUnionParam{
+				OfOutputMessage: &responses.ResponseOutputMessageParam{Content: parts},
+			})
+		}
+	} else {
+		var parts responses.ResponseInputMessageContentListParam
+		for _, p := range m.Content {
+			switch {
+			case p.ImageURL != "":
+				parts = append(parts, responses.ResponseInputContentUnionParam{
+					OfInputImage: &responses.ResponseInputImageParam{ImageURL: param.NewOpt(p.ImageURL)},
+				})
+			case p.Text != "":
+				parts = append(parts, responses.ResponseInputContentUnionParam{
+					OfInputText: &responses.ResponseInputTextParam{Text: p.Text},
+				})
+			}
+		}
+		if len(parts) > 0 {
+			items = append(items, responses.ResponseInputItemUnionParam{
+				OfInputMessage: &responses.ResponseInputItemMessageParam{Type: "message", Role: m.Role, Content: parts},
+			})
+		}
+	}
+	for _, tc := range m.ToolCalls {
+		id := tc.CallID
+		if id == "" {
+			id = tc.ID
+		}
+		fc := responses.ResponseFunctionToolCallParam{CallID: id, Name: tc.Name, Arguments: tc.Arguments}
+		if tc.ID != "" {
+			fc.ID = param.NewOpt(tc.ID)
+		}
+		// 旧 wire 这三个字段是 omitempty（空值不出键）⇒ SDK 恒序列化的必填零值用 param.Omit 删键。
+		ex := map[string]any{}
+		if tc.Arguments == "" {
+			ex["arguments"] = param.Omit
+		}
+		if tc.Name == "" {
+			ex["name"] = param.Omit
+		}
+		if id == "" {
+			ex["call_id"] = param.Omit
+		}
+		if len(ex) > 0 {
+			fc.SetExtraFields(ex)
+		}
+		items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: &fc})
+	}
+	return items, "", nil
 }
 
-// openAIReasoning 是 reasoning 对象（4.3.1：context / effort / mode / summary）。
-type openAIReasoning struct {
-	Effort  string `json:"effort,omitempty"`
-	Summary string `json:"summary,omitempty"`
-	Context string `json:"context,omitempty"`
-	Mode    string `json:"mode,omitempty"`
+// openAIOutputImagePart 把 assistant 消息的图片 part 装载进 output content union：
+// 该 union 只有 output_text / refusal 变体，input_image 形状经 param.Override 跨 union 装载
+// （SDK 公开通道），序列化仍由 SDK typed 参数（ResponseInputImageParam）完成、形状逐字不变。
+func openAIOutputImagePart(imageURL string) (responses.ResponseOutputMessageContentUnionParam, error) {
+	b, err := marshalBody(responses.ResponseInputImageParam{ImageURL: param.NewOpt(imageURL)})
+	if err != nil {
+		return responses.ResponseOutputMessageContentUnionParam{}, err
+	}
+	return param.Override[responses.ResponseOutputMessageContentUnionParam](json.RawMessage(b)), nil
 }
 
-// openAIInputItem 是 input[] 异构 item（4.3.1：message / reasoning / function_call / function_call_output）。
-type openAIInputItem struct {
-	Type    string            `json:"type"`
-	Role    string            `json:"role,omitempty"`
-	Content []openAIInputPart `json:"content,omitempty"`
-	// function_call / function_call_output
-	CallID    string `json:"call_id,omitempty"`
-	Output    string `json:"output,omitempty"`
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	// reasoning（⛔ encrypted_content 必须保留，4.2.5）
-	EncryptedContent string            `json:"encrypted_content,omitempty"`
-	ReasoningContent []openAIInputPart `json:"-"`
+// openAIToolChoiceParam 映射 tool_choice 的 SDK 形态（4.3.1：auto / none / required / 指定函数名）。
+func openAIToolChoiceParam(tc *core.ToolChoice) responses.ResponseNewParamsToolChoiceUnion {
+	var u responses.ResponseNewParamsToolChoiceUnion
+	switch tc.Mode {
+	case "function":
+		if tc.Name != "" {
+			u.OfFunctionTool = &responses.ToolChoiceFunctionParam{Name: tc.Name}
+			return u
+		}
+		u.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsAuto)
+	case "none":
+		u.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsNone)
+	case "required":
+		u.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsRequired)
+	default:
+		u.OfToolChoiceMode = param.NewOpt(responses.ToolChoiceOptionsAuto)
+	}
+	return u
 }
 
-// openAIInputPart 是 input 的 content 元素（4.3.1：input_text / input_image / input_file / input_audio）。
-type openAIInputPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
+// openAIInputExtras 回填旧 wire 里无 omitempty 的顶层键（model / input 恒在，input 无 item 时为
+// null）：SDK 的 omitzero 会省略零值键 ⇒ 用 SetExtraFields 回填，请求体不因 SDK 而变（3.6）。
+func openAIInputExtras(ex map[string]any, res *core.Resolution, itemCount int) {
+	if res.Model == "" {
+		ex["model"] = ""
+	}
+	if itemCount == 0 {
+		ex["input"] = nil
+	}
 }
 
-// openAITool 是 function 工具声明（Responses 形状：name/description/parameters 平铺）。
-type openAITool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-}
-
-// BuildRequest 构造 /responses 请求（4.3.1 逐字字段；4.2.2 系统提示走顶层 instructions）。
+// BuildRequest 用 SDK typed 参数构造 /responses 请求（4.3.1 逐字字段；4.2.2 系统提示走顶层
+// instructions；3.5：prompt_cache_key / previous_response_id 始终透传）。
 func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
 	if err := checkPreviousResponseID(true, r); err != nil {
 		return nil, err
 	}
-	body := openAIReq{
-		Model:              res.Model,
-		Instructions:       r.Instructions,
-		MaxOutputTokens:    r.MaxOutputTokens,
-		PromptCacheKey:     r.PromptCacheKey, // 3.5：prompt_cache_key 始终透传
-		PreviousResponseID: r.PreviousResponseID,
-		Stream:             r.Stream,
+	p := responses.ResponseNewParams{Model: shared.ResponsesModel(res.Model)}
+	if r.MaxOutputTokens > 0 {
+		p.MaxOutputTokens = param.NewOpt(int64(r.MaxOutputTokens))
+	}
+	if r.PromptCacheKey != "" {
+		p.PromptCacheKey = param.NewOpt(r.PromptCacheKey)
+	}
+	if r.PreviousResponseID != "" {
+		p.PreviousResponseID = param.NewOpt(r.PreviousResponseID)
+	}
+	ex := map[string]any{}
+	if r.Stream {
+		// ResponseNewParams 无 stream 字段（SDK 在执行期以 WithJSONSet 注入）⇒ 序列化自建时走
+		// extras；旧 wire 为 stream:true / 省略（omitempty）⇒ 只在 true 时注入，零值不补。
+		ex["stream"] = true
 	}
 	if r.Reasoning != nil {
-		body.Reasoning = &openAIReasoning{
-			Effort:  r.Reasoning.Effort,
-			Summary: r.Reasoning.Summary,
-			Context: r.Reasoning.Context,
-			Mode:    r.Reasoning.Mode,
+		// reasoning 对象（4.3.1：context / effort / mode / summary）。
+		p.Reasoning = shared.ReasoningParam{
+			Effort:  shared.ReasoningEffort(r.Reasoning.Effort),
+			Summary: shared.ReasoningSummary(r.Reasoning.Summary),
+			Context: shared.ReasoningContext(r.Reasoning.Context),
+			Mode:    shared.ReasoningMode(r.Reasoning.Mode),
+		}
+		if r.Reasoning.Effort == "" && r.Reasoning.Summary == "" &&
+			r.Reasoning.Context == "" && r.Reasoning.Mode == "" {
+			// 旧 wire：reasoning 指针非 nil 即发对象（可为空 {}）；SDK omitzero 会整个省略 ⇒ 回填。
+			ex["reasoning"] = map[string]any{}
 		}
 	}
+	instructions := r.Instructions
+	var input []responses.ResponseInputItemUnionParam
 	for _, m := range r.Messages {
-		items, sys := a.inputItems(m)
+		items, sys, err := openAIInputItems(m)
+		if err != nil {
+			return nil, err
+		}
 		if sys != "" {
-			if body.Instructions == "" {
-				body.Instructions = sys
+			if instructions == "" {
+				instructions = sys
 			} else {
-				body.Instructions += "\n" + sys
+				instructions += "\n" + sys
 			}
 			continue
 		}
-		body.Input = append(body.Input, items...)
+		input = append(input, items...)
 	}
+	if instructions != "" {
+		p.Instructions = param.NewOpt(instructions)
+	}
+	p.Input.OfInputItemList = input
 	for _, t := range r.Tools {
-		body.Tools = append(body.Tools, openAITool{
-			Type: "function", Name: t.Name, Description: t.Description, Parameters: t.Parameters,
-		})
+		ft := responses.FunctionToolParam{Name: t.Name}
+		if t.Description != "" {
+			ft.Description = param.NewOpt(t.Description)
+		}
+		if len(t.Parameters) > 0 {
+			// parameters 是调用方给定的 JSON Schema ⇒ 原文透传（⛔ 不重整键序）。
+			ft.SetExtraFields(map[string]any{"parameters": json.RawMessage(t.Parameters)})
+		}
+		p.Tools = append(p.Tools, responses.ToolUnionParam{OfFunction: &ft})
 	}
 	if r.ToolChoice != nil {
-		body.ToolChoice = toolChoiceResponses(r.ToolChoice)
+		p.ToolChoice = openAIToolChoiceParam(r.ToolChoice)
 	}
-	raw, err := marshalBody(body)
+	openAIInputExtras(ex, res, len(input))
+	if len(ex) > 0 {
+		p.SetExtraFields(ex)
+	}
+	raw, err := marshalBody(p)
 	if err != nil {
 		return nil, err
 	}
@@ -151,56 +287,8 @@ func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *
 	}, nil
 }
 
-// inputItems 把规范消息拆成 Responses input item（4.2.3：Chat → Responses = 一条 message 拆多个 item）。
-// system 消息不出 item，返回给调用方并入顶层 instructions（4.2.2）。
-func (a *openaiAdapter) inputItems(m core.Message) ([]openAIInputItem, string) {
-	if m.Role == "system" {
-		return nil, contentText(m.Content)
-	}
-	if m.Role == "tool" {
-		// 工具结果 ⇒ function_call_output（4.2.2：Responses 的工具结果是独立 item）。
-		return []openAIInputItem{{
-			Type: "function_call_output", CallID: m.ToolCallID, Output: contentText(m.Content),
-		}}, ""
-	}
-	var items []openAIInputItem
-	// 推理链回放：EncryptedContent 是语义字段（⛔ 必须保留，4.2.5）。
-	if m.EncryptedContent != "" || m.ReasoningContent != "" {
-		it := openAIInputItem{Type: "reasoning", EncryptedContent: m.EncryptedContent}
-		if m.ReasoningContent != "" {
-			it.Content = []openAIInputPart{{Type: "reasoning_text", Text: m.ReasoningContent}}
-		}
-		items = append(items, it)
-	}
-	partType := "input_text"
-	if m.Role == "assistant" {
-		partType = "output_text"
-	}
-	var parts []openAIInputPart
-	for _, p := range m.Content {
-		switch {
-		case p.ImageURL != "":
-			parts = append(parts, openAIInputPart{Type: "input_image", ImageURL: p.ImageURL})
-		case p.Text != "":
-			parts = append(parts, openAIInputPart{Type: partType, Text: p.Text})
-		}
-	}
-	if len(parts) > 0 {
-		items = append(items, openAIInputItem{Type: "message", Role: m.Role, Content: parts})
-	}
-	for _, tc := range m.ToolCalls {
-		id := tc.CallID
-		if id == "" {
-			id = tc.ID
-		}
-		items = append(items, openAIInputItem{
-			Type: "function_call", ID: tc.ID, CallID: id, Name: tc.Name, Arguments: tc.Arguments,
-		})
-	}
-	return items, ""
-}
-
 // toolChoiceResponses 映射 tool_choice（4.3.1：auto / none / required / 指定函数名）。
+// ⚠️ 供 qwen / xai 适配器沿用的旧形态映射（⛔ 不改签名）；openai 自身走 openAIToolChoiceParam。
 func toolChoiceResponses(tc *core.ToolChoice) any {
 	switch tc.Mode {
 	case "function":
@@ -265,9 +353,16 @@ type openAIOutputItem struct {
 }
 
 // ParseResponse 解析 response 对象 → 规范 Response（4.3.1 响应体关键字段）。
+// 先经 SDK typed 解析（统一 SDD 3.6：SDK 返回值先序列化再传入）——response.Response 结构化
+// 解析后用 RawJSON 原样送进既有归一逻辑 ⇒ finish_reason / reasoning_content 等兼容端点扩展
+// 随原始字节无损进入，⛔ 不因 SDK 类型裁剪而丢。
 func (a *openaiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
+	var sr responses.Response
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
+	}
 	var r openAIResp
-	if err := json.Unmarshal(body, &r); err != nil {
+	if err := json.Unmarshal([]byte(sr.RawJSON()), &r); err != nil {
 		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
 	}
 	out := &core.Response{
@@ -354,6 +449,7 @@ func incompleteReason(d *struct {
 // deriveResponsesFinish 按 4.5.2 OpenAI Responses 行推导终止原因：
 // Responses 用 status 六值体系；显式 finish_reason（兼容端点回落字段）⇒ 超集原值优先；
 // incomplete ⇒ incomplete_details.reason 归「超上下文 / length」类（4.5.1 归一化映射规则）。
+// ⚠️ 供 qwen / xai 适配器沿用（⛔ 不改签名）。
 func deriveResponsesFinish(explicit, status, incomplete string, hasToolCall bool) string {
 	if explicit != "" {
 		return explicit // 4.5.1：非标准取值 ⛔ 不得丢弃 ⇒ 超集原值
@@ -384,19 +480,36 @@ func deriveResponsesFinish(explicit, status, incomplete string, hasToolCall bool
 
 // ---- 流式（4.3.1 Responses 流式事件形态：event: + data: 双字段、sequence_number、59 种事件）----
 
-// openAIStreamEvent 覆盖本适配器消费的 response.* 事件；未知事件类型忽略（3.7 流式容错）。
-type openAIStreamEvent struct {
-	Type           string            `json:"type"`
-	SequenceNumber int64             `json:"sequence_number"`
-	Response       *openAIResp       `json:"response"`
-	Delta          string            `json:"delta"`
-	PartialJSON    string            `json:"partial_json"`
-	ItemID         string            `json:"item_id"`
-	Item           *openAIOutputItem `json:"item"`
+// responseEventExtra 从 response.* 事件原始 JSON 取 SDK union 未逐字建模的嵌套字段：
+// response.usage 原文（含兼容端点扩展字段，⛔ 不经 SDK 类型重整）与 response.error 的存在性
+// （旧口径按 error 指针判存在）。事件 union 的 RawJSON 即 SDK 值的序列化形态（3.6 口径）。
+type responseEventExtra struct {
+	Response struct {
+		Usage json.RawMessage `json:"usage"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	} `json:"response"`
+}
+
+// rawPartialJSON 取流事件原始 JSON 的 partial_json（函数参数增量，4.3.1 逐字字段名）：
+// SDK 的事件 union 未建模该字段（其 delta 命名不同）⇒ 只能从原始 JSON 取原值。
+func rawPartialJSON(eventRaw string) (string, bool) {
+	var q struct {
+		PartialJSON string `json:"partial_json"`
+	}
+	// eventRaw 是已成功反序列化过的 JSON 对象，此处仅取一个 string 字段；
+	// 字段类型非 string（畸形上游）⇒ 返回 false，按旧口径整帧容忍跳过。
+	if err := json.Unmarshal([]byte(eventRaw), &q); err != nil {
+		return "", false
+	}
+	return q.PartialJSON, true
 }
 
 // openAIStreamDecoder 是 OpenAI 的帧解码器（3.7：每家一个帧解码器）。
 // 容忍：缺 output_item.added（gpt-5.3-codex 实测，4.3.1）、缺 [DONE]、未知事件、乱序。
+// 流事件解析用 SDK 的 responses.ResponseStreamEventUnion（typed 字段 + RawJSON 取扩展字段）。
 type openAIStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
 	toolIDs map[string]string // item_id → call_id（缺 output_item.added 时退回 item_id）
@@ -415,7 +528,7 @@ func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 		// 终止哨兵（部分后端省略 ⇒ 不能只靠它判结束，4.3.1）。
 		return nil, true, nil
 	}
-	var e openAIStreamEvent
+	var e responses.ResponseStreamEventUnion
 	if err := json.Unmarshal([]byte(data), &e); err != nil {
 		return nil, false, nil // 非 JSON 帧（keep-alive 等）容忍跳过
 	}
@@ -428,7 +541,7 @@ func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 	case "response.created", "response.in_progress", "response.queued":
 		return []stream.Frame{{Kind: stream.FrameLifecycle, Status: etype, Seq: seq}}, false, nil
 	case "response.output_item.added":
-		if e.Item != nil && e.Item.Type == "function_call" && e.ItemID != "" {
+		if e.Item.Type == "function_call" && e.ItemID != "" {
 			id := e.Item.CallID
 			if id == "" {
 				id = e.ItemID
@@ -452,25 +565,31 @@ func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 		if id == "" {
 			id = e.ItemID // 缺 output_item.added 时容忍：直接用 item_id（4.3.1 解析器容忍性）
 		}
-		return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Arguments: e.PartialJSON, Seq: seq}}, false, nil
-	case "response.completed":
-		frames := []stream.Frame{{Kind: stream.FrameDone, Status: core.StatusCompleted, Seq: seq}}
-		if e.Response != nil && len(e.Response.Usage) > 0 {
-			// usage 由 response.completed 自带（⛔ 不需要 stream_options.include_usage，4.3.1）。
-			frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(e.Response.Usage), Seq: seq}}, frames...)
+		args, ok := rawPartialJSON(e.RawJSON())
+		if !ok {
+			return nil, false, nil // partial_json 畸形（非 string）⇒ 按旧口径整帧跳过
 		}
-		return frames, true, nil
-	case "response.incomplete":
-		frames := []stream.Frame{{Kind: stream.FrameDone, Status: core.StatusIncomplete, Seq: seq}}
-		if e.Response != nil && len(e.Response.Usage) > 0 {
-			frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(e.Response.Usage), Seq: seq}}, frames...)
+		return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Arguments: args, Seq: seq}}, false, nil
+	case "response.completed", "response.incomplete":
+		status := core.StatusCompleted
+		if etype == "response.incomplete" {
+			status = core.StatusIncomplete
+		}
+		frames := []stream.Frame{{Kind: stream.FrameDone, Status: status, Seq: seq}}
+		var ex responseEventExtra
+		_ = json.Unmarshal([]byte(e.RawJSON()), &ex) // RawJSON 是已解析过的 JSON，仅取嵌套字段
+		if len(ex.Response.Usage) > 0 {
+			// usage 由 response.completed 自带（⛔ 不需要 stream_options.include_usage，4.3.1）。
+			frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(ex.Response.Usage), Seq: seq}}, frames...)
 		}
 		return frames, true, nil
 	case "response.failed":
 		msg := "上游流式响应失败"
 		code := "response_failed"
-		if e.Response != nil && e.Response.Error != nil {
-			msg, code = e.Response.Error.Message, e.Response.Error.Code
+		var ex responseEventExtra
+		_ = json.Unmarshal([]byte(e.RawJSON()), &ex)
+		if ex.Response.Error != nil {
+			msg, code = ex.Response.Error.Message, ex.Response.Error.Code
 		}
 		return []stream.Frame{{Kind: stream.FrameError, Status: code, Text: msg, Seq: seq}}, true, nil
 	default:

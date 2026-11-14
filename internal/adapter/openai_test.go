@@ -313,3 +313,22 @@ func TestOpenAIStreamToolCallName(t *testing.T) {
 		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
 	}
 }
+
+// TestOpenAIParseUsageRealSample 钉住真实样本（litellm 真实录制，来源见 testdata/real/README.md）上
+// ParseUsage 按实际 usage 树选口径成立：Responses 树（input_tokens 309/118/53/427）与
+// Chat 树（Azure 部署捕获 19/5/24）各归各位；Chat 树的未知字段 latency_checkpoint ⛔ 不干扰解析。
+// 错误实现会红：两树混读（拿 cached_tokens 去 Responses 树）⇒ 数值全 0 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOpenAIParseUsageRealSample -v
+func TestOpenAIParseUsageRealSample(t *testing.T) {
+	a := NewOpenAI(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/openai_responses_usage.json"))
+	if u.InputTokens != 309 || u.InputTokensUncached != 309 || u.OutputTokens != 118 || u.ReasoningTokens != 53 || u.TotalTokens != 427 {
+		t.Fatalf("Responses 归一 = In%d/Unc%d/Out%d/Reason%d/Total%d，期望 309/309/118/53/427（样本逐字）",
+			u.InputTokens, u.InputTokensUncached, u.OutputTokens, u.ReasoningTokens, u.TotalTokens)
+	}
+	u = a.ParseUsage(loadFixture(t, "real/openai_chat_usage_azure.json"))
+	if u.InputTokens != 19 || u.InputTokensUncached != 19 || u.OutputTokens != 5 || u.TotalTokens != 24 {
+		t.Fatalf("Chat 归一 = In%d/Unc%d/Out%d/Total%d，期望 19/19/5/24（样本逐字）",
+			u.InputTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
+	}
+}

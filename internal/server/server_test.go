@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -66,9 +67,16 @@ type fakeUpstream struct {
 	closedAt      time.Time
 	defaultEvents []string
 	eventsByPath  map[string][]string
-	failFirstN    int // 前 N 个请求回 500（重试 / 降级测试用）
+	failFirstN    int                      // 前 N 个请求回 500（重试 / 降级测试用）
+	rateLimit     map[string]fakeRateLimit // 凭据值 → 限流行为（令牌轮换测试用）
 	pushMore      chan struct{}
 	holdLimit     time.Duration
+}
+
+// fakeRateLimit 是假上游按凭据值的限流行为：回 count 次 429（带 Retry-After）。
+type fakeRateLimit struct {
+	count         int
+	retryAfterSec int
 }
 
 // newFakeUpstream 起假上游（POST /responses 与 POST /messages 都接，按路径取事件）。
@@ -101,6 +109,30 @@ func (f *fakeUpstream) setFailFirstN(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failFirstN = n
+}
+
+// setRateLimit 设「凭据值 authValue 的请求回 count 次 429 + Retry-After: N 秒」
+// （令牌限流轮换测试用）。
+func (f *fakeUpstream) setRateLimit(authValue string, count, retryAfterSec int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rateLimit == nil {
+		f.rateLimit = map[string]fakeRateLimit{}
+	}
+	f.rateLimit[authValue] = fakeRateLimit{count: count, retryAfterSec: retryAfterSec}
+}
+
+// consumeRateLimit 消费一次限流（返回是否应发 429 及 Retry-After 秒数）。
+func (f *fakeUpstream) consumeRateLimit(authValue string) (bool, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rl, ok := f.rateLimit[authValue]
+	if !ok || rl.count <= 0 {
+		return false, 0
+	}
+	rl.count--
+	f.rateLimit[authValue] = rl
+	return true, rl.retryAfterSec
 }
 
 // push 推一帧文本增量（手动时序控制）。
@@ -178,6 +210,14 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":{"message":"上游服务内部错误","type":"server_error","code":"upstream_error"}}`))
 		return
 	}
+	// 令牌轮换测试：按凭据值回 429 + Retry-After（模拟上游对该令牌限流）。
+	if limited, ra := f.consumeRateLimit(authValueOf(r)); limited {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", strconv.Itoa(ra))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"令牌限流","type":"rate_limit","code":"rate_limit"}}`))
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
@@ -221,6 +261,17 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// authValueOf 取请求携带的凭据值（三种鉴权形态任一；令牌轮换测试按值分派行为）。
+func authValueOf(r *http.Request) string {
+	if v := r.Header.Get("Authorization"); v != "" {
+		return v
+	}
+	if v := r.Header.Get("X-Api-Key"); v != "" {
+		return v
+	}
+	return r.Header.Get("Api-Key")
 }
 
 // close 关停假上游。

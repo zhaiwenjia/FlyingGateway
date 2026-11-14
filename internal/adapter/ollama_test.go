@@ -266,3 +266,23 @@ func TestOllamaCompatStreamDoneSentinel(t *testing.T) {
 		t.Fatalf("帧[2] = %+v，期望 usage（30/12）", frames[2])
 	}
 }
+
+// TestOllamaParseUsageRealSample 钉住真实样本（排障实录贴真机响应 Ollama 0.40.14 + 官方文档示例，
+// 来源见 testdata/real/README.md）上 ParseUsage 归一成立：
+// prompt_eval_count=40 是总输入（含命中）⇒ Uncached = 40 − 24 = 16（⛔ 不能拿 prompt_eval_count 当未缓存量）；
+// 官方示例无 prompt_eval_cached_count ⇒ Read=0、Uncached=11；两者都无总值原报 ⇒ Total=0。
+// 错误实现会红：Uncached=40 ≠ 16 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaParseUsageRealSample -v
+func TestOllamaParseUsageRealSample(t *testing.T) {
+	a := NewOllama(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/ollama_usage_real.json"))
+	if u.InputTokens != 40 || u.CacheReadTokens != 24 || u.InputTokensUncached != 16 || u.OutputTokens != 10 || u.TotalTokens != 0 {
+		t.Fatalf("真机样本归一 = In%d/Read%d/Unc%d/Out%d/Total%d，期望 40/24/16/10/0（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
+	}
+	u = a.ParseUsage(loadFixture(t, "real/ollama_usage_docs.json"))
+	if u.InputTokens != 11 || u.CacheReadTokens != 0 || u.InputTokensUncached != 11 || u.OutputTokens != 18 {
+		t.Fatalf("文档样本归一 = In%d/Read%d/Unc%d/Out%d，期望 11/0/11/18（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens)
+	}
+}

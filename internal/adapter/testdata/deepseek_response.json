@@ -1,23 +1,19 @@
 {
   "id": "resp_ds_001",
-  "status": "completed",
+  "object": "chat.completion",
+  "created": 1763100000,
   "model": "deepseek-reasoner",
-  "output": [
+  "choices": [
     {
-      "type": "reasoning",
-      "id": "rs_ds_001",
-      "summary": [{"type": "summary_text", "text": "推理摘要"}],
-      "encrypted_content": "ds-enc",
-      "reasoning_content": "推理正文"
-    },
-    {
-      "type": "message",
-      "id": "msg_ds_001",
-      "role": "assistant",
-      "content": [{"type": "output_text", "text": "完成"}]
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "完成",
+        "reasoning_content": "推理正文"
+      },
+      "finish_reason": "aborted"
     }
   ],
-  "output_text": "完成",
   "usage": {
     "prompt_tokens": 7,
     "completion_tokens": 11,
@@ -25,6 +21,5 @@
     "prompt_tokens_details": {"cached_tokens": 0},
     "prompt_cache_hit_tokens": 0,
     "prompt_cache_miss_tokens": 7
-  },
-  "finish_reason": "aborted"
+  }
 }

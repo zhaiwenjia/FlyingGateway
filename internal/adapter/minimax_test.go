@@ -398,3 +398,80 @@ func TestMiniMaxStreamToolCallName(t *testing.T) {
 		t.Fatalf("参数拼接 = %q，期望 {\"q\":\"1\"}", args)
 	}
 }
+
+// TestMiniMaxParseUsageRealSample 钉住真实样本（MiniMax 官方 API 文档文本合成响应示例，
+// id 04ecb5d9b1921ae0fb0e8da9017a5474，来源见 testdata/real/README.md）上 ParseUsage 归一成立：
+// 无缓存命中/写入字段 ⇒ 读写记 0；reasoning 214 单列（已含在 completion 223 内 ⛔ 不二次加）；
+// 真实字段 total_characters 随 Raw 保留。
+// 错误实现会红：reasoning 二次加进输出 ⇒ 437 ≠ 223 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxParseUsageRealSample -v
+func TestMiniMaxParseUsageRealSample(t *testing.T) {
+	a := NewMiniMaxNativeV2(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/minimax_usage.json"))
+	if u.InputTokens != 26 || u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 || u.InputTokensUncached != 26 ||
+		u.OutputTokens != 223 || u.ReasoningTokens != 214 || u.TotalTokens != 249 {
+		t.Fatalf("归一 = In%d/Read%d/Write%d/Unc%d/Out%d/Reason%d/Total%d，期望 26/0/0/26/223/214/249（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.InputTokensUncached, u.OutputTokens, u.ReasoningTokens, u.TotalTokens)
+	}
+}
+
+// TestMiniMaxDeferredDoneUsageBeforeDone 钉住 4.4.2「include_usage → 末帧」收口语义：
+// finish 帧不立即收口，独立 usage 帧（finish 与 [DONE] 之间）先发、Done 后发。
+// ⚠️ 2026-11-14 修复的 bug：原实现 finish 帧即收口 ⇒ usage 帧（同帧与后帧）全丢、
+// 末帧 usage 缺失被置 Estimated 估算。错误实现对照：提前收口 ⇒ usage 帧缺失即红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxDeferredDone -v
+func TestMiniMaxDeferredDoneUsageBeforeDone(t *testing.T) {
+	d := newMinimaxChatStreamDecoder(func(json.RawMessage) *core.Usage {
+		return &core.Usage{InputTokens: 10, OutputTokens: 5}
+	})
+	ev := func(data string) stream.SSEEvent { return stream.SSEEvent{Data: data} }
+	var got []stream.Frame
+	f, done, _ := d.decode(ev(`{"choices":[{"delta":{"content":"你好"},"finish_reason":"stop"}]}`))
+	if done {
+		t.Fatal("finish 帧处不应终态（独立 usage 帧在其后）")
+	}
+	got = append(got, f...)
+	// usage 帧到达即收口：同批发 [Usage, Done]（usage 先于 Done 的承载约定）。
+	f, done, _ = d.decode(ev(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	got = append(got, f...)
+	if !done {
+		t.Fatal("usage 帧处应随批收口（[Usage, Done] 同批，usage 先于 Done）")
+	}
+	f, done2, _ := d.decode(ev(`[DONE]`))
+	got = append(got, f...)
+	if !done2 || len(f) != 0 {
+		t.Fatalf("[DONE] 已收口后应无帧，实际 %+v", f)
+	}
+	if len(got) != 3 || got[0].Kind != stream.FrameTextDelta || got[1].Kind != stream.FrameUsage || got[2].Kind != stream.FrameDone {
+		t.Fatalf("帧序列 = %v/%v/%v，期望 TextDelta→Usage→Done（usage 先于 Done）", got[0].Kind, got[1].Kind, got[2].Kind)
+	}
+	if got[2].Status != "stop" {
+		t.Fatalf("Done.Status = %q，期望 stop（暂存的 finish 原值）", got[2].Status)
+	}
+}
+
+// TestMiniMaxSameChunkUsageFinish 钉住同帧 usage + finish 的收口：Usage→Done 同批返回。
+// 错误实现对照：finish 分支提前 return 丢同帧 usage ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxSameChunkUsageFinish -v
+func TestMiniMaxSameChunkUsageFinish(t *testing.T) {
+	d := newMinimaxChatStreamDecoder(func(json.RawMessage) *core.Usage {
+		return &core.Usage{InputTokens: 7, OutputTokens: 3}
+	})
+	f, done, _ := d.decode(stream.SSEEvent{Data: `{"choices":[{"delta":{"content":"x"},"finish_reason":"length"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`})
+	if !done || len(f) != 3 || f[1].Kind != stream.FrameUsage || f[2].Kind != stream.FrameDone || f[2].Status != "length" {
+		t.Fatalf("同帧收口 = %+v done=%v，期望 TextDelta→Usage→Done(length) 且终态", f, done)
+	}
+}
+
+// TestMiniMaxFinishWithoutUsageDoneAtSentinel 钉住无 usage 时 [DONE] 处补发 Done：
+// 终止帧不许丢（否则客户端悬挂）。错误实现对照：延后收口后忘记在哨兵补 Done ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxFinishWithoutUsage -v
+func TestMiniMaxFinishWithoutUsageDoneAtSentinel(t *testing.T) {
+	d := newMinimaxChatStreamDecoder(func(json.RawMessage) *core.Usage { return nil })
+	ev := func(data string) stream.SSEEvent { return stream.SSEEvent{Data: data} }
+	d.decode(ev(`{"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}`))
+	f, done, _ := d.decode(ev(`[DONE]`))
+	if !done || len(f) != 1 || f[0].Kind != stream.FrameDone || f[0].Status != "stop" {
+		t.Fatalf("[DONE] 补收口 = %+v done=%v，期望恰一帧 Done(stop)", f, done)
+	}
+}

@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:22:50.731
+// 日期: 2026-11-14 16:08:29.894
 // 作者: Zhai Wenjia
 
 package chat
@@ -513,6 +513,47 @@ func TestChunkEncoder_FinishTerminalUsageAndDone(t *testing.T) {
 	u := usageChunk["usage"].(map[string]any)
 	if u["prompt_tokens"] != float64(125) || u["completion_tokens"] != float64(48) {
 		t.Errorf("usage 块字段错: %v", u)
+	}
+}
+
+// TestChunkEncoder_SignatureFrameDegradation 钉住流式 thinking 签名丢失的显式标记
+// （统一 SDD 4.2.5 / 3.4：Chat 出口承载不了 thinking 块签名 ⇒ x_gateway.degradations[]
+// 标记，⛔ 不静默丢）：签名帧（FrameReasoningDelta 且 ThinkingSignature 非空，承载
+// 约定见 stream.FrameReasoningDelta）不产出空 delta chunk，终止帧 payload 的
+// degradations[] 含 field=thinking_signature，且多块签名只记一次（去重口径与
+// 非流式 collectDegradations 一致）。
+// 错误实现会红：静默丢签名（无标记）⇒ degradations 缺失断言红；每块重复标记 ⇒
+// 恰 1 条断言红；签名帧当普通推理帧发空 reasoning_content chunk ⇒ 不产出 chunk 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/codec/chat/ -run TestChunkEncoder_SignatureFrameDegradation -v
+func TestChunkEncoder_SignatureFrameDegradation(t *testing.T) {
+	e := NewChunkEncoder("m")
+	bSig1, err := e.Encode(stream.Frame{Kind: stream.FrameReasoningDelta, ThinkingSignature: "sig-1"})
+	if err != nil || bSig1 != nil {
+		t.Fatalf("签名帧不应产出 chunk（err=%v b=%v）", err, bSig1)
+	}
+	if _, err := e.Encode(stream.Frame{Kind: stream.FrameReasoningDelta, ThinkingSignature: "sig-2"}); err != nil {
+		t.Fatalf("Encode 报错: %v", err)
+	}
+	if _, err := e.Encode(stream.Frame{Kind: stream.FrameDone, Status: core.FinishStop}); err != nil {
+		t.Fatalf("Encode 报错: %v", err)
+	}
+	out, err := e.Finish()
+	if err != nil {
+		t.Fatalf("Finish 报错: %v", err)
+	}
+	payloads := sseDataPayloads(t, out)
+	term := decodeJSON(t, []byte(payloads[0]))
+	xg, ok := term["x_gateway"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking 签名丢失必须产生 x_gateway.degradations[] 标记: %s", payloads[0])
+	}
+	degs := xg["degradations"].([]any)
+	if len(degs) != 1 {
+		t.Fatalf("thinking_signature 应恰记 1 条（多块签名去重），实得 %v", degs)
+	}
+	d := degs[0].(map[string]any)
+	if d["field"] != "thinking_signature" || d["reason"] != "upstream_shape_mismatch" || d["detail"] == "" {
+		t.Errorf("degradation 字段错: %v", d)
 	}
 }
 

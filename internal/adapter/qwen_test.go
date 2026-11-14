@@ -247,3 +247,27 @@ func TestQwenStreamToolCallName(t *testing.T) {
 		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
 	}
 }
+
+// TestQwenParseUsageRealSample 钉住真实样本（阿里云 Context Cache 文档 Cache hit examples：
+// OpenAI 兼容形 chatcmpl-6ada9ed2-…、DashScope 原生形 f3acaa33-…，来源见 testdata/real/README.md）上
+// ParseUsage 归一成立：兼容形命中 2048、Uncached=3019−2048=971；
+// 原生形同样命中 2048（⚠️ 2026-11-14 实测修正：原生样本带 prompt_tokens_details.cached_tokens=2048，
+// SDD 4.4.2「无缓存字段」是旧口径 ⇒ 已改为有字段就解析）。
+// 错误实现会红：兼容形把命中计进 Uncached ⇒ 971 ≠ 3019 红；原生形丢 cached 字段 ⇒ 2048 ≠ 0 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenParseUsageRealSample -v
+func TestQwenParseUsageRealSample(t *testing.T) {
+	a := NewQwen(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/qwen_compat_usage.json"))
+	if u.InputTokens != 3019 || u.CacheReadTokens != 2048 || u.InputTokensUncached != 971 ||
+		u.OutputTokens != 104 || u.TotalTokens != 3123 {
+		t.Fatalf("兼容形归一 = In%d/Read%d/Unc%d/Out%d/Total%d，期望 3019/2048/971/104/3123（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
+	}
+	n := NewQwenNative(http.DefaultClient)
+	un := n.ParseUsage(loadFixture(t, "real/qwen_native_usage.json"))
+	if un.InputTokens != 3019 || un.CacheReadTokens != 2048 || un.InputTokensUncached != 971 ||
+		un.OutputTokens != 101 || un.TotalTokens != 3120 {
+		t.Fatalf("原生形归一 = In%d/Read%d/Unc%d/Out%d/Total%d，期望 3019/2048/971/101/3120（样本逐字）",
+			un.InputTokens, un.CacheReadTokens, un.InputTokensUncached, un.OutputTokens, un.TotalTokens)
+	}
+}

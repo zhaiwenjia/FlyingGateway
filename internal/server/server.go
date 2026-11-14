@@ -91,9 +91,9 @@ type Server struct {
 	budget    *policy.Budget
 	guardrail *policy.Guardrail
 
-	callers       *callerAuth
-	pools         *poolManager
-	maxTokenWait  time.Duration
+	callers      *callerAuth
+	pools        *poolManager
+	maxTokenWait time.Duration
 
 	allowLoopback bool
 	pollInterval  time.Duration

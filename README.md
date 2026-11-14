@@ -32,7 +32,8 @@
 
 ```
 FlyingGateway/                ← 仓库根
-├── go.mod                    module github.com/zhaiwenjia/FlyingGateway（go 1.27，零第三方依赖）
+├── go.mod                    module github.com/zhaiwenjia/FlyingGateway（go 1.27；3 个官方 SDK：
+│                             openai-go/v3 + anthropic-sdk-go + google.golang.org/genai）
 ├── .env                      运行配置（含真值，不提交）
 ├── .env.example              配置模板（提交，告诉别人要配哪些项）
 ├── .gitignore

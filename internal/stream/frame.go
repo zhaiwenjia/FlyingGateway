@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 11:33:06.951
+// 日期: 2026-11-14 16:08:29.664
 // 作者: Zhai Wenjia
 
 // Package stream 承载供应商无关的统一帧抽象与流解析核心（统一 SDD 3.7）：
@@ -15,6 +15,11 @@ const (
 	// FrameTextDelta 是文本增量。
 	FrameTextDelta FrameKind = iota
 	// FrameReasoningDelta 是推理文本增量。
+	//
+	// 签名帧承载约定：thinking 块签名复用本帧类型 —— ThinkingSignature 非空且
+	// Reasoning 为空的帧即「签名帧」（Anthropic content_block_delta 的
+	// signature_delta ⇒ delta.signature，⛔ 不可压平），一帧收口一个 thinking 块；
+	// 消费端以 ThinkingSignature != "" 区分签名帧与推理文本帧。
 	FrameReasoningDelta
 	// FrameToolCallArgsDelta 是工具调用参数增量。
 	FrameToolCallArgsDelta
@@ -28,7 +33,8 @@ const (
 	FrameError
 )
 
-// Frame 是供应商无关的内部帧（统一 SDD 3.7，逐字段）。
+// Frame 是供应商无关的内部帧（统一 SDD 3.7，逐字段；ThinkingSignature 为
+// 签名打通增补字段，见 FrameReasoningDelta 的签名帧承载约定）。
 type Frame struct {
 	Kind       FrameKind
 	Text       string
@@ -38,6 +44,9 @@ type Frame struct {
 	Usage      *core.Usage
 	Status     string
 	Seq        int64
+	// ThinkingSignature 承载 thinking 块签名（⛔ 不可压平）：Responses 出口落
+	// reasoning item 的 signature（无损）；Chat 出口承载不了 ⇒ x_gateway.degradations[] 标记。
+	ThinkingSignature string
 }
 
 // FrameIterator 是流式帧迭代器（统一 SDD 3.6 适配器接口的返回形态）。

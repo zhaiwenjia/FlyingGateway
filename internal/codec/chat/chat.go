@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:22:50.718
+// 日期: 2026-11-14 16:08:29.768
 // 作者: Zhai Wenjia
 
 // Package chat 实现 OpenAI Chat Completions 形状的入站双模式编解码（统一 SDD 3.4）。
@@ -552,9 +552,12 @@ type chatChunkFunction struct {
 // Finish 输出终止帧（finish_reason 非 null，payload 带 x_gateway.degradations[]）
 // + usage 块（choices: []）+ data: [DONE]。同一编码器内 id / created 恒定。
 //
-// 帧约定（internal/stream Frame 承载，⛔ 不改其定义）：
+// 帧约定（internal/stream Frame 承载）：
 //   - FrameToolCallArgsDelta：ToolCallID=工具调用 id、Text=函数名（首帧携带）、
 //     Arguments=参数增量；
+//   - FrameReasoningDelta：推理文本增量 ⇒ delta.reasoning_content；签名帧
+//     （ThinkingSignature 非空，见 stream.FrameReasoningDelta 承载约定）承载不了
+//     ⇒ 自动记 thinking_signature 降级（随终止帧 x_gateway.degradations[] 输出）；
 //   - FrameDone：Status=finish_reason 超集原值（⛔ 不归一化），可带 Usage；
 //   - FrameUsage：整块 usage（include_usage 口径）。
 type ChunkEncoder struct {
@@ -566,8 +569,11 @@ type ChunkEncoder struct {
 	finishReason string
 	usage        *core.Usage
 	degradations []degradationOut
-	callIndex    map[string]int
-	callSeq      int
+	// signatureLossNoted：thinking 签名丢失标记只记一次（多块签名去重口径与
+	// collectDegradations 的 (field, reason) 一致）。
+	signatureLossNoted bool
+	callIndex          map[string]int
+	callSeq            int
 }
 
 // NewChunkEncoder 构造编码器；id / created 在此定下（单调生成）。
@@ -582,8 +588,8 @@ func NewChunkEncoder(model string) *ChunkEncoder {
 }
 
 // AddDegradation 登记一条不可逆语义丢失标记，随终止帧 payload 输出
-// （统一 SDD 3.4 流式位置）。Frame 契约无 Degradations 槽位（⛔ 不改 internal/stream），
-// 丢失事实由上游适配层在识别到时注入。
+// （统一 SDD 3.4 流式位置）。Frame 契约无 Degradations 槽位，丢失事实由上游适配层
+// 在识别到时注入；thinking 签名的流式丢失由 Encode 见签名帧时自登记（noteSignatureLoss）。
 func (e *ChunkEncoder) AddDegradation(d core.Degradation) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -591,6 +597,21 @@ func (e *ChunkEncoder) AddDegradation(d core.Degradation) {
 		Field:  d.Field,
 		Reason: d.Reason,
 		Detail: d.Detail,
+	})
+}
+
+// noteSignatureLoss 登记 thinking 块签名在 Chat 出口的丢失（调用方已持 e.mu）。
+// 多块签名重复帧只记一次 —— 与非流式 collectDegradations 的 (field, reason)
+// 去重口径一致，⛔ 不刷屏重复标记。
+func (e *ChunkEncoder) noteSignatureLoss() {
+	if e.signatureLossNoted {
+		return
+	}
+	e.signatureLossNoted = true
+	e.degradations = append(e.degradations, degradationOut{
+		Field:  "thinking_signature",
+		Reason: core.DegradationUpstreamShapeMismatch,
+		Detail: degradationDetailSignature,
 	})
 }
 
@@ -607,6 +628,15 @@ func (e *ChunkEncoder) Encode(f stream.Frame) ([]byte, error) {
 	case stream.FrameTextDelta:
 		return e.marshalChunk(chatChunkDelta{Content: f.Text}, nil)
 	case stream.FrameReasoningDelta:
+		// 签名帧（承载约定见 stream.FrameReasoningDelta）：Chat 出口承载不了
+		// thinking 块签名 ⇒ 显式降级标记（统一 SDD 4.2.5 / 3.4，⛔ 不静默丢），
+		// 随终止帧 x_gateway.degradations[] 输出；推理文本增量照常发。
+		if f.ThinkingSignature != "" {
+			e.noteSignatureLoss()
+		}
+		if f.Reasoning == "" {
+			return nil, nil
+		}
 		return e.marshalChunk(chatChunkDelta{ReasoningContent: f.Reasoning}, nil)
 	case stream.FrameToolCallArgsDelta:
 		idx := e.callIndexFor(f.ToolCallID)

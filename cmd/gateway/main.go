@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +39,11 @@ const (
 	// adminTokenEnv 是管理面鉴权 token 的来源（统一 SDD 8.1：凭据只从环境变量读，
 	// ⛔ 不给明文命令行参数 —— argv 对同机用户可见）。
 	adminTokenEnv = "GATEWAY_ADMIN_TOKEN"
+	// callerKeysEnv 是调用方 API key 白名单（英文逗号 / 换行分隔；同理 ⛔ 不进 argv）。
+	callerKeysEnv = "GATEWAY_CALLER_KEYS"
+	// 默认令牌桶参数（调用方与自有令牌两层同参；0 = 关闭）。
+	defaultBucketCapacity = 60000
+	defaultBucketRefill   = 10000.0
 )
 
 // options 是命令行参数（长选项 + 单字母缩写双形式）。
@@ -56,6 +62,13 @@ type options struct {
 	rateCapacity int64
 	rateRefill   float64
 	budgetTokens int64
+
+	callerBucketCapacity   int64
+	callerBucketRefill     float64
+	upstreamBucketCapacity int64
+	upstreamBucketRefill   float64
+	rateLimitCooldown      time.Duration
+	maxTokenWait           time.Duration
 
 	guardrailPatterns []string
 	guardrailWebhook  string
@@ -133,6 +146,19 @@ func parseFlags(args []string) (*options, error) {
 	fs.Float64Var(&opts.rateRefill, "R", 0, "同 --rate-refill")
 	fs.Int64Var(&opts.budgetTokens, "budget-tokens", 0, "每调用方 token 预算上限（0 = 不限预算）")
 	fs.Int64Var(&opts.budgetTokens, "B", 0, "同 --budget-tokens")
+
+	fs.Int64Var(&opts.callerBucketCapacity, "caller-bucket-capacity", defaultBucketCapacity, "每调用方令牌桶容量（0 = 关闭）")
+	fs.Int64Var(&opts.callerBucketCapacity, "K", defaultBucketCapacity, "同 --caller-bucket-capacity")
+	fs.Float64Var(&opts.callerBucketRefill, "caller-bucket-refill", defaultBucketRefill, "每调用方令牌桶补充速率（token/秒）")
+	fs.Float64Var(&opts.callerBucketRefill, "E", defaultBucketRefill, "同 --caller-bucket-refill")
+	fs.Int64Var(&opts.upstreamBucketCapacity, "upstream-bucket-capacity", defaultBucketCapacity, "每自有令牌的本地令牌桶容量（0 = 关闭）")
+	fs.Int64Var(&opts.upstreamBucketCapacity, "U", defaultBucketCapacity, "同 --upstream-bucket-capacity")
+	fs.Float64Var(&opts.upstreamBucketRefill, "upstream-bucket-refill", defaultBucketRefill, "每自有令牌的本地令牌桶补充速率（token/秒）")
+	fs.Float64Var(&opts.upstreamBucketRefill, "u", defaultBucketRefill, "同 --upstream-bucket-refill")
+	fs.DurationVar(&opts.rateLimitCooldown, "rate-limit-cooldown", 30*time.Second, "上游 429 无 Retry-After 时的令牌默认冷却")
+	fs.DurationVar(&opts.rateLimitCooldown, "k", 30*time.Second, "同 --rate-limit-cooldown")
+	fs.DurationVar(&opts.maxTokenWait, "max-token-wait", 3*time.Second, "全部自有令牌受限时的最长等待（超上限 ⇒ 429 + Retry-After）")
+	fs.DurationVar(&opts.maxTokenWait, "m", 3*time.Second, "同 --max-token-wait")
 
 	var pats multiFlag
 	fs.Var(&pats, "guardrail-pattern", "护栏正则（可重复）")
@@ -228,6 +254,13 @@ func run(args []string, stdout io.Writer) int {
 		TokenBucket:            bucket,
 		Budget:                 budget,
 		Guardrail:              guardrail,
+		CallerKeys:             splitEnvList(os.Getenv(callerKeysEnv)),
+		CallerBucketCapacity:   opts.callerBucketCapacity,
+		CallerBucketRefill:     opts.callerBucketRefill,
+		UpstreamBucketCapacity: opts.upstreamBucketCapacity,
+		UpstreamBucketRefill:   opts.upstreamBucketRefill,
+		RateLimitCooldown:      opts.rateLimitCooldown,
+		MaxTokenWait:           opts.maxTokenWait,
 		AllowLoopbackEgress:    opts.allowLoopback,
 		CancelGracePeriod:      opts.cancelGrace,
 		CancelGraceByProvider:  opts.cancelGraceByProvider,
@@ -295,6 +328,17 @@ func run(args []string, stdout io.Writer) int {
 	}
 	_ = dataSrv.Close()
 	return 0
+}
+
+// splitEnvList 切分环境变量里的列表值（英文逗号 / 换行分隔；去空白、去空段）。
+func splitEnvList(v string) []string {
+	var out []string
+	for _, p := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // detectPollFromBound 由检测延迟上界导出轮询兜底周期（上界的 1/4，统一 SDD 6.6）。

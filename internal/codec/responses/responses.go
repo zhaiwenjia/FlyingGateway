@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:22:50.745
+// 日期: 2026-11-14 16:08:29.743
 // 作者: Zhai Wenjia
 
 // Package responses 实现 OpenAI Responses 形状的入站双模式编解码（统一 SDD 3.4）。
@@ -7,7 +7,8 @@
 //     Messages[0]{Role:"user"}；input item 数组逐项映射（message / function_call /
 //     function_call_output / reasoning），reasoning item 的 encrypted_content 必须保留。
 //   - EncodeResponse：core.Response ⇒ response 对象（object="response"、status 六值、
-//     output[] 异构联合、output_text 便捷字段）。承载不了的语义（thinking_signature）
+//     output[] 异构联合、output_text 便捷字段）。thinking 块签名落 reasoning item 的
+//     signature 字段（Responses 形状承载签名 ⇒ 无损，⛔ 不标记）；其余承载不了的语义
 //     ⇒ 顶层 x_gateway.degradations[] 显式标记（⛔ 不静默丢）。
 //   - EventEncoder：内部帧 ⇒ response.* 事件流（event: 与 data: 双字段，事件名与
 //     data.type 一致，sequence_number 单调递增，终止为恰好一个终态事件后接 data: [DONE]）。
@@ -79,7 +80,12 @@ type respInputItem struct {
 	Arguments        string          `json:"arguments"`
 	Output           json.RawMessage `json:"output"` // function_call_output：string 或 part 数组
 	EncryptedContent string          `json:"encrypted_content"`
-	Summary          []respTextPart  `json:"summary"`
+	// Signature 是 reasoning item 的 thinking 签名（Anthropic thinking.signature 的
+	// Responses 对应物）。⚠️ 2026-11-14 补：出站侧已承载签名，入站回传方向原先漏解析
+	// ⇒ Message.ThinkingSignature 无生产者、多轮续聊签名被丢——回传丢失与出站丢失同罪
+	//（1.4.1 语义字段），必须保留。
+	Signature string         `json:"signature"`
+	Summary   []respTextPart `json:"summary"`
 }
 
 // respTextPart 是 reasoning 的 summary[] / content[] 元素（summary_text / reasoning_text）。
@@ -245,9 +251,10 @@ func decodeInput(raw json.RawMessage) ([]core.Message, error) {
 				text = joinSummaryParts(it.Summary)
 			}
 			out = append(out, core.Message{
-				Role:             "assistant",
-				ReasoningContent: text,
-				EncryptedContent: it.EncryptedContent,
+				Role:              "assistant",
+				ReasoningContent:  text,
+				EncryptedContent:  it.EncryptedContent,
+				ThinkingSignature: it.Signature,
 			})
 		default:
 			// 未知 item 类型（web_search_call / mcp_call 等 29 种联合的其余项）
@@ -383,13 +390,14 @@ type respPartOut struct {
 }
 
 // respReasoningItemOut 是 output[] 的 reasoning item（summary[] / content[] /
-// encrypted_content，⛔ encrypted_content 不压平）。
+// encrypted_content / signature，⛔ encrypted_content 与 signature 不压平）。
 type respReasoningItemOut struct {
 	ID               string         `json:"id,omitempty"`
 	Type             string         `json:"type"` // "reasoning"
 	Summary          []respTextPart `json:"summary"`
 	Content          []respTextPart `json:"content,omitempty"`
 	EncryptedContent string         `json:"encrypted_content,omitempty"`
+	Signature        string         `json:"signature,omitempty"`
 }
 
 // respFunctionCallItemOut 是 output[] 的 function_call item（id / call_id / name / arguments）。
@@ -445,12 +453,10 @@ type xGatewayOut struct {
 	Degradations []degradationOut `json:"degradations"`
 }
 
-// degradationDetailSignature 是统一 SDD 3.4 示例的中文说明（逐字照抄）。
-const degradationDetailSignature = "Claude thinking.signature 无 OpenAI 形状对应物，已丢弃；多轮带思考对话将降级"
-
-// collectDegradations 汇总不可逆语义丢失：Responses 出口能承载 encrypted_content
-// （reasoning item）⇒ 不标记；承载不了的 thinking_signature ⇒ 必须标记
-// （统一 SDD 3.4 / 验收 A8、A14，⛔ 不静默丢）。resp.Degradations 透传，同 (field, reason) 只记一次。
+// collectDegradations 汇总不可逆语义丢失：Responses 出口承载 encrypted_content 与
+// thinking 块签名（reasoning item 的 encrypted_content / signature）⇒ 不标记；
+// 此处透传上游适配层识别的丢失记录（resp.Degradations），同 (field, reason) 只记一次
+// （统一 SDD 3.4 / 验收 A8、A14，⛔ 不静默丢）。
 func collectDegradations(resp *core.Response) []degradationOut {
 	seen := make(map[string]bool)
 	var out []degradationOut
@@ -463,15 +469,6 @@ func collectDegradations(resp *core.Response) []degradationOut {
 	}
 	for _, d := range resp.Degradations {
 		add(degradationOut{Field: d.Field, Reason: d.Reason, Detail: d.Detail})
-	}
-	for _, item := range resp.OutputItems {
-		if item.ThinkingSignature != "" {
-			add(degradationOut{
-				Field:  "thinking_signature",
-				Reason: core.DegradationUpstreamShapeMismatch,
-				Detail: degradationDetailSignature,
-			})
-		}
 	}
 	return out
 }
@@ -537,6 +534,8 @@ func buildOutputItems(resp *core.Response) (items []any, outputText string) {
 				r.Content = []respTextPart{{Type: "reasoning_text", Text: item.ReasoningText}}
 			}
 			r.EncryptedContent = item.EncryptedContent
+			// thinking 块签名 ⇒ item.signature（Responses 形状承载签名 ⇒ 无损，⛔ 不压平）。
+			r.Signature = item.ThinkingSignature
 			items = append(items, r)
 		case "function_call", "tool_use":
 			callID := item.CallID
@@ -631,10 +630,22 @@ type respEventOut struct {
 // 每个事件 `event:` + `data:` 双字段、事件名与 data.type 一致、sequence_number 单调递增；
 // 终止为恰好一个终态事件（response.completed / failed / incomplete）后接 data: [DONE]。
 //
-// 帧约定（internal/stream Frame 承载，⛔ 不改其定义）：
+// 帧约定（internal/stream Frame 承载）：
 //   - FrameToolCallArgsDelta：ToolCallID=call_id、Text=函数名（仅补名帧，不发事件）、
 //     Arguments=参数增量；
+//   - FrameReasoningDelta：推理文本增量发 reasoning_text.delta；签名帧
+//     （ThinkingSignature 非空，见 stream.FrameReasoningDelta 承载约定）不发事件，
+//     只累积进 reasoning item 的 signature 字段（Responses 形状承载签名 ⇒ 无损）；
 //   - FrameDone：Status=六值状态原值；FrameError：Text=错误消息、Status=错误码。
+//
+// reasoningBlock 是一个 thinking 块的流式累积（正文增量 + 块签名）。
+// 签名帧收口当前块并落签名（⛔ 不可压平）⇒ 多 thinking 块逐块保真，
+// 与非流式 EncodeResponse 的逐块 item 同形。
+type reasoningBlock struct {
+	parts []string
+	sig   string
+}
+
 type EventEncoder struct {
 	mu           sync.Mutex
 	model        string
@@ -646,7 +657,7 @@ type EventEncoder struct {
 	errMessage   string
 	errCode      string
 	text         strings.Builder
-	reasoning    []string
+	reasoning    []reasoningBlock
 	callNames    map[string]string
 	callArgs     map[string]string
 	callOrder    []string
@@ -700,7 +711,12 @@ func (e *EventEncoder) Encode(f stream.Frame) ([]byte, error) {
 			Delta:        f.Text,
 		})
 	case stream.FrameReasoningDelta:
-		e.reasoning = append(e.reasoning, f.Reasoning)
+		// 签名帧（承载约定见 stream.FrameReasoningDelta）：只累积进 reasoning item 的
+		// signature（终态 output[] 承载，无损），不发增量事件；推理文本增量照常发。
+		e.noteReasoning(f.Reasoning, f.ThinkingSignature)
+		if f.Reasoning == "" {
+			return nil, nil
+		}
 		return e.marshalEvent("response.reasoning_text.delta", respEventOut{
 			Type:  "response.reasoning_text.delta",
 			Delta: f.Reasoning,
@@ -741,6 +757,26 @@ func (e *EventEncoder) Encode(f stream.Frame) ([]byte, error) {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("responses: 未知帧类型 %d", f.Kind)
+}
+
+// noteReasoning 累积推理增量与 thinking 块签名：签名帧（sig 非空）收口当前块并落
+// 签名（已收口的块不再追加正文，后到正文属下一个块）⇒ 多 thinking 块逐块保真。
+func (e *EventEncoder) noteReasoning(text, sig string) {
+	if sig != "" {
+		if n := len(e.reasoning); n == 0 || e.reasoning[n-1].sig != "" {
+			e.reasoning = append(e.reasoning, reasoningBlock{sig: sig})
+		} else {
+			e.reasoning[n-1].sig = sig
+		}
+	}
+	if text == "" {
+		return
+	}
+	if n := len(e.reasoning); n == 0 || e.reasoning[n-1].sig != "" {
+		e.reasoning = append(e.reasoning, reasoningBlock{})
+	}
+	last := &e.reasoning[len(e.reasoning)-1]
+	last.parts = append(last.parts, text)
 }
 
 // noteCall 登记工具调用的名称 / 参数增量（按到达顺序归属，⚠️ Frame 无 index 槽位，
@@ -812,10 +848,15 @@ func (e *EventEncoder) terminalResponse(status string) *respResponseOut {
 		Text:   e.text.String(),
 		Usage:  e.usage,
 	}
-	if len(e.reasoning) > 0 {
+	// 逐块装配 reasoning item：签名落 item 的 signature 字段（与非流式同形，⛔ 不压平）。
+	for _, b := range e.reasoning {
+		if len(b.parts) == 0 && b.sig == "" {
+			continue
+		}
 		resp.OutputItems = append(resp.OutputItems, core.OutputItem{
-			Type:          "reasoning",
-			ReasoningText: strings.Join(e.reasoning, "\n"),
+			Type:              "reasoning",
+			ReasoningText:     strings.Join(b.parts, "\n"),
+			ThinkingSignature: b.sig,
 		})
 	}
 	if e.text.Len() > 0 {

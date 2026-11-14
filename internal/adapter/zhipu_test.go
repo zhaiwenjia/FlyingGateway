@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:58:31.824
+// 日期: 2026-11-14 16:38:51.679
 // 作者: Zhai Wenjia
 
 package adapter
@@ -14,10 +14,11 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 )
 
-// 本文件覆盖智谱 GLM 适配器（统一 SDD 4.3.8）：
+// 本文件覆盖智谱 GLM 适配器（统一 SDD 4.3.8；出站 Chat Completions）：
 // BuildRequest（流式参数是 stream_options.chunk_include_usage ⛔ 不是 include_usage——
-// 照搬会静默拿不到 usage）、ParseResponse（sensitive / network_error /
-// model_context_window_exceeded 独有 / 非标准取值超集原值）、ParseUsage（命中单列、无写入）。
+// 照搬会静默拿不到 usage；reasoning_effort 顶层字段）、ParseResponse（sensitive / network_error /
+// model_context_window_exceeded 独有 / 非标准取值超集原值）、ParseUsage（命中单列、无写入）、
+// 真实流样本直喂（testdata/real/zhipu_stream_docs_example.txt）。
 
 func newZhipuResolution(base string) *core.Resolution {
 	return &core.Resolution{
@@ -80,8 +81,11 @@ func TestZhipuParseResponseFinishSuperset(t *testing.T) {
 	if out.FinishReason != core.FinishSensitive {
 		t.Fatalf("FinishReason = %q，期望 sensitive（智谱独有，4.5.1）", out.FinishReason)
 	}
+	if out.Text != "被拦截" {
+		t.Fatalf("Text = %q，期望 被拦截", out.Text)
+	}
 	for _, want := range []string{core.FinishNetworkError, core.FinishModelContextWindowExceeded} {
-		body := `{"id":"r","status":"completed","output":[],"finish_reason":"` + want + `"}`
+		body := `{"id":"r","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"` + want + `"}]}`
 		out, err := a.ParseResponse(newZhipuResolution(""), []byte(body))
 		if err != nil {
 			t.Fatalf("ParseResponse(%s) 报错: %v", want, err)
@@ -148,19 +152,56 @@ func TestZhipuToolChoiceDegradationRecorded(t *testing.T) {
 	}
 }
 
-// TestZhipuStreamToolCallName 钉住流式工具调用名进帧（帧承载约定：FrameToolCallArgsDelta.Text
-// 载函数名、ToolCallID 载调用 id）：output_item.added 的 item.name 必须以补名帧
-// （ToolCallID=call_abc、Text=search）进入帧序列，参数帧照常到（ToolCallID 一致、Arguments 完整）。
-// 错误实现会红：不发补名帧 ⇒ 帧序列里只有 Text 为空的参数帧 ⇒ named=0 ⇒ 红。
+// TestZhipuStreamDocsExample 钉住真实流样本直喂（2026-11-14 改形验收点）：
+// testdata/real/zhipu_stream_docs_example.txt（官方文档「响应示例」块逐字，含 `...` 省略行、
+// ⛔ 不补造）经 StreamStart 直喂 ⇒ 帧序列与样本逐字一致：文本增量 春 / 天 / 来 +
+// 末帧 usage（8/262）+ done（finish_reason=stop 超集原值）。
+// 错误实现会红：`...` 省略行中断解析 ⇒ 帧缺失红；usage 与 done 顺序颠倒 ⇒ 帧序红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestZhipuStreamDocsExample -v
+func TestZhipuStreamDocsExample(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(loadFixture(t, "real/zhipu_stream_docs_example.txt"))
+	}))
+	defer srv.Close()
+
+	a := NewZhipu(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newZhipuResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v（`...` 省略行必须容忍）", cerr)
+	}
+	if len(frames) != 5 {
+		t.Fatalf("帧数 = %d，期望 5（春/天/来 + usage + done）：%+v", len(frames), frames)
+	}
+	for i, want := range []string{"春", "天", "来"} {
+		if frames[i].Kind != stream.FrameTextDelta || frames[i].Text != want {
+			t.Fatalf("帧[%d] = %+v，期望文本增量 %q（样本逐字）", i, frames[i], want)
+		}
+	}
+	u := frames[3]
+	if u.Kind != stream.FrameUsage || u.Usage.InputTokens != 8 || u.Usage.OutputTokens != 262 {
+		t.Fatalf("帧[3] = %+v，期望 usage（8/262，样本逐字）", u)
+	}
+	if frames[4].Kind != stream.FrameDone || frames[4].Status != "stop" {
+		t.Fatalf("帧[4] = %+v，期望 done stop（finish_reason 超集原值）", frames[4])
+	}
+}
+
+// TestZhipuStreamToolCallName 钉住 chat chunk 的工具帧与推理增量（帧承载约定：
+// FrameToolCallArgsDelta.Text 载函数名、ToolCallID 载调用 id）：首块带名进补名帧、
+// 后续块按 index 对齐同一调用 id 传参数增量、delta.reasoning_content（扩展名逐字）进推理帧。
+// 错误实现会红：不发补名帧 ⇒ named=0 ⇒ 红；index 不对齐 ⇒ 参数帧 ToolCallID 断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestZhipuStreamToolCallName -v
 func TestZhipuStreamToolCallName(t *testing.T) {
 	const sse = "" +
-		"event: response.output_item.added\n" +
-		"data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"search\"}}\n\n" +
-		"event: response.function_call_arguments.delta\n" +
-		"data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":1,\"item_id\":\"fc_1\",\"partial_json\":\"{\\\"q\\\":1}\"}\n\n" +
-		"event: response.completed\n" +
-		"data: {\"type\":\"response.completed\",\"sequence_number\":2}\n\n" +
+		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":1}\"}}]},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"想一想\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -177,7 +218,8 @@ func TestZhipuStreamToolCallName(t *testing.T) {
 	if cerr != nil {
 		t.Fatalf("流式终态错误: %v", cerr)
 	}
-	var named, args int
+	var named, args, reasoning int
+	var doneStatus string
 	for _, f := range frames {
 		if f.Kind == stream.FrameToolCallArgsDelta && f.ToolCallID == "call_abc" {
 			if f.Text == "search" {
@@ -187,11 +229,39 @@ func TestZhipuStreamToolCallName(t *testing.T) {
 				args++
 			}
 		}
+		if f.Kind == stream.FrameReasoningDelta && f.Reasoning == "想一想" {
+			reasoning++
+		}
+		if f.Kind == stream.FrameDone {
+			doneStatus = f.Status
+		}
 	}
 	if named == 0 {
 		t.Fatalf("缺补名帧（ToolCallID=call_abc 且 Text=search）：%+v", frames)
 	}
 	if args == 0 {
-		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
+		t.Fatalf("参数帧缺失（后续块按 index 对齐 call_abc 且 Arguments={\"q\":1}）：%+v", frames)
+	}
+	if reasoning == 0 {
+		t.Fatalf("delta.reasoning_content 未进推理帧：%+v", frames)
+	}
+	if doneStatus != "tool_calls" {
+		t.Fatalf("done 状态 = %q，期望 tool_calls（finish_reason 超集原值）", doneStatus)
+	}
+}
+
+// TestZhipuParseUsageRealSample 钉住真实样本（智谱官方文档上下文缓存指南响应示例，真实 request_id
+// 202609171836159342f8e00bec415f，来源见 testdata/real/README.md）上 ParseUsage 归一成立：
+// 命中 1024 单列、无写入（存储限时免费）、Uncached=1075−1024=51；
+// completion 241 已含 reasoning ⇒ Out=241 ⛔ 不二次加（样本 reasoning=0）。
+// 错误实现会红：命中加进输入或 reasoning 二次加 ⇒ 数值对不上 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestZhipuParseUsageRealSample -v
+func TestZhipuParseUsageRealSample(t *testing.T) {
+	a := NewZhipu(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/zhipu_usage.json"))
+	if u.InputTokens != 1075 || u.CacheReadTokens != 1024 || u.InputTokensUncached != 51 ||
+		u.OutputTokens != 241 || u.ReasoningTokens != 0 || u.TotalTokens != 1316 {
+		t.Fatalf("归一 = In%d/Read%d/Unc%d/Out%d/Reason%d/Total%d，期望 1075/1024/51/241/0/1316（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.ReasoningTokens, u.TotalTokens)
 	}
 }

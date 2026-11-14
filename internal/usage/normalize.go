@@ -394,6 +394,9 @@ func parseMiniMax(raw json.RawMessage) (*core.Usage, error) {
 }
 
 // mimoUsage 是小米 MiMo usage（4.4.2：命中在二级，无写入）。
+// ⚠️ 2026-11-14 实测修正：真实样本带 `completion_tokens_details.reasoning_tokens`
+// （SDD 4.3.10 字段表本就列了该字段）——现象：实现漏读 ⇒ Reasoning 恒 0；
+// 根因：结构体没建该字段；不修会怎样：推理 token 计量缺失，输出侧成本审计对不上账。
 type mimoUsage struct {
 	PromptTokens        int64 `json:"prompt_tokens"`
 	CompletionTokens    int64 `json:"completion_tokens"`
@@ -401,6 +404,9 @@ type mimoUsage struct {
 	PromptTokensDetails struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 // parseMiMo 按 MiMo 口径归一（4.4.2 小米 MiMo 行）：cached_tokens 命中、无写入 ⇒ 写入记 0。
@@ -415,17 +421,25 @@ func parseMiMo(raw json.RawMessage) (*core.Usage, error) {
 		CacheReadTokens:     cached,
 		InputTokensUncached: nonNeg(v.PromptTokens - cached),
 		OutputTokens:        v.CompletionTokens,
+		ReasoningTokens:     v.CompletionTokensDetails.ReasoningTokens,
 		TotalTokens:         v.TotalTokens,
 		CacheReadMode:       core.CacheModeImplicit, // 自动命中
 	}, nil
 }
 
-// grokChatUsage 是 Grok / xAI Chat 形 usage（3.2 / 4.4.2：cached_prompt_text_tokens 命中）。
+// grokChatUsage 是 Grok / xAI Chat 形 usage（3.2 / 4.4.2：缓存命中字段两形态取其一）。
+// ⚠️ 2026-11-14 实测修正：xAI 现行文档与真实样本的命中字段是
+// `prompt_tokens_details.cached_tokens`，`cached_prompt_text_tokens` 是旧形态——
+// 现象：只认旧字段 ⇒ 真实响应命中归 0、缓存成本被算成全价；根因：SDD 4.3.5 只列了旧字段名；
+// 为什么不删旧字段：两形态并存于不同 API 版本，取其一即可（⛔ 不累加）。
 type grokChatUsage struct {
 	PromptTokens           int64 `json:"prompt_tokens"`
 	CompletionTokens       int64 `json:"completion_tokens"`
 	TotalTokens            int64 `json:"total_tokens"`
-	CachedPromptTextTokens int64 `json:"cached_prompt_text_tokens"`
+	CachedPromptTextTokens int64 `json:"cached_prompt_text_tokens"` // 旧形态
+	PromptTokensDetails    struct {
+		CachedTokens int64 `json:"cached_tokens"` // 现行形态（真实样本/xAI 文档）
+	} `json:"prompt_tokens_details"`
 	// ReasoningTokens 按 3.2「reasoning_tokens 单列」取顶层字段。
 	ReasoningTokens         int64 `json:"reasoning_tokens"`
 	CompletionTokensDetails struct {
@@ -448,6 +462,10 @@ func parseGrokChat(raw json.RawMessage) (*core.Usage, error) {
 		reasoning = v.CompletionTokensDetails.ReasoningTokens
 	}
 	cached := v.CachedPromptTextTokens
+	if cached == 0 {
+		// 现行形态（prompt_tokens_details.cached_tokens）兜底，两形态取其一 ⛔ 不累加。
+		cached = v.PromptTokensDetails.CachedTokens
+	}
 	return &core.Usage{
 		InputTokens:         v.PromptTokens,
 		CacheReadTokens:     cached,
@@ -541,24 +559,38 @@ func parseOllamaV1(raw json.RawMessage) (*core.Usage, error) {
 }
 
 // qwenNativeUsage 是 Qwen / DashScope 原生 usage（4.4.2 Qwen 原生行：input_tokens / output_tokens）。
+// ⚠️ 2026-11-14 实测修正：真实样本（阿里云 Context Cache 文档 Cache hit 示例）带
+// `prompt_tokens_details.cached_tokens` —— 现象：SDD 4.4.2 记「无缓存字段 ⇒ 记 0」，
+// 真实响应却有该字段、被丢后缓存命中算成全价；根因：SDD 口径按旧版响应写的；
+// 为什么这么修：字段在就解析（无字段时仍记 0，兼容旧行为），⛔ 不猜造。
 type qwenNativeUsage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	TotalTokens  int64 `json:"total_tokens"`
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	TotalTokens         int64 `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
-// parseQwenNative 按 Qwen 原生口径归一（4.4.2 Qwen 原生行）：无缓存字段 ⇒ 读写记 0。
+// parseQwenNative 按 Qwen 原生口径归一（4.4.2 Qwen 原生行）：命中
+// prompt_tokens_details.cached_tokens（无该字段 ⇒ 记 0），写入记 0。
 func parseQwenNative(raw json.RawMessage) (*core.Usage, error) {
 	var v qwenNativeUsage
 	if err := decode(raw, &v); err != nil {
 		return nil, err
 	}
+	cached := v.PromptTokensDetails.CachedTokens
+	mode := core.CacheModeNone
+	if cached > 0 {
+		mode = core.CacheModeImplicit
+	}
 	return &core.Usage{
 		InputTokens:         v.InputTokens,
-		InputTokensUncached: v.InputTokens,
+		CacheReadTokens:     cached,
+		InputTokensUncached: nonNeg(v.InputTokens - cached),
 		OutputTokens:        v.OutputTokens,
 		TotalTokens:         v.TotalTokens,
-		CacheReadMode:       core.CacheModeNone,
+		CacheReadMode:       mode,
 	}, nil
 }
 

@@ -169,3 +169,18 @@ func TestXAIStreamToolCallName(t *testing.T) {
 		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
 	}
 }
+
+// TestXAIParseUsageRealSample 钉住真实样本（xAI 官方文档 Cost Tracking usage 示例，含自报费用
+// cost_in_usd_ticks=158500，来源见 testdata/real/README.md）上 ParseUsage 归一成立：
+// Responses 树 input_tokens=199 是总输入、无缓存字段 ⇒ 读写 0、Uncached=199、Out=1、Total=200；
+// cost_in_usd_ticks 不入 Usage（5.6 ①）⇒ 随 Raw 保留。
+// 错误实现会红：把 cost_in_usd_ticks 当 token 计入 ⇒ 数值对不上 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestXAIParseUsageRealSample -v
+func TestXAIParseUsageRealSample(t *testing.T) {
+	a := NewXAI(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/grok_responses_usage.json"))
+	if u.InputTokens != 199 || u.CacheReadTokens != 0 || u.InputTokensUncached != 199 || u.OutputTokens != 1 || u.TotalTokens != 200 {
+		t.Fatalf("归一 = In%d/Read%d/Unc%d/Out%d/Total%d，期望 199/0/199/1/200（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
+	}
+}

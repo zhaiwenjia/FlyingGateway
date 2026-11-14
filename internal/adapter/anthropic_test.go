@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:58:31.502
+// 日期: 2026-11-14 16:08:29.819
 // 作者: Zhai Wenjia
 
 package adapter
@@ -311,5 +311,134 @@ func TestAnthropicStreamToolCallName(t *testing.T) {
 	}
 	if args == 0 {
 		t.Fatalf("参数帧缺失（ToolCallID=toolu_1 且 Arguments={\"q\":1}）：%+v", frames)
+	}
+}
+
+// TestAnthropicParseUsageRealSample 钉住真实样本（litellm 真实录制，来源见 testdata/real/README.md）上
+// ParseUsage 归一成立：残值合成 Input = input + cache_creation + cache_read（⛔ 不取 input_tokens 残值）——
+// 写缓存轮 4+876+0=880、命中轮 4+0+873=877。
+// 错误实现会红：直接取 input_tokens ⇒ 4 ≠ 880 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestAnthropicParseUsageRealSample -v
+func TestAnthropicParseUsageRealSample(t *testing.T) {
+	a := NewAnthropic(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/anthropic_usage_cachewrite.json"))
+	if u.InputTokens != 880 || u.CacheWriteTokens != 876 || u.InputTokensUncached != 4 || u.OutputTokens != 235 {
+		t.Fatalf("写缓存轮归一 = In%d/Write%d/Unc%d/Out%d，期望 880/876/4/235（4+876+0 残值合成）",
+			u.InputTokens, u.CacheWriteTokens, u.InputTokensUncached, u.OutputTokens)
+	}
+	u = a.ParseUsage(loadFixture(t, "real/anthropic_usage_cachehit.json"))
+	if u.InputTokens != 877 || u.CacheReadTokens != 873 || u.InputTokensUncached != 4 || u.OutputTokens != 254 {
+		t.Fatalf("命中轮归一 = In%d/Read%d/Unc%d/Out%d，期望 877/873/4/254（4+0+873 残值合成）",
+			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens)
+	}
+}
+
+// TestAnthropicStreamRealCapture 钉住真实流式帧捕获（litellm 真实录制，msg_011CfyYUVrHK4BM53hfSH5Ld）
+// 可被流式解码正确消费：message_start usage（23/6）+ message_delta 累计 usage（23/6）、文本增量 Hello.、
+// done=end_turn；真实帧里的 ping 事件不得干扰。
+// 错误实现会红：逐帧相加输出 ⇒ 12 ≠ 6 红；ping 当错误 ⇒ 流中断红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestAnthropicStreamRealCapture -v
+func TestAnthropicStreamRealCapture(t *testing.T) {
+	body := loadFixture(t, "real/anthropic_stream_real.sse")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	a := NewAnthropic(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newAnthropicResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v", cerr)
+	}
+	var usages []*core.Usage
+	var texts []string
+	var doneStatus string
+	for _, f := range frames {
+		switch f.Kind {
+		case stream.FrameUsage:
+			usages = append(usages, f.Usage)
+		case stream.FrameTextDelta:
+			texts = append(texts, f.Text)
+		case stream.FrameDone:
+			doneStatus = f.Status
+		}
+	}
+	if len(usages) != 2 {
+		t.Fatalf("usage 帧数 = %d，期望 2（message_start + message_delta）：%+v", len(usages), frames)
+	}
+	if usages[0].InputTokens != 23 || usages[0].OutputTokens != 6 {
+		t.Fatalf("message_start usage = %d/%d，期望 23/6（样本逐字）", usages[0].InputTokens, usages[0].OutputTokens)
+	}
+	if usages[1].InputTokens != 23 || usages[1].OutputTokens != 6 {
+		t.Fatalf("message_delta usage = %d/%d，期望累计 23/6（⛔ 非逐帧相加的 23/12）", usages[1].InputTokens, usages[1].OutputTokens)
+	}
+	if len(texts) != 1 || texts[0] != "Hello." {
+		t.Fatalf("文本增量 = %v，期望 [Hello.]（样本逐字）", texts)
+	}
+	if doneStatus != "end_turn" {
+		t.Fatalf("done 状态 = %q，期望 end_turn（样本逐字）", doneStatus)
+	}
+}
+
+// TestAnthropicStreamSignatureDelta 钉住流式 thinking 签名进帧（signature_delta ⇒
+// delta.signature 落 Frame.ThinkingSignature，⛔ 不可压平）：帧序列必须含签名帧，
+// 承载约定为 FrameReasoningDelta 且 ThinkingSignature 非空、Reasoning 为空
+// （见 stream.FrameReasoningDelta 注释），推理文本帧与其分离。
+// 错误实现会红：signature_delta 被丢（帧抽象无签名槽位时的旧行为）⇒ 签名断言红；
+// 签名压进 Reasoning 文本 ⇒ 承载约定断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestAnthropicStreamSignatureDelta -v
+func TestAnthropicStreamSignatureDelta(t *testing.T) {
+	const sse = "" +
+		"event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"推理过程\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-流式-1\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	a := NewAnthropic(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newAnthropicResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v", cerr)
+	}
+	var sigs []stream.Frame
+	var reasoning string
+	for _, f := range frames {
+		if f.ThinkingSignature != "" {
+			sigs = append(sigs, f)
+		}
+		if f.Kind == stream.FrameReasoningDelta && f.Reasoning != "" {
+			reasoning += f.Reasoning
+		}
+	}
+	if len(sigs) != 1 || sigs[0].ThinkingSignature != "sig-流式-1" {
+		t.Fatalf("签名帧 = %+v，期望恰一帧带 sig-流式-1（signature_delta ⛔ 不可压平）", sigs)
+	}
+	if sigs[0].Kind != stream.FrameReasoningDelta || sigs[0].Reasoning != "" {
+		t.Errorf("承载约定错（签名帧 = FrameReasoningDelta 且 Reasoning 为空）: %+v", sigs[0])
+	}
+	if reasoning != "推理过程" {
+		t.Errorf("推理文本帧应与签名帧分离，正文 = %q", reasoning)
 	}
 }

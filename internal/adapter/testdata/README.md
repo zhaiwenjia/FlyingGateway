@@ -15,12 +15,12 @@
 | anthropic_response.json | SDD 4.3.2 响应体关键字段（content[] 块数组） | 构造（text + thinking(signature) + tool_use，stop_reason=tool_use） | — |
 | deepseek_usage_sample.json | SDD 4.3.4「token 计量」样本块 | 逐字（7/11/18, hit 0, miss 7） | 7 / 0 / 0 / 11（Uncached=7） |
 | deepseek_usage_hitmiss.json | SDD 4.3.4「命中/未命中双字段，取其一⛔不累加」 | 构造（prompt 7, hit 5, cached 5 同值, miss 2） | 7 / 5（⛔ 非 10）/ 0 / 11（Uncached=2） |
-| deepseek_response.json | SDD 4.3.4 + 4.5.2 DeepSeek 行 | 构造（finish_reason=aborted 独有值） | — |
+| deepseek_response.json | SDD 4.3.4 + 4.5.2 DeepSeek 行 | 构造（chat.completion 形，finish_reason=aborted 独有值） | — |
 | xai_chat_usage.json | SDD 4.3.5 Chat Completions usage 字段 | 构造（cached_prompt_text_tokens=40） | 100 / 40 / 0 / 20（Uncached=60） |
 | xai_responses_usage.json | SDD 4.3.5 Responses usage 字段（含 cost_in_usd_ticks） | 构造 | 200 / 0 / 0 / 50（cost_in_usd_ticks 随 Raw 保留） |
 | kimi_usage.json | SDD 11.1「Kimi 三分」行 | 逐字（309/53/256） | 309 / 53 / 256 / 21（Uncached=0） |
 | zhipu_usage.json | SDD 4.3.8 token 计量字段表 | 构造（prompt 100, cached 30, completion 60 含 reasoning 20） | 100 / 30 / 0 / 60（⛔ reasoning 不二次加） |
-| zhipu_response.json | SDD 4.5.2 智谱行 finish_reason 取值 | 构造（sensitive 独有值） | — |
+| zhipu_response.json | SDD 4.5.2 智谱行 finish_reason 取值 | 构造（chat.completion 形，sensitive 独有值） | — |
 | qwen_compat_usage.json | SDD 4.4.2 Qwen 兼容行 | 构造（cached 25, cache_creation_input_tokens 10） | 100 / 25 / 10 / 40（Uncached=65） |
 | qwen_native_usage.json | SDD 4.3.7 原生 text-generation usage | 构造（input_tokens 17, output_tokens 64） | 17 / 0 / 0 / 64 |
 | qwen_native_response.json | SDD 4.3.7 原生响应字段表 | 构造 | — |
@@ -30,7 +30,7 @@
 | minimax_response_error.json | SDD 4.3.11 错误对象 base_resp | 构造（status_code=1008 余额不足） | — |
 | minimax_response_ok.json | SDD 4.3.11 响应体关键字段 | 构造（finish_reason=length） | — |
 | mimo_usage.json | SDD 4.3.10 token 计量字段表 | 构造（cached 15） | 80 / 15 / 0 / 20（Uncached=65） |
-| mimo_response.json | SDD 4.5.2 MiMo 行 finish_reason 取值 | 构造（repetition_truncation 独有值） | — |
+| mimo_response.json | SDD 4.5.2 MiMo 行 finish_reason 取值 | 构造（chat.completion 形，repetition_truncation 独有值） | — |
 | ollama_usage.json | SDD 11.1「Ollama 平铺」行 + 4.3.6 字段表 | prompt_eval_count=26 / prompt_eval_cached_count=13 逐字；eval_count=18 构造（11.1 行未给输出值） | 26 / 13 / 0 / 18（Uncached=13） |
 | ollama_response.json | SDD 4.3.6 原生响应字段表 | 构造（done_reason=stop） | — |
 | ollama_v1_usage.json | SDD 4.4.2 Ollama /v1 行 | 构造（无缓存明细） | 30 / 0 / 0 / 12 |

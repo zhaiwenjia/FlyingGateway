@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:29:38.457
+// 日期: 2026-11-14 16:38:51.651
 // 作者: Zhai Wenjia
 
 package adapter
@@ -7,7 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
@@ -16,13 +21,16 @@ import (
 )
 
 // DeepSeek 适配器（统一 SDD 4.3.4）：
-// 出站 Responses：POST {base}/responses（任务书「deepseek（Responses；Bearer）：/responses」）。
-// AuthScheme: Authorization + "Bearer "；previous_response_id 支持 = true（3.5 表）。
+// 出站 Chat Completions：POST {base}/chat/completions（真实流为 chat.completion.chunk 形，
+// 官方文档逐帧示例见 testdata/real/deepseek_stream_real.sse）。
+// AuthScheme: Authorization + "Bearer "。
+// previous_response_id：chat 形 wire 无此字段 ⇒ 按不支持处理（3.5：⛔ 不静默丢弃，显式报错）。
 // usage 是「命中 / 未命中」双字段（prompt_cache_hit_tokens 与 prompt_cache_miss_tokens，
 // 4.3.4：⚠️ 唯一给双字段的家；prompt_cache_hit_tokens 与 prompt_tokens_details.cached_tokens 同值
 // ⇒ 取其一 ⛔ 不累加）——归 usage.Normalize 的 DeepSeek 逐家口径。
 // finish_reason 含 aborted / insufficient_system_resource（DeepSeek 独有，4.5.1）⇒ 超集原值。
-// 流式：SSE（OpenAI 形状），末帧携带 usage。
+// 构造 / 解析 / 流事件解析走 openai-go/v3 typed 结构（统一 SDD 3.6 / 10.3；body []byte 签名不变）；
+// 流式 HTTP 执行保留 streamRequest（Tier 2 兜底，见交付报告）。
 
 type deepseekAdapter struct {
 	hc *http.Client
@@ -32,8 +40,8 @@ type deepseekAdapter struct {
 func NewDeepSeek(hc *http.Client) Adapter { return &deepseekAdapter{hc: hc} }
 
 func (a *deepseekAdapter) Provider() core.Provider          { return core.ProviderDeepSeek }
-func (a *deepseekAdapter) OutboundShape() OutboundShape     { return ShapeResponses }
-func (a *deepseekAdapter) SupportsPreviousResponseID() bool { return true }
+func (a *deepseekAdapter) OutboundShape() OutboundShape     { return ShapeChatCompletions }
+func (a *deepseekAdapter) SupportsPreviousResponseID() bool { return false }
 
 // AuthScheme 按 4.3.4：Authorization: Bearer。
 func (a *deepseekAdapter) AuthScheme() AuthScheme {
@@ -46,303 +54,349 @@ func (a *deepseekAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderDeepSeek, usageTreeShape(raw), raw)
 }
 
-// ---- 请求体（Responses 形状，4.3.1 字段名逐字）----
+// ---- 请求体（Chat 形状，SDK typed 参数：openai.ChatCompletionNewParams）----
 
-type deepseekReq struct {
-	Model              string              `json:"model"`
-	Input              []deepseekInputItem `json:"input"`
-	Instructions       string              `json:"instructions,omitempty"`
-	Tools              []deepseekTool      `json:"tools,omitempty"`
-	ToolChoice         any                 `json:"tool_choice,omitempty"`
-	Reasoning          *deepseekReasoning  `json:"reasoning,omitempty"`
-	MaxOutputTokens    int                 `json:"max_output_tokens,omitempty"`
-	PromptCacheKey     string              `json:"prompt_cache_key,omitempty"`
-	PreviousResponseID string              `json:"previous_response_id,omitempty"`
-	Stream             bool                `json:"stream,omitempty"`
-}
-
-type deepseekReasoning struct {
-	Effort string `json:"effort,omitempty"`
-}
-
-type deepseekInputItem struct {
-	Type             string              `json:"type"`
-	Role             string              `json:"role,omitempty"`
-	Content          []deepseekInputPart `json:"content,omitempty"`
-	CallID           string              `json:"call_id,omitempty"`
-	Output           string              `json:"output,omitempty"`
-	ID               string              `json:"id,omitempty"`
-	Name             string              `json:"name,omitempty"`
-	Arguments        string              `json:"arguments,omitempty"`
-	EncryptedContent string              `json:"encrypted_content,omitempty"`
-}
-
-type deepseekInputPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-}
-
-type deepseekTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-}
-
-// BuildRequest 构造 /responses 请求（任务书：/responses；4.3.1 Responses 字段名逐字）。
-func (a *deepseekAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
-	if err := checkPreviousResponseID(true, r); err != nil {
-		return nil, err
-	}
-	body := deepseekReq{
-		Model:              res.Model,
-		Instructions:       r.Instructions,
-		MaxOutputTokens:    r.MaxOutputTokens,
-		PromptCacheKey:     r.PromptCacheKey,
-		PreviousResponseID: r.PreviousResponseID,
-		Stream:             r.Stream,
-	}
-	if r.Reasoning != nil {
-		body.Reasoning = &deepseekReasoning{Effort: r.Reasoning.Effort}
+// deepseekChatMessages 映射 chat 形消息序列：
+//   - r.Instructions 并为首个 system 消息（Chat 侧由 messages 承载，core.Request 注释口径）；
+//   - system / developer 角色原样保留（⛔ developer 是小米多出的角色，不许丢）；
+//   - assistant 的 ReasoningContent 回放为 reasoning_content（DeepSeek 扩展名逐字）；
+//     EncryptedContent 是 OpenAI 加密推理链（Responses 专属载体）⇒ chat 形无对应物，不发；
+//   - 文本内容发纯字符串；用户消息带图时发 parts 数组（type=image_url 的标准 chat 部件）；
+//   - 工具结果 ⇒ role=tool（tool_call_id + content）。
+func deepseekChatMessages(r *core.Request) []openai.ChatCompletionMessageParamUnion {
+	var out []openai.ChatCompletionMessageParamUnion
+	if r.Instructions != "" {
+		out = append(out, openai.ChatCompletionMessageParamUnion{
+			OfSystem: &openai.ChatCompletionSystemMessageParam{
+				Content: openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(r.Instructions)},
+			},
+		})
 	}
 	for _, m := range r.Messages {
-		items, sys := deepseekInputItems(m)
-		if sys != "" {
-			if body.Instructions == "" {
-				body.Instructions = sys
-			} else {
-				body.Instructions += "\n" + sys
-			}
-			continue
-		}
-		body.Input = append(body.Input, items...)
+		out = append(out, deepseekChatMessage(m))
 	}
+	return out
+}
+
+// deepseekChatMessage 映射单条规范消息（角色分派见 deepseekChatMessages 注释）。
+func deepseekChatMessage(m core.Message) openai.ChatCompletionMessageParamUnion {
+	switch m.Role {
+	case "tool":
+		return openai.ChatCompletionMessageParamUnion{
+			OfTool: &openai.ChatCompletionToolMessageParam{
+				ToolCallID: m.ToolCallID,
+				Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
+			},
+		}
+	case "system", "developer":
+		// system / developer 角色原样保留（⛔ developer 不许丢，4.3.10）。
+		content := openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))}
+		if m.Role == "developer" {
+			return openai.ChatCompletionMessageParamUnion{
+				OfDeveloper: &openai.ChatCompletionDeveloperMessageParam{
+					Content: openai.ChatCompletionDeveloperMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
+				},
+			}
+		}
+		return openai.ChatCompletionMessageParamUnion{
+			OfSystem: &openai.ChatCompletionSystemMessageParam{Content: content},
+		}
+	case "assistant":
+		am := openai.ChatCompletionAssistantMessageParam{}
+		if text := contentText(m.Content); text != "" {
+			am.Content.OfString = param.NewOpt(text)
+		}
+		if m.ReasoningContent != "" {
+			// reasoning_content 是 DeepSeek 思考承载扩展名（逐字）⇒ SDK 类型无此字段，走 extras。
+			am.SetExtraFields(map[string]any{"reasoning_content": m.ReasoningContent})
+		}
+		for _, tc := range m.ToolCalls {
+			id := tc.CallID
+			if id == "" {
+				id = tc.ID
+			}
+			am.ToolCalls = append(am.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: id,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name: tc.Name, Arguments: tc.Arguments,
+					},
+				},
+			})
+		}
+		return openai.ChatCompletionMessageParamUnion{OfAssistant: &am}
+	default:
+		um := openai.ChatCompletionUserMessageParam{}
+		var parts []openai.ChatCompletionContentPartUnionParam
+		for _, p := range m.Content {
+			switch {
+			case p.ImageURL != "":
+				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+					OfImageURL: &openai.ChatCompletionContentPartImageParam{
+						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{URL: p.ImageURL},
+					},
+				})
+			case p.Text != "":
+				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{Text: p.Text},
+				})
+			}
+		}
+		if len(parts) == 0 {
+			um.Content.OfString = param.NewOpt("")
+		} else if len(parts) == 1 && parts[0].OfText != nil {
+			um.Content.OfString = param.NewOpt(parts[0].OfText.Text)
+		} else {
+			um.Content.OfArrayOfContentParts = parts
+		}
+		return openai.ChatCompletionMessageParamUnion{OfUser: &um}
+	}
+}
+
+// deepseekToolChoiceParam 映射 tool_choice 的 chat 形态（auto / none / required / 指定函数名；
+// 命名形态是 chat 标准的 {"type":"function","function":{"name":...}}）。
+func deepseekToolChoiceParam(tc *core.ToolChoice) openai.ChatCompletionToolChoiceOptionUnionParam {
+	var u openai.ChatCompletionToolChoiceOptionUnionParam
+	switch tc.Mode {
+	case "function":
+		if tc.Name != "" {
+			u.OfFunctionToolChoice = &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Name},
+			}
+			return u
+		}
+		u.OfAuto = param.NewOpt("auto")
+	case "none":
+		u.OfAuto = param.NewOpt("none")
+	case "required":
+		u.OfAuto = param.NewOpt("required")
+	default:
+		u.OfAuto = param.NewOpt("auto")
+	}
+	return u
+}
+
+// deepseekChatTools 映射工具声明（chat 形：function 对象内嵌 name / description / parameters；
+// parameters 是调用方给定的 JSON Schema ⇒ 原文透传，⛔ 不重整键序）。
+func deepseekChatTools(r *core.Request) []openai.ChatCompletionToolUnionParam {
+	var out []openai.ChatCompletionToolUnionParam
 	for _, t := range r.Tools {
-		body.Tools = append(body.Tools, deepseekTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.Parameters})
+		fd := shared.FunctionDefinitionParam{Name: t.Name}
+		if t.Description != "" {
+			fd.Description = param.NewOpt(t.Description)
+		}
+		if len(t.Parameters) > 0 {
+			fd.SetExtraFields(map[string]any{"parameters": json.RawMessage(t.Parameters)})
+		}
+		out = append(out, openai.ChatCompletionToolUnionParam{
+			OfFunction: &openai.ChatCompletionFunctionToolParam{Function: fd},
+		})
+	}
+	return out
+}
+
+// BuildRequest 构造 /chat/completions 请求（chat 形普通字段：messages[] / max_tokens / stream /
+// tools / tool_choice；prompt_cache_key 始终透传，3.5）。
+func (a *deepseekAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
+	if err := checkPreviousResponseID(false, r); err != nil {
+		return nil, err
+	}
+	p := openai.ChatCompletionNewParams{
+		Model:    shared.ChatModel(res.Model),
+		Messages: deepseekChatMessages(r),
+	}
+	if r.MaxOutputTokens > 0 {
+		p.MaxTokens = param.NewOpt(int64(r.MaxOutputTokens))
+	}
+	if r.PromptCacheKey != "" {
+		p.PromptCacheKey = param.NewOpt(r.PromptCacheKey)
 	}
 	if r.ToolChoice != nil {
-		body.ToolChoice = toolChoiceResponses(r.ToolChoice)
+		p.ToolChoice = deepseekToolChoiceParam(r.ToolChoice)
 	}
-	raw, err := marshalBody(body)
+	p.Tools = deepseekChatTools(r)
+	ex := map[string]any{}
+	if r.Stream {
+		ex["stream"] = true
+	}
+	if len(ex) > 0 {
+		p.SetExtraFields(ex)
+	}
+	raw, err := marshalBody(p)
+	if err != nil {
+		return nil, err
+	}
+	// enable_thinking 等特异参数经 Extra 透传（黑名单见 adapter.extraBlocklist）。
+	raw, err = mergeExtraBody(raw, r.Extra)
 	if err != nil {
 		return nil, err
 	}
 	return &Outbound{
 		Method:  "POST",
-		URL:     joinURL(res.BaseURL, "/responses"),
+		URL:     joinURL(res.BaseURL, "/chat/completions"),
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    raw,
 	}, nil
 }
 
-// deepseekInputItems 把规范消息拆成 Responses input item（4.2.3）。
-func deepseekInputItems(m core.Message) ([]deepseekInputItem, string) {
-	if m.Role == "system" {
-		return nil, contentText(m.Content)
-	}
-	if m.Role == "tool" {
-		return []deepseekInputItem{{Type: "function_call_output", CallID: m.ToolCallID, Output: contentText(m.Content)}}, ""
-	}
-	var items []deepseekInputItem
-	if m.EncryptedContent != "" || m.ReasoningContent != "" {
-		it := deepseekInputItem{Type: "reasoning", EncryptedContent: m.EncryptedContent}
-		if m.ReasoningContent != "" {
-			it.Content = []deepseekInputPart{{Type: "reasoning_text", Text: m.ReasoningContent}}
-		}
-		items = append(items, it)
-	}
-	partType := "input_text"
-	if m.Role == "assistant" {
-		partType = "output_text"
-	}
-	var parts []deepseekInputPart
-	for _, p := range m.Content {
-		switch {
-		case p.ImageURL != "":
-			parts = append(parts, deepseekInputPart{Type: "input_image", ImageURL: p.ImageURL})
-		case p.Text != "":
-			parts = append(parts, deepseekInputPart{Type: partType, Text: p.Text})
-		}
-	}
-	if len(parts) > 0 {
-		items = append(items, deepseekInputItem{Type: "message", Role: m.Role, Content: parts})
-	}
-	for _, tc := range m.ToolCalls {
-		id := tc.CallID
-		if id == "" {
-			id = tc.ID
-		}
-		items = append(items, deepseekInputItem{Type: "function_call", ID: tc.ID, CallID: id, Name: tc.Name, Arguments: tc.Arguments})
-	}
-	return items, ""
-}
+// ---- 响应体（chat.completion；finish_reason 超集原值）----
 
-// ---- 响应体（Responses 对象 + DeepSeek 回落字段 finish_reason）----
-
-type deepseekResp struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Model  string `json:"model"`
-	Output []struct {
-		Type    string `json:"type"`
-		ID      string `json:"id"`
-		Role    string `json:"role"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		EncryptedContent string `json:"encrypted_content"`
-		Summary          []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"summary"`
-		CallID    string `json:"call_id"`
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-		// ReasoningContent 是 DeepSeek 思考模式的专有字段（4.3.4：choices[].delta.reasoning_content），
-		// 兼容端点可能回落到 item 上。
-		ReasoningContent string `json:"reasoning_content"`
-	} `json:"output"`
-	OutputText        string `json:"output_text"`
-	IncompleteDetails *struct {
-		Reason string `json:"reason"`
-	} `json:"incomplete_details"`
-	Usage json.RawMessage `json:"usage"`
-	// FinishReason：DeepSeek 兼容端点回落的 chat 语义字段（4.5.2 取值含 aborted /
-	// insufficient_system_resource）⇒ 超集原值。
-	FinishReason string `json:"finish_reason"`
-}
-
-// ParseResponse 解析 DeepSeek 响应（4.3.4 / 4.5.2：finish_reason 原值入超集）。
+// ParseResponse 解析 chat.completion 响应：SDK typed 解析（openai.ChatCompletion，3.6）；
+// reasoning_content 是 DeepSeek 思考承载扩展字段（逐字）⇒ 从 message 原始 JSON 取进推理正文位；
+// finish_reason 超集原值（aborted / insufficient_system_resource，4.5.1 ⛔ 不得丢弃）。
 func (a *deepseekAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var r deepseekResp
-	if err := json.Unmarshal(body, &r); err != nil {
+	var c openai.ChatCompletion
+	if err := json.Unmarshal(body, &c); err != nil {
 		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
 	}
-	out := &core.Response{ID: r.ID, Model: r.Model, Status: r.Status, Text: r.OutputText}
-	hasToolCall := false
-	var text string
-	for _, it := range r.Output {
-		oi := core.OutputItem{Type: it.Type, ID: it.ID, Role: it.Role, EncryptedContent: it.EncryptedContent,
-			CallID: it.CallID, Name: it.Name, Arguments: it.Arguments, ReasoningText: it.ReasoningContent}
-		for _, p := range it.Content {
-			if p.Text != "" {
-				oi.Content = append(oi.Content, core.ContentPart{Type: "text", Text: p.Text})
-				if it.Type == "message" {
-					text += p.Text
-				}
-			}
+	out := &core.Response{ID: c.ID, Model: c.Model, Status: core.StatusCompleted}
+	if len(c.Choices) > 0 {
+		ch := c.Choices[0]
+		out.FinishReason = ch.FinishReason
+		if out.FinishReason == "" {
+			out.FinishReason = core.FinishUnknown
 		}
-		for _, s := range it.Summary {
-			oi.Summary = append(oi.Summary, core.SummaryPart{Type: s.Type, Text: s.Text})
+		if out.FinishReason == core.FinishLength {
+			out.Status = core.StatusIncomplete
 		}
-		if it.Type == "function_call" {
-			hasToolCall = true
+		var mq struct {
+			ReasoningContent string `json:"reasoning_content"`
+		}
+		_ = json.Unmarshal([]byte(ch.Message.RawJSON()), &mq) // RawJSON 是已解析过的 JSON，仅取扩展字段
+		oi := core.OutputItem{Type: "message", Role: "assistant", ReasoningText: mq.ReasoningContent}
+		if ch.Message.Content != "" {
+			oi.Content = []core.ContentPart{{Type: "text", Text: ch.Message.Content}}
 		}
 		out.OutputItems = append(out.OutputItems, oi)
+		out.Text = ch.Message.Content
+		for _, tc := range ch.Message.ToolCalls {
+			out.OutputItems = append(out.OutputItems, core.OutputItem{
+				Type: "function_call", ID: tc.ID, CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
+		}
+	} else {
+		out.FinishReason = core.FinishUnknown
 	}
-	if out.Text == "" {
-		out.Text = text
-	}
-	reason := ""
-	if r.IncompleteDetails != nil {
-		reason = r.IncompleteDetails.Reason
-	}
-	out.FinishReason = deriveResponsesFinish(r.FinishReason, r.Status, reason, hasToolCall)
-	if len(r.Usage) > 0 {
-		out.Usage = a.ParseUsage(r.Usage)
+	if raw := c.JSON.Usage.Raw(); raw != "" && raw != "null" {
+		out.Usage = a.ParseUsage(json.RawMessage(raw))
 	}
 	return out, nil
 }
 
-// ---- 流式（SSE OpenAI 形状；末帧携带 usage）----
+// ---- 流式（chat.completion.chunk；真实样本 testdata/real/deepseek_stream_real.sse 可直喂）----
 
-type deepseekStreamEvent struct {
-	Type           string        `json:"type"`
-	SequenceNumber int64         `json:"sequence_number"`
-	Response       *deepseekResp `json:"response"`
-	Delta          string        `json:"delta"`
-	PartialJSON    string        `json:"partial_json"`
-	ItemID         string        `json:"item_id"`
-	Item           *struct {
-		Type   string `json:"type"`
-		CallID string `json:"call_id"`
-		Name   string `json:"name"`
-	} `json:"item"`
-}
-
-type deepseekStreamDecoder struct {
+// deepseekChatStreamDecoder 是 DeepSeek 的 chat chunk 帧解码器（3.7：每家一个帧解码器）：
+// delta.content ⇒ 文本增量；delta.reasoning_content（DeepSeek 扩展名逐字）⇒ 推理增量；
+// delta.tool_calls ⇒ 工具帧（帧承载约定：Text 载函数名、ToolCallID 载调用 id、Arguments 载参数增量）；
+// finish_reason 超集原值收口（usage 若与 finish 同块，usage 帧先于 done 帧）。
+type deepseekChatStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
-	toolIDs map[string]string
+	toolIDs map[int64]string // chunk tool_call.index → 调用 id（id 只在首块出现，后续块按 index 对齐）
 }
 
-func (a *deepseekAdapter) streamDecoder() *deepseekStreamDecoder {
-	return &deepseekStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[string]string{}}
+func (a *deepseekAdapter) streamDecoder() *deepseekChatStreamDecoder {
+	return &deepseekChatStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[int64]string{}}
 }
 
-func (d *deepseekStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
+func (d *deepseekChatStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
 	data := strings.TrimSpace(ev.Data)
+	if data == "" {
+		return nil, false, nil
+	}
+	if !json.Valid([]byte(data)) && strings.Contains(data, "\n") {
+		// 紧凑样本分流：厂商文档流示例常是「一行一个 chunk、行间无空行」形（如
+		// testdata/real/kimi_stream_docs_example.txt），SSE 规范会把多行 data 拼成一个负载
+		// ⇒ 整负载非 JSON 时按行拆分逐行解，真实样本可直喂（2026-11-14 改形验收点）。
+		var frames []stream.Frame
+		for _, line := range strings.Split(data, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			fs, done, err := d.decodeOne(line)
+			frames = append(frames, fs...)
+			if err != nil || done {
+				return frames, done, err
+			}
+		}
+		return frames, false, nil
+	}
+	return d.decodeOne(data)
+}
+
+// decodeOne 解码单个 chunk 负载（[DONE] 哨兵 / 非 JSON 帧容忍）。
+func (d *deepseekChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, bool, error) {
+	data := strings.TrimSpace(payload)
 	if data == "" {
 		return nil, false, nil
 	}
 	if data == "[DONE]" {
 		return nil, true, nil
 	}
-	var e deepseekStreamEvent
-	if err := json.Unmarshal([]byte(data), &e); err != nil {
-		return nil, false, nil
+	var c openai.ChatCompletionChunk
+	if err := json.Unmarshal([]byte(data), &c); err != nil {
+		return nil, false, nil // 非 JSON 帧（keep-alive / 文档省略标记等）容忍跳过（3.7 流式容错）
 	}
-	etype := e.Type
-	if etype == "" {
-		etype = ev.Event
-	}
-	switch etype {
-	case "response.created", "response.in_progress", "response.queued":
-		return []stream.Frame{{Kind: stream.FrameLifecycle, Status: etype, Seq: e.SequenceNumber}}, false, nil
-	case "response.output_item.added":
-		if e.Item != nil && e.Item.Type == "function_call" && e.ItemID != "" {
-			id := e.Item.CallID
-			if id == "" {
-				id = e.ItemID
+	var frames []stream.Frame
+	if len(c.Choices) > 0 {
+		ch := c.Choices[0]
+		if ch.Delta.Content != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: ch.Delta.Content})
+		}
+		var dq struct {
+			ReasoningContent string `json:"reasoning_content"`
+		}
+		_ = json.Unmarshal([]byte(ch.Delta.RawJSON()), &dq) // 扩展字段从原始 delta JSON 取
+		if dq.ReasoningContent != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: dq.ReasoningContent})
+		}
+		for _, tc := range ch.Delta.ToolCalls {
+			frames = append(frames, stream.Frame{
+				Kind: stream.FrameToolCallArgsDelta, ToolCallID: d.toolCallID(tc),
+				Text: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
+		}
+		if ch.FinishReason != "" {
+			// 收口：usage（若有）先于 done 帧（末帧 usage 口径）；finish_reason 超集原值。
+			if u := d.usageOf(c); u != nil {
+				frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
 			}
-			d.toolIDs[e.ItemID] = id
-			// 补名帧：item.name 载工具函数名（arguments.delta 不再带名）⇒ 名字必须在此进帧；
-			// 帧承载约定：FrameToolCallArgsDelta 的 Text 载函数名。name 为空不发帧，保持原行为。
-			if e.Item.Name != "" {
-				return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Text: e.Item.Name, Seq: e.SequenceNumber}}, false, nil
-			}
+			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: ch.FinishReason})
+			return frames, true, nil
 		}
-		return nil, false, nil
-	case "response.output_text.delta":
-		return []stream.Frame{{Kind: stream.FrameTextDelta, Text: e.Delta, Seq: e.SequenceNumber}}, false, nil
-	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-		return []stream.Frame{{Kind: stream.FrameReasoningDelta, Reasoning: e.Delta, Seq: e.SequenceNumber}}, false, nil
-	case "response.function_call_arguments.delta":
-		id := d.toolIDs[e.ItemID]
-		if id == "" {
-			id = e.ItemID
-		}
-		return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Arguments: e.PartialJSON, Seq: e.SequenceNumber}}, false, nil
-	case "response.completed", "response.incomplete":
-		// 末帧携带 usage（4.3.4 流式事件形态）。
-		status := core.StatusCompleted
-		if etype == "response.incomplete" {
-			status = core.StatusIncomplete
-		}
-		frames := []stream.Frame{{Kind: stream.FrameDone, Status: status, Seq: e.SequenceNumber}}
-		if e.Response != nil && len(e.Response.Usage) > 0 {
-			frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(e.Response.Usage), Seq: e.SequenceNumber}}, frames...)
-		}
-		return frames, true, nil
-	case "response.failed":
-		return []stream.Frame{{Kind: stream.FrameError, Status: "response_failed", Text: "上游流式响应失败", Seq: e.SequenceNumber}}, true, nil
-	default:
-		return nil, false, nil
 	}
+	if u := d.usageOf(c); u != nil {
+		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
+	}
+	return frames, false, nil
 }
 
-// StreamStart：强制 stream=true ⇒ 真实 HTTP ⇒ SSE 解码。
+// toolCallID 取工具调用 id：chunk 的 id 只在首块出现，后续块按 index 对齐（⛔ 不让参数帧断链）；
+// 全程无 id（畸形上游）⇒ 合成稳定的 per-index 占位 id。
+func (d *deepseekChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoiceDeltaToolCall) string {
+	if tc.ID != "" {
+		d.toolIDs[tc.Index] = tc.ID
+		return tc.ID
+	}
+	if id := d.toolIDs[tc.Index]; id != "" {
+		return id
+	}
+	id := "call_idx_" + strconv.FormatInt(tc.Index, 10)
+	d.toolIDs[tc.Index] = id
+	return id
+}
+
+// usageOf 取 chunk 的 usage 原文（含 hit/miss 扩展字段，⛔ 不经 SDK 类型重整）：
+// usage 为 null 或缺键 ⇒ 不发 usage 帧（真实样本逐块带 "usage":null 的口径）。
+func (d *deepseekChatStreamDecoder) usageOf(c openai.ChatCompletionChunk) *core.Usage {
+	raw := c.JSON.Usage.Raw()
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	return d.usageFn(json.RawMessage(raw))
+}
+
+// StreamStart：强制 stream=true ⇒ 真实 HTTP ⇒ chat chunk SSE 解码。
 func (a *deepseekAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
 	rc := *r
 	rc.Stream = true

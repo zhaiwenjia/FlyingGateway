@@ -317,11 +317,12 @@ func installAuthTransport() {
 // buildUpstreamAuth 从自有令牌池选令牌并按 adapter.AuthScheme 构造鉴权头
 // （三种形态：Authorization+Prefix / api-key / x-api-key + ExtraHeaders，统一 SDD 8.4）。
 // 全部令牌受限时取等待时间最短的令牌：等待 ≤ maxWait ⇒ 等满重选；超上限 ⇒
-// 显式 429（code=token_pool_exhausted，⛔ 不盲发、⛔ 不改投其他端点）。
-func buildUpstreamAuth(pools *poolManager, ad adapter.Adapter, credentialRef string, est int64, maxWait time.Duration) (*upstreamAuth, *tokenPool, int, *core.ErrorDetail) {
+// 显式 429（code=token_pool_exhausted，⛔ 不盲发、⛔ 不改投其他端点），
+// 此时返回的 hint 即最短等待（供 Retry-After 头）。
+func buildUpstreamAuth(pools *poolManager, ad adapter.Adapter, credentialRef string, est int64, maxWait time.Duration) (*upstreamAuth, time.Duration, *core.ErrorDetail) {
 	pool, err := pools.PoolFor(credentialRef)
 	if err != nil {
-		return nil, nil, -1, gwerrors.New(core.ErrAuth, http.StatusInternalServerError, "credential_unresolved", security.Redact(err.Error()))
+		return nil, 0, gwerrors.New(core.ErrAuth, http.StatusInternalServerError, "credential_unresolved", security.Redact(err.Error()))
 	}
 	now := time.Now()
 	pick := pool.Pick(est, now)
@@ -330,28 +331,21 @@ func buildUpstreamAuth(pools *poolManager, ad adapter.Adapter, credentialRef str
 			maxWait = DefaultMaxTokenWait
 		}
 		if pick.Wait > maxWait {
-			secs := int64(pick.Wait / time.Second)
-			if pick.Wait%time.Second != 0 {
-				secs++
-			}
-			if secs < 1 {
-				secs = 1
-			}
-			detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, "token_pool_exhausted",
+			detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, codeTokenPoolExhausted,
 				fmt.Sprintf("全部 %d 个自有令牌受限，最短等待 %v 超过上限 %v", pool.Size(), pick.Wait, maxWait))
-			return nil, pool, -1, detail
+			return nil, pick.Wait, detail
 		}
 		time.Sleep(pick.Wait)
 		pick = pool.Pick(est, time.Now())
 		if !pick.OK {
-			detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, "token_pool_exhausted",
+			detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, codeTokenPoolExhausted,
 				fmt.Sprintf("全部 %d 个自有令牌受限（最短等待 %v 后仍未恢复）", pool.Size(), pick.Wait))
-			return nil, pool, -1, detail
+			return nil, pick.Wait, detail
 		}
 	}
 	scheme := ad.AuthScheme()
 	if scheme.HeaderName == "" {
-		return nil, pool, pick.Slot, gwerrors.New(core.ErrAuth, http.StatusInternalServerError, "auth_scheme_missing",
+		return nil, 0, gwerrors.New(core.ErrAuth, http.StatusInternalServerError, "auth_scheme_missing",
 			fmt.Sprintf("适配器 %s 未声明鉴权头名", ad.Provider()))
 	}
 	hs := make(map[string]string, 1+len(scheme.ExtraHeaders))
@@ -359,16 +353,17 @@ func buildUpstreamAuth(pools *poolManager, ad adapter.Adapter, credentialRef str
 	for k, v := range scheme.ExtraHeaders {
 		hs[k] = v
 	}
+	slot := pick.Slot
 	payload := &upstreamAuth{
 		headers: hs,
 		onRateLimited: func(retryAfter time.Duration) {
 			if retryAfter <= 0 {
 				retryAfter = pools.defaultCooldownFor()
 			}
-			pool.MarkRateLimited(pick.Slot, retryAfter)
+			pool.MarkRateLimited(slot, retryAfter)
 		},
 	}
-	return payload, pool, pick.Slot, nil
+	return payload, 0, nil
 }
 
 // withUpstreamAuth 把鉴权载荷挂到执行上下文（authTransport 在出网时注入 + 观测 429）。
@@ -682,8 +677,9 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 
 	// 自有令牌选择 + 凭据注入（8.4 三种形态按 provider 分派；⛔ 不透传调用方凭据 ——
 	// 调用方 API key 与自有令牌解耦，上游头永远是池内令牌）。
-	payload, _, _, authDetail := buildUpstreamAuth(s.pools, ad, res.CredentialRef, est, s.maxTokenWait)
+	payload, waitHint, authDetail := buildUpstreamAuth(s.pools, ad, res.CredentialRef, est, s.maxTokenWait)
 	if authDetail != nil {
+		h.setRetryAfterHint(waitHint) // token_pool_exhausted 的 Retry-After = 最短等待
 		s.observeExec(ep, req, nil, resultForDetail(authDetail))
 		return nil, degs, authDetail
 	}

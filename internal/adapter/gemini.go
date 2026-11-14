@@ -1,13 +1,16 @@
-// 日期: 2026-11-14 14:29:38.443
+// 日期: 2026-11-14 17:02:24.851
 // 作者: Zhai Wenjia
 
 package adapter
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"google.golang.org/genai"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
@@ -24,6 +27,16 @@ import (
 // 流式：SSE 每帧 data: 完整 JSON、无 event: 行、无 [DONE] 哨兵；
 // ⚠️ 流结束而无 finishReason ⇒ 按错误处理，⛔ 不冒充正常完成（3.7 / 4.3.3）。
 // previous_response_id 支持 = false（3.5 表：未声明即按不支持处理）。
+//
+// SDK 化（3.6 ① 优先级：官方 google.golang.org/genai，**Tier 2** 兜底级）：
+// SDK 负责请求构造（genai.GenerateContentConfig / Content / Part / Tool / ToolConfig typed）
+// 与响应 / 流解析（genai.GenerateContentResponse typed），HTTP 执行保留既有 streamRequest。
+// 为什么不走 Tier 1（client.Models.GenerateContentStream 经 SDK 客户端执行）——三个行为不变
+// 红线在 genai SDK 内不可保：
+// ① 错误体只留解析字段（genai.APIError 仅 Code/Message/Status，UpstreamBody 原文丢失）；
+// ② 流事件只出 typed 响应、无 raw JSON 槽位（usage.Normalize.Raw 的逐字原文会变成重序列化）；
+// ③ 流解析（iterateResponseStream）与 HTTP 执行（sendStreamRequest）耦合在 SDK 内部、不可单独引用。
+// ⇒ 构造 / 解析用 SDK typed，执行走 streamRequest ⇒ URL / 鉴权头 / 错误出口 / usage 原文全保持现状。
 
 type geminiAdapter struct {
 	hc *http.Client
@@ -48,53 +61,192 @@ func (a *geminiAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderGemini, core.APIShapeGeminiNative, raw)
 }
 
-// ---- 请求体（4.3.3：contents / generationConfig / systemInstruction / tools / toolConfig，驼峰）----
+// ---- 请求构造（Tier 1 手段：genai SDK typed 参数为构造真值；wire 形状为 v1beta
+// GenerateContentRequest：systemInstruction / contents / generationConfig / tools / toolConfig 驼峰）----
 
-type geminiReq struct {
-	SystemInstruction *geminiContent   `json:"systemInstruction,omitempty"`
-	Contents          []geminiContent  `json:"contents"`
-	GenerationConfig  *geminiGenConfig `json:"generationConfig,omitempty"`
-	Tools             []geminiTool     `json:"tools,omitempty"`
-	ToolConfig        any              `json:"toolConfig,omitempty"`
+// geminiSDKParams 把规范 Request 构造为 genai SDK typed 参数（3.6「SDK 构造」）：
+// GenerateContentConfig 承载 systemInstruction / 采样参数（temperature / topP /
+// maxOutputTokens / stopSequences）/ tools / toolConfig，contents 为 []*genai.Content。
+// 字段映射与语义同旧手写构造（4.3.3）：system ⇒ systemInstruction、assistant ⇒ model、
+// tool ⇒ functionResponse、tools ⇒ functionDeclarations。
+// schemas 是各 tool 的原始 JSON Schema（typed *genai.Schema 会丢未知键 ⇒ 序列化后原样回填）。
+func geminiSDKParams(r *core.Request) (*genai.GenerateContentConfig, []*genai.Content, []json.RawMessage, error) {
+	cfg := &genai.GenerateContentConfig{}
+	if r.MaxOutputTokens > 0 {
+		cfg.MaxOutputTokens = int32(r.MaxOutputTokens)
+	}
+	if r.Temperature != nil {
+		v := float32(*r.Temperature)
+		cfg.Temperature = &v
+	}
+	if r.TopP != nil {
+		v := float32(*r.TopP)
+		cfg.TopP = &v
+	}
+	if len(r.Stop) > 0 {
+		cfg.StopSequences = r.Stop
+	}
+	var contents []*genai.Content
+	for _, m := range r.Messages {
+		if m.Role == "system" {
+			text := contentText(m.Content)
+			if cfg.SystemInstruction == nil {
+				cfg.SystemInstruction = &genai.Content{Parts: []*genai.Part{{Text: text}}}
+			} else {
+				cfg.SystemInstruction.Parts = append(cfg.SystemInstruction.Parts, &genai.Part{Text: text})
+			}
+			continue
+		}
+		c, err := geminiContentOf(m)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		contents = append(contents, c)
+	}
+	var schemas []json.RawMessage
+	for _, t := range r.Tools {
+		schema := t.Parameters
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object"}`)
+		}
+		// typed *genai.Schema 只承载标准 JSON Schema 键（未知键会丢）⇒ 这里做形状校验，
+		// wire 上的 parameters 由 marshalGeminiRequest 原样回填（⛔ 不重排键序）。
+		var typed genai.Schema
+		if err := json.Unmarshal(schema, &typed); err != nil {
+			return nil, nil, nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "invalid_tool_schema",
+				"tool parameters 不是合法 JSON Schema，无法映射为 Gemini functionDeclarations.parameters")}
+		}
+		cfg.Tools = append(cfg.Tools, &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: t.Name, Description: t.Description, Parameters: &typed},
+		}})
+		schemas = append(schemas, schema)
+	}
+	if r.ToolChoice != nil {
+		// toolConfig.functionCallingConfig（Gemini 枚举：AUTO / NONE / ANY）。
+		mode := genai.FunctionCallingConfigModeAuto
+		var names []string
+		switch r.ToolChoice.Mode {
+		case "none":
+			mode = genai.FunctionCallingConfigModeNone
+		case "required":
+			mode = genai.FunctionCallingConfigModeAny
+		case "function":
+			mode = genai.FunctionCallingConfigModeAny
+			if r.ToolChoice.Name != "" {
+				names = []string{r.ToolChoice.Name}
+			}
+		}
+		fcc := &genai.FunctionCallingConfig{Mode: mode}
+		if len(names) > 0 {
+			fcc.AllowedFunctionNames = names
+		}
+		cfg.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: fcc}
+	}
+	return cfg, contents, schemas, nil
 }
 
-type geminiContent struct {
-	Role  string       `json:"role,omitempty"`
-	Parts []geminiPart `json:"parts"`
+// geminiContentOf 映射非 system 消息（assistant ⇒ model；tool ⇒ functionResponse）。
+func geminiContentOf(m core.Message) (*genai.Content, error) {
+	role := "user"
+	if m.Role == "assistant" {
+		role = "model"
+	}
+	if m.Role == "tool" {
+		name := m.Name
+		if name == "" {
+			name = m.ToolCallID
+		}
+		return &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			Name: name, Response: map[string]any{"content": contentText(m.Content)},
+		}}}}, nil
+	}
+	var parts []*genai.Part
+	for _, p := range m.Content {
+		switch {
+		case p.Data != "" && p.MIMEType != "":
+			// genai.Blob.Data 是 []byte（wire 上序列化回标准 base64）⇒ 解码校验；
+			// ⚠️ 旧手写构造把 base64 串原样透传，非法 base64 由上游裁决，此处改为显式报错。
+			data, err := base64.StdEncoding.DecodeString(p.Data)
+			if err != nil {
+				data, err = base64.RawStdEncoding.DecodeString(p.Data)
+			}
+			if err != nil {
+				return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "invalid_content_part",
+					"inline_data 不是合法 base64，无法映射为 Gemini inlineData")}
+			}
+			parts = append(parts, &genai.Part{InlineData: &genai.Blob{MIMEType: p.MIMEType, Data: data}})
+		case p.Text != "":
+			parts = append(parts, &genai.Part{Text: p.Text})
+		}
+	}
+	for _, tc := range m.ToolCalls {
+		// genai.FunctionCall.Args 是 map[string]any（wire 上重序列化 ⇒ 键序规范化）。
+		args := map[string]any{}
+		if tc.Arguments != "" {
+			if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+				return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "invalid_tool_arguments",
+					"tool_call arguments 不是合法 JSON，无法映射为 Gemini functionCall.args")}
+			}
+		}
+		parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{Name: tc.Name, Args: args}})
+	}
+	return &genai.Content{Role: role, Parts: parts}, nil
 }
 
-type geminiPart struct {
-	Text       string `json:"text,omitempty"`
-	InlineData *struct {
-		MimeType string `json:"mimeType"`
-		Data     string `json:"data"`
-	} `json:"inlineData,omitempty"`
-	FunctionCall *struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"args"`
-	} `json:"functionCall,omitempty"`
-	FunctionResponse *struct {
-		Name     string `json:"name"`
-		Response any    `json:"response"`
-	} `json:"functionResponse,omitempty"`
-}
-
-// geminiGenConfig 是 generationConfig（4.3.3：驼峰命名，⛔ 与 OpenAI 蛇形不通用）。
-type geminiGenConfig struct {
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"topP,omitempty"`
-	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
-	StopSequences   []string `json:"stopSequences,omitempty"`
-}
-
-type geminiTool struct {
-	FunctionDeclarations []geminiFuncDecl `json:"functionDeclarations"`
-}
-
-type geminiFuncDecl struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+// marshalGeminiRequest 把 SDK typed 参数序列化为 v1beta GenerateContentRequest wire 形状。
+// 拆分口径与 genai SDK 的 generateContentConfigToMldev 一致：systemInstruction / tools /
+// toolConfig 上提根层，采样字段入 generationConfig（⛔ 不是把整个 config 塞进 generationConfig）。
+// schemas 原样回填 tools[].functionDeclarations[].parameters（typed *genai.Schema 会丢未知键）。
+func marshalGeminiRequest(cfg *genai.GenerateContentConfig, contents []*genai.Content, schemas []json.RawMessage) ([]byte, error) {
+	m := map[string]any{"contents": contents}
+	if cfg.SystemInstruction != nil {
+		m["systemInstruction"] = cfg.SystemInstruction
+	}
+	if len(cfg.Tools) > 0 {
+		m["tools"] = cfg.Tools
+	}
+	if cfg.ToolConfig != nil {
+		m["toolConfig"] = cfg.ToolConfig
+	}
+	if cfg.Temperature != nil || cfg.TopP != nil || cfg.MaxOutputTokens != 0 || len(cfg.StopSequences) > 0 {
+		m["generationConfig"] = &genai.GenerateContentConfig{
+			Temperature:     cfg.Temperature,
+			TopP:            cfg.TopP,
+			MaxOutputTokens: cfg.MaxOutputTokens,
+			StopSequences:   cfg.StopSequences,
+		}
+	}
+	raw, err := marshalBody(m)
+	if err != nil {
+		return nil, err
+	}
+	if len(schemas) == 0 {
+		return raw, nil
+	}
+	// parameters 原样回填（json.RawMessage 值 ⇒ marshal 写回原始字节）。
+	var w map[string]any
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed",
+			"SDK 请求体反序列化失败（parameters 回填）")}
+	}
+	tools, _ := w["tools"].([]any)
+	for i, tv := range tools {
+		if i >= len(schemas) {
+			break
+		}
+		tool, ok := tv.(map[string]any)
+		if !ok {
+			continue
+		}
+		decls, _ := tool["functionDeclarations"].([]any)
+		if len(decls) == 0 {
+			continue
+		}
+		if decl, ok := decls[0].(map[string]any); ok {
+			decl["parameters"] = schemas[i]
+		}
+	}
+	return marshalBody(w)
 }
 
 // BuildRequest 构造 generateContent 请求（contents/generationConfig/systemInstruction 映射）。
@@ -102,54 +254,11 @@ func (a *geminiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *
 	if err := checkPreviousResponseID(false, r); err != nil {
 		return nil, err
 	}
-	body := geminiReq{}
-	if r.MaxOutputTokens > 0 || r.Temperature != nil || r.TopP != nil || len(r.Stop) > 0 {
-		body.GenerationConfig = &geminiGenConfig{
-			Temperature:     r.Temperature,
-			TopP:            r.TopP,
-			MaxOutputTokens: r.MaxOutputTokens,
-			StopSequences:   r.Stop,
-		}
+	cfg, contents, schemas, err := geminiSDKParams(r)
+	if err != nil {
+		return nil, err
 	}
-	for _, m := range r.Messages {
-		if m.Role == "system" {
-			text := contentText(m.Content)
-			if body.SystemInstruction == nil {
-				body.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: text}}}
-			} else {
-				body.SystemInstruction.Parts = append(body.SystemInstruction.Parts, geminiPart{Text: text})
-			}
-			continue
-		}
-		body.Contents = append(body.Contents, geminiContentOf(m))
-	}
-	for _, t := range r.Tools {
-		body.Tools = append(body.Tools, geminiTool{FunctionDeclarations: []geminiFuncDecl{{
-			Name: t.Name, Description: t.Description, Parameters: t.Parameters,
-		}}})
-	}
-	if r.ToolChoice != nil {
-		// toolConfig.functionCallingConfig（Gemini 枚举：AUTO / NONE / ANY）。
-		mode := "AUTO"
-		var names []string
-		switch r.ToolChoice.Mode {
-		case "none":
-			mode = "NONE"
-		case "required":
-			mode = "ANY"
-		case "function":
-			mode = "ANY"
-			if r.ToolChoice.Name != "" {
-				names = []string{r.ToolChoice.Name}
-			}
-		}
-		cfg := map[string]any{"mode": mode}
-		if len(names) > 0 {
-			cfg["allowedFunctionNames"] = names
-		}
-		body.ToolConfig = map[string]any{"functionCallingConfig": cfg}
-	}
-	raw, err := marshalBody(body)
+	raw, err := marshalGeminiRequest(cfg, contents, schemas)
 	if err != nil {
 		return nil, err
 	}
@@ -166,68 +275,7 @@ func (a *geminiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *
 	}, nil
 }
 
-// geminiContentOf 映射非 system 消息（assistant ⇒ model；tool ⇒ functionResponse）。
-func geminiContentOf(m core.Message) geminiContent {
-	role := "user"
-	if m.Role == "assistant" {
-		role = "model"
-	}
-	var parts []geminiPart
-	if m.Role == "tool" {
-		name := m.Name
-		if name == "" {
-			name = m.ToolCallID
-		}
-		parts = append(parts, geminiPart{FunctionResponse: &struct {
-			Name     string `json:"name"`
-			Response any    `json:"response"`
-		}{Name: name, Response: map[string]any{"content": contentText(m.Content)}}})
-		return geminiContent{Role: "user", Parts: parts}
-	}
-	for _, p := range m.Content {
-		switch {
-		case p.Data != "" && p.MIMEType != "":
-			parts = append(parts, geminiPart{InlineData: &struct {
-				MimeType string `json:"mimeType"`
-				Data     string `json:"data"`
-			}{MimeType: p.MIMEType, Data: p.Data}})
-		case p.Text != "":
-			parts = append(parts, geminiPart{Text: p.Text})
-		}
-	}
-	for _, tc := range m.ToolCalls {
-		args := json.RawMessage(tc.Arguments)
-		if len(args) == 0 {
-			args = json.RawMessage(`{}`)
-		}
-		parts = append(parts, geminiPart{FunctionCall: &struct {
-			Name string          `json:"name"`
-			Args json.RawMessage `json:"args"`
-		}{Name: tc.Name, Args: args}})
-	}
-	return geminiContent{Role: role, Parts: parts}
-}
-
 // ---- 响应体（4.3.3：candidates[].content.parts[] / finishReason 21 值 / usageMetadata）----
-
-type geminiResp struct {
-	Candidates []struct {
-		Content struct {
-			Role  string `json:"role"`
-			Parts []struct {
-				Text         string `json:"text"`
-				FunctionCall *struct {
-					Name string          `json:"name"`
-					Args json.RawMessage `json:"args"`
-				} `json:"functionCall"`
-			} `json:"parts"`
-		} `json:"content"`
-		FinishReason string `json:"finishReason"`
-		Index        int    `json:"index"`
-	} `json:"candidates"`
-	PromptFeedback json.RawMessage `json:"promptFeedback"`
-	UsageMetadata  json.RawMessage `json:"usageMetadata"`
-}
 
 // geminiFinishMap 是 finishReason 21 值的归一化映射（4.5.1 归一化映射规则 + 超集原值）：
 // STOP ⇒ stop；MAX_TOKENS ⇒ 「超上下文 / length」类；内容策略类（SAFETY / RECITATION / BLOCKLIST /
@@ -249,7 +297,8 @@ var geminiFinishMap = map[string]string{
 	"MALFORMED_FUNCTION_CALL":  core.FinishFunctionCall,
 }
 
-// mapGeminiFinish 映射 finishReason（未列取值 ⇒ 原值保留）。
+// mapGeminiFinish 映射 finishReason（未列取值 ⇒ 原值保留；SDK 的 FinishReason 是字符串类型，
+// 21 值超集原样透传）。
 func mapGeminiFinish(v string) string {
 	if v == "" {
 		return core.FinishUnknown
@@ -260,30 +309,50 @@ func mapGeminiFinish(v string) string {
 	return v
 }
 
-// ParseResponse 解析 GenerateContentResponse（4.3.3 响应体关键字段）。
+// geminiArgsJSON 把 functionCall.args 转为 JSON 字符串（genai.FunctionCall.Args 是
+// map[string]any ⇒ 重序列化；nil ⇒ 空串，与旧 RawMessage 缺字段同口径）。
+func geminiArgsJSON(args map[string]any) string {
+	if args == nil {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// ParseResponse 用 SDK 响应类型 genai.GenerateContentResponse 解析（4.3.3 响应体关键字段）：
+// finishReason 21 值映射、MAX_TOKENS ⇒ incomplete；usageMetadata 取原始 JSON 字节进
+// ParseUsage（usage.Normalize.Raw 逐字保留，⛔ 不用 typed 重序列化）。
 func (a *geminiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var r geminiResp
+	var r genai.GenerateContentResponse
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
 	}
 	out := &core.Response{Model: res.Model}
 	var text string
-	if len(r.Candidates) > 0 {
+	if len(r.Candidates) > 0 && r.Candidates[0] != nil {
 		c := r.Candidates[0]
-		for _, p := range c.Content.Parts {
-			switch {
-			case p.FunctionCall != nil:
-				out.OutputItems = append(out.OutputItems, core.OutputItem{
-					Type: "function_call", Name: p.FunctionCall.Name, Arguments: string(p.FunctionCall.Args),
-				})
-			case p.Text != "":
-				text += p.Text
-				out.OutputItems = append(out.OutputItems, core.OutputItem{
-					Type: "message", Role: "model", Content: []core.ContentPart{{Type: "text", Text: p.Text}},
-				})
+		if c.Content != nil {
+			for _, p := range c.Content.Parts {
+				if p == nil {
+					continue
+				}
+				switch {
+				case p.FunctionCall != nil:
+					out.OutputItems = append(out.OutputItems, core.OutputItem{
+						Type: "function_call", Name: p.FunctionCall.Name, Arguments: geminiArgsJSON(p.FunctionCall.Args),
+					})
+				case p.Text != "":
+					text += p.Text
+					out.OutputItems = append(out.OutputItems, core.OutputItem{
+						Type: "message", Role: "model", Content: []core.ContentPart{{Type: "text", Text: p.Text}},
+					})
+				}
 			}
 		}
-		out.FinishReason = mapGeminiFinish(c.FinishReason)
+		out.FinishReason = mapGeminiFinish(string(c.FinishReason))
 		switch c.FinishReason {
 		case "MAX_TOKENS":
 			out.Status = core.StatusIncomplete
@@ -296,15 +365,17 @@ func (a *geminiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.
 		out.Status = core.StatusFailed
 	}
 	out.Text = text
-	if len(r.UsageMetadata) > 0 {
-		out.Usage = a.ParseUsage(r.UsageMetadata)
+	if raw := rawJSONTopField(string(body), "usageMetadata"); len(raw) > 0 {
+		out.Usage = a.ParseUsage(raw)
 	}
 	return out, nil
 }
 
 // ---- 流式（4.3.3：每帧 data: 完整 JSON、无 event: 行、无 [DONE]；终结帧带 finishReason）----
 
-// geminiStreamDecoder 是 Gemini 原生帧解码器（3.7 Gemini 原生流式口径）。
+// geminiStreamDecoder 是 Gemini 原生帧解码器（3.7 Gemini 原生流式口径）：
+// 每帧用 SDK 响应类型 genai.GenerateContentResponse 解析，usageMetadata 取帧原始 JSON 字节
+// （usage.Normalize.Raw 逐字保留）。
 type geminiStreamDecoder struct {
 	usageFn   func(json.RawMessage) *core.Usage
 	sawFinish bool
@@ -319,39 +390,44 @@ func (d *geminiStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 	if data == "" {
 		return nil, false, nil
 	}
-	var r geminiResp
+	var r genai.GenerateContentResponse
 	if err := json.Unmarshal([]byte(data), &r); err != nil {
 		return nil, false, nil // 非 JSON 帧容忍跳过
 	}
 	var frames []stream.Frame
-	if len(r.Candidates) > 0 {
+	if len(r.Candidates) > 0 && r.Candidates[0] != nil {
 		c := r.Candidates[0]
-		for _, p := range c.Content.Parts {
-			switch {
-			case p.FunctionCall != nil:
-				frames = append(frames, stream.Frame{
-					Kind: stream.FrameToolCallArgsDelta, ToolCallID: p.FunctionCall.Name,
-					// Text 载函数名（帧承载约定）：functionCall part 名字与参数同包、
-					// 无独立 call_id ⇒ ToolCallID 沿用函数名，名字同时进 Text 供消费端装配。
-					Text:      p.FunctionCall.Name,
-					Arguments: string(p.FunctionCall.Args),
-				})
-			case p.Text != "":
-				frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: p.Text})
+		if c.Content != nil {
+			for _, p := range c.Content.Parts {
+				if p == nil {
+					continue
+				}
+				switch {
+				case p.FunctionCall != nil:
+					frames = append(frames, stream.Frame{
+						Kind: stream.FrameToolCallArgsDelta, ToolCallID: p.FunctionCall.Name,
+						// Text 载函数名（帧承载约定）：functionCall part 名字与参数同包、
+						// 无独立 call_id ⇒ ToolCallID 沿用函数名，名字同时进 Text 供消费端装配。
+						Text:      p.FunctionCall.Name,
+						Arguments: geminiArgsJSON(p.FunctionCall.Args),
+					})
+				case p.Text != "":
+					frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: p.Text})
+				}
 			}
 		}
 		if c.FinishReason != "" {
 			d.sawFinish = true
-			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: mapGeminiFinish(c.FinishReason)})
-			if len(r.UsageMetadata) > 0 {
-				frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(r.UsageMetadata)}}, frames...)
+			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: mapGeminiFinish(string(c.FinishReason))})
+			if raw := rawJSONTopField(data, "usageMetadata"); len(raw) > 0 {
+				frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(raw)}}, frames...)
 			}
 			return frames, true, nil
 		}
 	}
-	if len(r.UsageMetadata) > 0 {
+	if raw := rawJSONTopField(data, "usageMetadata"); len(raw) > 0 {
 		// 部分中间帧也可能带 usageMetadata（4.3.3）。
-		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: d.usageFn(r.UsageMetadata)})
+		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: d.usageFn(raw)})
 	}
 	return frames, false, nil
 }
@@ -365,7 +441,9 @@ func (d *geminiStreamDecoder) endCheck() error {
 		"Gemini 流式响应结束但无 finishReason ⇒ 按流中断处理，⛔ 不冒充正常完成")}
 }
 
-// ParseResponse 的流式入口：:streamGenerateContent?alt=sse（4.3.3）。
+// StreamStart 的流式入口：:streamGenerateContent?alt=sse（4.3.3）。
+// Tier 2：HTTP 执行保留 streamRequest（URL / 鉴权注入 / 错误出口不变），
+// 流解析用 SDK 响应类型（geminiStreamDecoder）。
 func (a *geminiAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
 	rc := *r
 	rc.Stream = true

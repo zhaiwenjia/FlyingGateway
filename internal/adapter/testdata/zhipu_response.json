@@ -1,23 +1,24 @@
 {
   "id": "resp_zp_001",
-  "status": "completed",
+  "object": "chat.completion",
+  "created": 1763100000,
   "model": "glm-4.7",
-  "output": [
+  "choices": [
     {
-      "type": "message",
-      "id": "msg_zp_001",
-      "role": "assistant",
-      "content": [{"type": "output_text", "text": "被拦截"}],
-      "reasoning_content": "推理正文"
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "被拦截",
+        "reasoning_content": "推理正文"
+      },
+      "finish_reason": "sensitive"
     }
   ],
-  "output_text": "被拦截",
   "usage": {
     "prompt_tokens": 100,
     "completion_tokens": 60,
     "total_tokens": 160,
     "prompt_tokens_details": {"cached_tokens": 30},
     "completion_tokens_details": {"reasoning_tokens": 20}
-  },
-  "finish_reason": "sensitive"
+  }
 }

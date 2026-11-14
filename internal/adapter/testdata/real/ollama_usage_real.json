@@ -1,0 +1,1 @@
+{"model":"qwen2.5:0.5b","created_at":"2026-11-10T03:21:59.2415965Z","response":"A database index is a data structure that speeds up","done":true,"done_reason":"length","total_duration":222284300,"load_duration":5663100,"prompt_eval_count":40,"prompt_eval_cached_count":24,"prompt_eval_duration":74715000,"eval_count":10,"eval_duration":138929000}

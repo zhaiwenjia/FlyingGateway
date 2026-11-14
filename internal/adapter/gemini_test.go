@@ -246,3 +246,18 @@ func TestGeminiStreamToolCallName(t *testing.T) {
 		t.Fatalf("缺 ToolCallID=search 且 Text=search 的工具帧（functionCall 名字与参数同包 ⇒ 名字进 Text）：%+v", frames)
 	}
 }
+
+// TestGeminiParseUsageRealSample 钉住真实样本（litellm 真实录制 usageMetadata，responseId
+// 1CbQat_JEK-jqtsPtf-QoQU，来源见 testdata/real/README.md）上 ParseUsage 归一成立：
+// Out = candidates 80 + thoughts 575 = 655（thoughts 独立加项）、Total=1013 保留原报 ⛔ 不重算；
+// 真实样本的 promptTokensDetails（modality 数组）⛔ 不干扰解析。
+// 错误实现会红：不加 thoughts ⇒ 80 ≠ 655 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiParseUsageRealSample -v
+func TestGeminiParseUsageRealSample(t *testing.T) {
+	a := NewGemini(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "real/gemini_usage_metadata.json"))
+	if u.InputTokens != 358 || u.OutputTokens != 655 || u.TotalTokens != 1013 || u.CacheReadTokens != 0 {
+		t.Fatalf("归一 = In%d/Out%d/Total%d/Read%d，期望 358/655/1013/0（Out=80+575，样本逐字）",
+			u.InputTokens, u.OutputTokens, u.TotalTokens, u.CacheReadTokens)
+	}
+}

@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:54:17.768
+// 日期: 2026-11-14 16:08:29.717
 // 作者: Zhai Wenjia
 
 package server
@@ -37,10 +37,19 @@ func newClientEncoder(mode inboundMode, model string) clientEncoder {
 	return chat.NewChunkEncoder(model)
 }
 
+// reasoningBlock 是一个 thinking 块的流式累积（正文增量 + 块签名）。
+// 签名帧（stream.FrameReasoningDelta 的签名帧承载约定：ThinkingSignature 非空、
+// Reasoning 为空）收口当前块并落签名 —— 一帧收口一块 ⇒ 多 thinking 块逐块保真，
+// 与非流式解析的逐块 core.OutputItem 同形（流式非流式同一出口）。
+type reasoningBlock struct {
+	parts []string
+	sig   string
+}
+
 // frameAccumulator 把上游帧装配成规范 Response（非流式返回 / 取消路径估算用）。
 type frameAccumulator struct {
 	text      strings.Builder
-	reasoning []string
+	reasoning []reasoningBlock
 	calls     map[string]*core.OutputItem
 	callOrder []string
 	usage     *core.Usage
@@ -57,7 +66,23 @@ func (a *frameAccumulator) add(f stream.Frame) {
 	case stream.FrameTextDelta:
 		a.text.WriteString(f.Text)
 	case stream.FrameReasoningDelta:
-		a.reasoning = append(a.reasoning, f.Reasoning)
+		// 签名帧（承载约定见 reasoningBlock）：收口当前 thinking 块并落签名
+		//（⛔ 不可压平）；已收口的块不再追加正文（后到正文属下一个块）。
+		if f.ThinkingSignature != "" {
+			if n := len(a.reasoning); n == 0 || a.reasoning[n-1].sig != "" {
+				a.reasoning = append(a.reasoning, reasoningBlock{sig: f.ThinkingSignature})
+			} else {
+				a.reasoning[n-1].sig = f.ThinkingSignature
+			}
+		}
+		if f.Reasoning == "" {
+			break
+		}
+		if n := len(a.reasoning); n == 0 || a.reasoning[n-1].sig != "" {
+			a.reasoning = append(a.reasoning, reasoningBlock{})
+		}
+		last := &a.reasoning[len(a.reasoning)-1]
+		last.parts = append(last.parts, f.Reasoning)
 	case stream.FrameToolCallArgsDelta:
 		key := f.ToolCallID
 		if key == "" {
@@ -98,10 +123,16 @@ func (a *frameAccumulator) result(model string) *core.Response {
 			Content: []core.ContentPart{{Type: "output_text", Text: resp.Text}},
 		})
 	}
-	if len(a.reasoning) > 0 {
+	// 逐块装配 reasoning item：ThinkingSignature 落块签名（流式非流式同一出口，
+	// ⛔ 不压平、⛔ 不并块丢签）。
+	for _, b := range a.reasoning {
+		if len(b.parts) == 0 && b.sig == "" {
+			continue
+		}
 		resp.OutputItems = append(resp.OutputItems, core.OutputItem{
-			Type:          "reasoning",
-			ReasoningText: strings.Join(a.reasoning, ""),
+			Type:              "reasoning",
+			ReasoningText:     strings.Join(b.parts, ""),
+			ThinkingSignature: b.sig,
 		})
 	}
 	for _, key := range a.callOrder {
@@ -185,8 +216,13 @@ func (s *Server) writeOutcome(w http.ResponseWriter, r *http.Request, h *execHan
 }
 
 // writeFinalError 写终态错误：流已提交 ⇒ ⛔ 不再写（传输层已收口）；未提交 ⇒ JSON 错误。
+// 本地池闸拒绝（token_pool_exhausted）带 Retry-After = 最短等待（统一 SDD 2.3 治理三件套）。
 func (s *Server) writeFinalError(w http.ResponseWriter, h *execHandle, detail *core.ErrorDetail) {
 	if h.committed() {
+		return
+	}
+	if detail != nil && detail.Code == codeTokenPoolExhausted {
+		writeRetryAfter(w, h.retryAfterHint(), string(detail.Category), detail.Code, detail.Message)
 		return
 	}
 	s.writeDetail(w, detail)

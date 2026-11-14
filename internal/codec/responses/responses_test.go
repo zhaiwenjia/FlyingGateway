@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:22:50.760
+// 日期: 2026-11-14 16:08:29.868
 // 作者: Zhai Wenjia
 
 package responses
@@ -275,11 +275,16 @@ func TestEncodeResponse_OutputTextRefusalAndUsage(t *testing.T) {
 	}
 }
 
-// TestEncodeResponse_DegradationOnlyForSignature 钉住：
-// Responses 出口承载 encrypted_content ⇒ 不标记；承载不了的 thinking_signature ⇒
-// 必须标记（统一 SDD 3.4，验收 A8 / A14）。错误实现（丢 signature 不标记、或对
-// encrypted_content 误标记）都会红。
-func TestEncodeResponse_DegradationOnlyForSignature(t *testing.T) {
+// TestResponsesSignatureCarriedLossless 钉住 Responses 出口承载 thinking 签名
+// （无损 ⇒ ⛔ 不标记、⛔ 不压平）：EncodeResponse 的 thinking/reasoning item 落
+// item.signature；EventEncoder 的签名帧（FrameReasoningDelta 且 ThinkingSignature
+// 非空，承载约定见 stream.FrameReasoningDelta）累积进终态 item.signature、不发增量事件；
+// 签名与 encrypted_content 均被承载 ⇒ 不出现 x_gateway.degradations[]。
+// 错误实现会红：签名被丢 / 只进内部不进 item.signature（旧行为把 thinking_signature
+// 当丢失标记）⇒ item.signature 断言红；承载了还误标 degradation ⇒ x_gateway 缺席断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/codec/responses/ -run TestResponsesSignatureCarriedLossless -v
+func TestResponsesSignatureCarriedLossless(t *testing.T) {
+	// ---- 非流式：EncodeResponse ----
 	resp := &core.Response{
 		Model: "m",
 		OutputItems: []core.OutputItem{
@@ -293,17 +298,38 @@ func TestEncodeResponse_DegradationOnlyForSignature(t *testing.T) {
 		t.Fatalf("EncodeResponse 报错: %v", err)
 	}
 	m := decodeJSON(t, b)
-	xg, ok := m["x_gateway"].(map[string]any)
-	if !ok {
-		t.Fatalf("thinking_signature 丢失必须产生标记: %s", b)
+	out0 := m["output"].([]any)[0].(map[string]any)
+	if out0["signature"] != "sig-abc" {
+		t.Errorf("item.signature 应为 sig-abc（Responses 形状承载签名 ⇒ 无损），实得 %v", out0)
 	}
-	degs := xg["degradations"].([]any)
-	if len(degs) != 1 {
-		t.Fatalf("degradations 应恰有 1 条（encrypted_content 被承载、不标记），实得 %v", degs)
+	if _, ok := m["x_gateway"]; ok {
+		t.Errorf("签名与 encrypted_content 均被承载 ⇒ 不应有 x_gateway.degradations[]: %s", b)
 	}
-	d := degs[0].(map[string]any)
-	if d["field"] != "thinking_signature" || d["reason"] != "upstream_shape_mismatch" || d["detail"] == "" {
-		t.Errorf("degradation 字段错: %v", d)
+
+	// ---- 流式：EventEncoder（签名帧累积进终态 item.signature）----
+	e := NewEventEncoder("m")
+	if _, err := e.Encode(stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: "想"}); err != nil {
+		t.Fatalf("Encode 报错: %v", err)
+	}
+	bSig, err := e.Encode(stream.Frame{Kind: stream.FrameReasoningDelta, ThinkingSignature: "sig-abc"})
+	if err != nil {
+		t.Fatalf("Encode 报错: %v", err)
+	}
+	if bSig != nil {
+		t.Errorf("签名帧不应发增量事件（只累积进终态 item.signature），实得 %s", bSig)
+	}
+	if _, err := e.Encode(stream.Frame{Kind: stream.FrameDone, Status: core.StatusCompleted}); err != nil {
+		t.Fatalf("Encode 报错: %v", err)
+	}
+	out, err := e.Finish()
+	if err != nil {
+		t.Fatalf("Finish 报错: %v", err)
+	}
+	evs := sseEvents(t, out)
+	term := decodeJSON(t, []byte(evs[0].Payload))
+	item := term["response"].(map[string]any)["output"].([]any)[0].(map[string]any)
+	if item["signature"] != "sig-abc" {
+		t.Errorf("终态 item.signature 应为 sig-abc，实得 %v", item)
 	}
 }
 
@@ -430,9 +456,9 @@ func TestEventEncoder_FinishCompleted(t *testing.T) {
 		t.Fatalf("Encode 报错: %v", err)
 	}
 	e.AddDegradation(core.Degradation{
-		Field:  "thinking_signature",
-		Reason: core.DegradationUpstreamShapeMismatch,
-		Detail: degradationDetailSignature,
+		Field:  "previous_response_id",
+		Reason: core.DegradationCapabilityUnsupported,
+		Detail: "上游不支持服务端会话态",
 	})
 	out, err := e.Finish()
 	if err != nil {
@@ -469,8 +495,8 @@ func TestEventEncoder_FinishCompleted(t *testing.T) {
 		t.Errorf("终态 usage 错: %v", u)
 	}
 	xg := resp["x_gateway"].(map[string]any)
-	if xg["degradations"].([]any)[0].(map[string]any)["field"] != "thinking_signature" {
-		t.Errorf("终态应带 x_gateway.degradations[]，实得 %v", xg)
+	if xg["degradations"].([]any)[0].(map[string]any)["field"] != "previous_response_id" {
+		t.Errorf("终态应带 x_gateway.degradations[]（AddDegradation 透传），实得 %v", xg)
 	}
 }
 
@@ -795,4 +821,25 @@ func terminalResponseID(t *testing.T, e *EventEncoder) string {
 	}
 	evs := sseEvents(t, out)
 	return decodeJSON(t, []byte(evs[0].Payload))["response"].(map[string]any)["id"].(string)
+}
+
+// TestDecodeRequestReasoningSignatureRoundTrip 钉住入站回传方向的签名保留：
+// reasoning item 的 signature ⇒ Message.ThinkingSignature（回传丢失与出站丢失同罪，
+// 1.4.1 语义字段）。错误实现对照：漏解析 signature ⇒ 本测试必红。
+func TestDecodeRequestReasoningSignatureRoundTrip(t *testing.T) {
+	body := []byte(`{"model":"m","input":[{"type":"reasoning","id":"rs_1","encrypted_content":"enc-1","signature":"sig-back-1","content":[{"type":"reasoning_text","text":"思"}]}]}`)
+	req, err := DecodeRequest(body)
+	if err != nil {
+		t.Fatalf("DecodeRequest 失败: %v", err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("消息数 = %d，期望 1", len(req.Messages))
+	}
+	m := req.Messages[0]
+	if m.ThinkingSignature != "sig-back-1" {
+		t.Fatalf("ThinkingSignature = %q，期望 sig-back-1（入站回传签名被丢）", m.ThinkingSignature)
+	}
+	if m.EncryptedContent != "enc-1" || m.ReasoningContent != "思" {
+		t.Fatalf("EncryptedContent/ReasoningContent = %q/%q", m.EncryptedContent, m.ReasoningContent)
+	}
 }
