@@ -1,5 +1,13 @@
 <div align="center">
 
+<img src="images/flying-gateway-icon.jpg" alt="FlyingGateway" width="220">
+
+# FlyingGateway
+
+**智能体 LLM 网关** —— 多供应商端点注册、路由与降级、统一计量与治理。
+
+</div>
+
 ## 一、项目概述
 
 面向智能体（agent）的多供应商 LLM 网关：客户端用**一个 OpenAI 兼容入口**打任意注册模型，
@@ -24,6 +32,11 @@
 技术栈 **Go 1.27**，核心链路纯标准库（供应商 SDK 仅 3 个官方库）。
 
 ## 二、目录结构
+
+> 布局是 **Go 官方惯例**（`cmd/` + `internal/`），不改名 `src/`：`internal/` 不只是目录名，
+> 是**语言级可见性边界** —— `internal/` 下的包只允许本仓代码 import，外部模块引用会被
+> go 工具链直接拒绝；改名 `src/`（Java/JS 习惯）会丢掉这层编译器强制保护，且与 Go 生态
+> （标准库、Kubernetes、Docker 等）的肌肉记忆相悖。
 
 ```
 FlyingGateway/                  ← 仓库根
