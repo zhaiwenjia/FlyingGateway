@@ -50,6 +50,21 @@ func NewRateLimitBuckets(tpm, rpm, burstS float64) *RateLimitBuckets {
 	return b
 }
 
+// Snapshot 返回 token 维与请求维的桶状态（nil 维 = 该维不限流）。
+func (b *RateLimitBuckets) Snapshot() (tokens, requests *BucketState) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tokens != nil {
+		st := b.tokens.snapshotLocked()
+		tokens = &st
+	}
+	if b.requests != nil {
+		st := b.requests.snapshotLocked()
+		requests = &st
+	}
+	return
+}
+
 // Has 非扣减探查：一次调用（est 个 token + 1 个请求）现在能否支付（含补足等待）。
 // 供「共享桶 + 每 key 桶」两级组合做预查 —— 两级同时可付才各自 Allow（⛔ 不半扣）。
 func (b *RateLimitBuckets) Has(est int64) (ok bool, retryAfter time.Duration) {

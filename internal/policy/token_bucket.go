@@ -65,12 +65,40 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	return true, 0
 }
 
+// Snapshot 返回桶状态（管理面只读视图）。
+func (b *TokenBucket) Snapshot() BucketState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.snapshotLocked()
+}
+
 // Has 非扣减探查：tokens 个 token 现在能否放行（含补足等待时长）。
 // 供复合多级限流（RateLimitBuckets 与「共享桶 + 每 key 桶」组合）做「同时可付才扣」的预查。
 func (b *TokenBucket) Has(tokens int64) (ok bool, retryAfter time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.hasLocked(tokens)
+}
+
+// BucketState 是一层桶的观测快照（管理面只读视图；⛔ 不含任何凭据内容）。
+type BucketState struct {
+	// Remaining 是当前剩余（token 数或请求数）。
+	Remaining float64 `json:"remaining"`
+	// Capacity 是桶深（突发上限）。
+	Capacity float64 `json:"capacity"`
+	// RefillPerSec 是补充速率（稳态上限）。
+	RefillPerSec float64 `json:"refill_per_sec"`
+}
+
+// snapshotLocked 返回桶状态（须持 b.mu；先补后读，与 Allow/Has 同一口径）。
+func (b *TokenBucket) snapshotLocked() BucketState {
+	now := time.Now()
+	elapsed := now.Sub(b.lastRefill).Seconds()
+	if elapsed > 0 {
+		b.tokens = math.Min(b.capacity, b.tokens+elapsed*b.refillPerSec)
+		b.lastRefill = now
+	}
+	return BucketState{Remaining: b.tokens, Capacity: b.capacity, RefillPerSec: b.refillPerSec}
 }
 
 // hasLocked 非扣减探查（须持 b.mu）：先按经过时间补充（封顶 capacity），

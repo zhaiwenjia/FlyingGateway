@@ -5,6 +5,8 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,5 +346,70 @@ func TestCredentialRateLimitsMissingEnvFails(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("key_ref 环境变量缺失时 server.New 应报错")
+	}
+}
+
+// ---- 多 key 核算模型（10 个 key 的限流怎么算：聚合 = min(Σ per-key, shared)）----
+
+// TestPoolTenKeysAccounting 断言核算公式（SDD 7.2 多 key 核算模型）：
+//
+//	① 只有 per_key：聚合稳态 = N × 单 key（10 key × 每 key 桶深 1 ⇒ 连发 10 次全过、第 11 次受限）；
+//	② 加 shared 封顶：聚合 = min(Σ per-key, shared)（共享桶深 5 ⇒ 只过 5 次）。
+func TestPoolTenKeysAccounting(t *testing.T) {
+	keys := "k0,k1,k2,k3,k4,k5,k6,k7,k8,k9"
+	// ① per_key only：桶深 1（refill 0.1/s，测试内补充可忽略），est=1。
+	t.Setenv("TEST_POOL_TEN_A", keys)
+	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
+		"TEST_POOL_TEN_A": {perKey: rl(6, 10)}, // cap = 0.1×10 = 1
+	})
+	p, _ := m.PoolFor("TEST_POOL_TEN_A")
+	for i := 0; i < 10; i++ {
+		if got := p.Pick(1, time.Now()); !got.OK || got.Slot != i {
+			t.Fatalf("第 %d 发 = %+v，期望槽 %d（每 key 一份桶）", i+1, got, i)
+		}
+	}
+	if got := p.Pick(1, time.Now()); got.OK {
+		t.Fatalf("第 11 发应受限（聚合 = 10 key × 1 = 10）: %+v", got)
+	}
+
+	// ② shared 封顶：同 10 key，加共享桶深 5 ⇒ 聚合 = min(10, 5) = 5。
+	t.Setenv("TEST_POOL_TEN_B", keys)
+	m2 := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
+		"TEST_POOL_TEN_B": {perKey: rl(6, 10), shared: rlb(6, 50)}, // shared cap = 0.1×50 = 5
+	})
+	p2, _ := m2.PoolFor("TEST_POOL_TEN_B")
+	for i := 0; i < 5; i++ {
+		if got := p2.Pick(1, time.Now()); !got.OK {
+			t.Fatalf("第 %d 发应过（共享桶深 5）: %+v", i+1, got)
+		}
+	}
+	if got := p2.Pick(1, time.Now()); got.OK {
+		t.Fatalf("第 6 发应受限（min(Σ per-key=10, shared=5) = 5）: %+v", got)
+	}
+}
+
+// TestAdminCredentialPools 断言管理面配额观测：只含桶状态与槽序、⛔ 无令牌明文。
+func TestAdminCredentialPools(t *testing.T) {
+	t.Setenv("TEST_POOL_VIEW", "tok-secret-A,tok-secret-B")
+	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
+		"TEST_POOL_VIEW": {perKey: rl(600, 1), shared: rlb(600, 1)},
+	})
+	if _, err := m.PoolFor("TEST_POOL_VIEW"); err != nil {
+		t.Fatalf("PoolFor 失败: %v", err)
+	}
+	s := &Server{pools: m}
+	rec := httptest.NewRecorder()
+	s.handleAdminCredentialPools(rec, httptest.NewRequest("GET", "/admin/credential-pools", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"credential_ref":"TEST_POOL_VIEW"`) ||
+		!strings.Contains(body, `"contract_tokens"`) ||
+		!strings.Contains(body, `"shared_tokens"`) {
+		t.Fatalf("观测缺桶状态字段: %s", body[:200])
+	}
+	if strings.Contains(body, "tok-secret") {
+		t.Fatalf("观测泄露令牌明文: %s", body)
 	}
 }

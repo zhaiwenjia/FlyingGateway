@@ -276,6 +276,7 @@ func (s *Server) AdminHandler(adminToken string) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/endpoints", s.adminAuth(adminToken, s.handleAdminEndpoints))
 	mux.HandleFunc("GET /admin/health", s.adminAuth(adminToken, s.handleAdminHealth))
+	mux.HandleFunc("GET /admin/credential-pools", s.adminAuth(adminToken, s.handleAdminCredentialPools))
 	return mux, nil
 }
 
@@ -422,6 +423,13 @@ func (s *Server) handleAdminEndpoints(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"endpoints": out})
+}
+
+// handleAdminCredentialPools 返回上游令牌池的配额观测（GET /admin/credential-pools）：
+// 多 key 限流「怎么算」的运行面证据 —— 共享桶与逐 key 桶的剩余/桶深/补充速率、冷却状态。
+// ⛔ 只含桶状态与槽序，不含任何令牌明文（统一 SDD 8.1）。
+func (s *Server) handleAdminCredentialPools(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"pools": s.pools.Snapshot()})
 }
 
 // handleAdminHealth 返回管理面健康视图（GET /admin/health）。

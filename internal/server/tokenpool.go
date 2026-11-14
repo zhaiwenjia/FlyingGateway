@@ -301,6 +301,64 @@ func (m *poolManager) PoolFor(credentialRef string) (*tokenPool, error) {
 	return p, nil
 }
 
+// ---- 池观测（管理面只读视图：多 key 限流「怎么算」的运行面证据；⛔ 无令牌明文）----
+
+// keySlotState 是池内一个 key 槽的观测状态（⚠️ 只有槽序，⛔ 不含令牌内容）。
+type keySlotState struct {
+	Slot               int                 `json:"slot"`
+	Cooling            bool                `json:"cooling"`
+	CoolingRemainingMS int64               `json:"cooling_remaining_ms,omitempty"`
+	ContractTokens     *policy.BucketState `json:"contract_tokens,omitempty"`
+	ContractRequests   *policy.BucketState `json:"contract_requests,omitempty"`
+	GlobalTokens       *policy.BucketState `json:"global_tokens,omitempty"`
+}
+
+// poolSnapshot 是一个令牌池的观测状态（共享桶 + 逐 key 槽）。
+type poolSnapshot struct {
+	CredentialRef  string              `json:"credential_ref"`
+	KeyCount       int                 `json:"key_count"`
+	SharedTokens   *policy.BucketState `json:"shared_tokens,omitempty"`
+	SharedRequests *policy.BucketState `json:"shared_requests,omitempty"`
+	Keys           []keySlotState      `json:"keys"`
+}
+
+// Snapshot 返回全部**已构建**池的状态（惰性构建：尚未用过的池不在视图内）。
+func (m *poolManager) Snapshot() []poolSnapshot {
+	m.mu.Lock()
+	pools := make([]*tokenPool, 0, len(m.pools))
+	refs := make([]string, 0, len(m.pools))
+	for ref, p := range m.pools {
+		refs = append(refs, ref)
+		pools = append(pools, p)
+	}
+	m.mu.Unlock()
+	out := make([]poolSnapshot, 0, len(pools))
+	for i, p := range pools {
+		ps := poolSnapshot{CredentialRef: refs[i], KeyCount: len(p.slots)}
+		if p.shared != nil {
+			ps.SharedTokens, ps.SharedRequests = p.shared.Snapshot()
+		}
+		now := time.Now()
+		for j, slot := range p.slots {
+			ks := keySlotState{Slot: j}
+			if cooling, remain := slot.cooling(now); cooling {
+				ks.Cooling = true
+				ks.CoolingRemainingMS = remain.Milliseconds()
+			}
+			if slot.contract != nil {
+				ks.ContractTokens, ks.ContractRequests = slot.contract.Snapshot()
+			}
+			if slot.bucket != nil {
+				st := slot.bucket.Snapshot()
+				ks.GlobalTokens = &st
+			}
+			ps.Keys = append(ps.Keys, ks)
+		}
+		out = append(out, ps)
+	}
+	return out
+}
+
 // splitTokens 切分多令牌凭据（英文逗号 / 换行分隔；去空白、去空段、去重、保持原序）。
 func splitTokens(value string) []string {
 	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' })
