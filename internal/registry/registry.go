@@ -99,6 +99,21 @@ type CallerRateLimit struct {
 	BurstS float64 `json:"burst_s"`
 }
 
+// CredentialRateLimit 是上游自有令牌池的契约配额登记（同供应商多 key 场景，统一 SDD 7.2
+// 锚点分离）。⚠️ 与调用方令牌两域解耦：调用方 key 由外部项目签发（只管理本系统的消费额度，
+// 见 caller_rate_limits / 预算），⛔ 永不发给供应商；本登记只管**上游自有令牌**的套餐配额。
+// KeyRef 与端点 credential_ref 同名的环境变量（池内多 key 逗号/换行分隔）；
+// 未登记 ⇒ 该池不限流（⛔ 不造默认值）。三层语义（可组合，任一不足即拒）：
+//   - PerKey：每个 key 一份桶（N 个 key = N 份套餐容量，业界多 key 池化的共识模型）；
+//   - Shared：全池共享一份桶（org/项目级配额池：多 key 共享一个配额的场景）；
+//   - KeyLimits：逐 key 覆盖（按池内 key 顺序对应，缺省用 PerKey —— 不同订阅档混池）。
+type CredentialRateLimit struct {
+	KeyRef    string       `json:"key_ref"`
+	PerKey    *RateLimit   `json:"per_key,omitempty"`
+	Shared    *RateLimit   `json:"shared,omitempty"`
+	KeyLimits []*RateLimit `json:"key_limits,omitempty"`
+}
+
 // Registry 是端点注册表（统一 SDD 9.1 / 9.2）。
 type Registry struct {
 	// Strategy 是路由策略：priority（按 Priority 选）/ round_robin（轮转）。
@@ -108,6 +123,8 @@ type Registry struct {
 	FallbackChains map[routing.FailureKind][]string
 	// CallerRateLimits 是按调用方 key 的配额登记（key_ref = 环境变量名；未登记 ⇒ 不限流）。
 	CallerRateLimits []CallerRateLimit
+	// CredentialRateLimits 是上游令牌池的契约配额登记（多 key：per_key / shared / key_limits）。
+	CredentialRateLimits []CredentialRateLimit
 
 	endpoints []Endpoint             // 确定性排序后的全量端点
 	byModel   map[string][]*Endpoint // model 别名 → 候选端点（同 endpoints 排序）
@@ -116,10 +133,11 @@ type Registry struct {
 
 // fileWire 是配置文件顶层结构（统一 SDD 9.2）。
 type fileWire struct {
-	Strategy         string              `json:"strategy"`
-	Endpoints        []Endpoint          `json:"endpoints"`
-	FallbackChains   map[string][]string `json:"fallback_chains"`
-	CallerRateLimits []CallerRateLimit   `json:"caller_rate_limits"`
+	Strategy             string                `json:"strategy"`
+	Endpoints            []Endpoint            `json:"endpoints"`
+	FallbackChains       map[string][]string   `json:"fallback_chains"`
+	CallerRateLimits     []CallerRateLimit     `json:"caller_rate_limits"`
+	CredentialRateLimits []CredentialRateLimit `json:"credential_rate_limits"`
 }
 
 // ErrModelNotFound 是「模型不在注册表内」的哨兵错误（可 errors.Is 判定）。
@@ -224,6 +242,43 @@ func Load(path string) (*Registry, error) {
 		}
 	}
 	r.CallerRateLimits = doc.CallerRateLimits
+
+	// 上游令牌池契约配额（可选）：三层至少登记一层，各层形状与 rate_limit 同口径。
+	for i, crl := range doc.CredentialRateLimits {
+		who := fmt.Sprintf("第 %d 条 credential_rate_limits", i+1)
+		if crl.KeyRef == "" {
+			return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：key_ref 缺失或为空（只存来源引用，⛔ 不存明文 key）", path, who)
+		}
+		if crl.PerKey == nil && crl.Shared == nil && len(crl.KeyLimits) == 0 {
+			return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：per_key / shared / key_limits 至少登记一层（全空 = 不限流，请省略该登记）", path, who)
+		}
+		for _, lvl := range []struct {
+			name string
+			rl   *RateLimit
+		}{{"per_key", crl.PerKey}, {"shared", crl.Shared}} {
+			if lvl.rl == nil {
+				continue
+			}
+			if err := validateRateLimitShape(path, fmt.Sprintf("%s 的 %s", who, lvl.name),
+				lvl.rl.TPM, lvl.rl.RPM, lvl.rl.BurstS); err != nil {
+				return nil, err
+			}
+		}
+		for j, kl := range crl.KeyLimits {
+			if kl == nil {
+				// null = 该 key 用 per_key 缺省（混池只覆盖部分 key 的简写）；无 per_key 兜底则是空壳。
+				if crl.PerKey == nil {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：key_limits[%d] 为 null 且无 per_key 兜底（null 语义 = 该 key 用 per_key 缺省）", path, who, j)
+				}
+				continue
+			}
+			if err := validateRateLimitShape(path, fmt.Sprintf("%s 的 key_limits[%d]", who, j),
+				kl.TPM, kl.RPM, kl.BurstS); err != nil {
+				return nil, err
+			}
+		}
+	}
+	r.CredentialRateLimits = doc.CredentialRateLimits
 
 	// 确定性排序：Priority 升序（数值越小越优先），同值按 Name 升序
 	//（⛔ 不依赖配置文件顺序 / map 遍历顺序，统一 SDD 1.4.3 路由决策可复现）。

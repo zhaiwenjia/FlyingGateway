@@ -187,7 +187,7 @@ func New(opts Options) (*Server, error) {
 		bucket:        opts.TokenBucket,
 		budget:        opts.Budget,
 		guardrail:     opts.Guardrail,
-		pools:         newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown),
+		pools:         nil, // 契约配额构建后于下文赋值（limits 依赖注册表登记）
 		maxTokenWait:  opts.MaxTokenWait,
 		maxInFlight:   opts.MaxInFlight,
 		allowLoopback: opts.AllowLoopbackEgress,
@@ -217,6 +217,26 @@ func New(opts Options) (*Server, error) {
 	}
 	// 每调用方契约配额（caller_rate_limits：key_ref = 环境变量名，⛔ 不存明文）。
 	// key_ref 环境变量未设置 ⇒ 启动报错（⛔ 不静默忽略登记）。
+	// 上游令牌池契约配额（多 key：per_key 每 key 一份桶 / shared 全池共享 / key_limits 逐 key 覆盖）。
+	// key_ref 环境变量未设置 ⇒ 启动报错（⛔ 不静默忽略登记）。
+	poolLim := make(map[string]*poolLimits, len(opts.Registry.CredentialRateLimits))
+	for _, crl := range opts.Registry.CredentialRateLimits {
+		if strings.TrimSpace(os.Getenv(crl.KeyRef)) == "" {
+			return nil, fmt.Errorf("server: credential_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
+		}
+		pl := &poolLimits{}
+		if crl.PerKey != nil {
+			pl.perKey = &rlSpec{tpm: crl.PerKey.TPM, rpm: crl.PerKey.RPM, burstS: crl.PerKey.BurstS}
+		}
+		if crl.Shared != nil {
+			pl.shared = policy.NewRateLimitBuckets(crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+		}
+		for _, kl := range crl.KeyLimits {
+			pl.keyLimits = append(pl.keyLimits, &rlSpec{tpm: kl.TPM, rpm: kl.RPM, burstS: kl.BurstS})
+		}
+		poolLim[crl.KeyRef] = pl
+	}
+
 	callerRL := make(map[string]*policy.RateLimitBuckets, len(opts.Registry.CallerRateLimits))
 	for _, crl := range opts.Registry.CallerRateLimits {
 		key := strings.TrimSpace(os.Getenv(crl.KeyRef))
@@ -225,6 +245,7 @@ func New(opts Options) (*Server, error) {
 		}
 		callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
 	}
+	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim)
 	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
@@ -255,6 +276,7 @@ func (s *Server) AdminHandler(adminToken string) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/endpoints", s.adminAuth(adminToken, s.handleAdminEndpoints))
 	mux.HandleFunc("GET /admin/health", s.adminAuth(adminToken, s.handleAdminHealth))
+	mux.HandleFunc("GET /admin/credential-pools", s.adminAuth(adminToken, s.handleAdminCredentialPools))
 	return mux, nil
 }
 
@@ -401,6 +423,13 @@ func (s *Server) handleAdminEndpoints(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"endpoints": out})
+}
+
+// handleAdminCredentialPools 返回上游令牌池的配额观测（GET /admin/credential-pools）：
+// 多 key 限流「怎么算」的运行面证据 —— 共享桶与逐 key 桶的剩余/桶深/补充速率、冷却状态。
+// ⛔ 只含桶状态与槽序，不含任何令牌明文（统一 SDD 8.1）。
+func (s *Server) handleAdminCredentialPools(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"pools": s.pools.Snapshot()})
 }
 
 // handleAdminHealth 返回管理面健康视图（GET /admin/health）。

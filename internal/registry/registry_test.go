@@ -486,3 +486,33 @@ func TestLoadCallerRateLimits(t *testing.T) {
 		t.Fatal("缺 key_ref 的 caller_rate_limits 应报错")
 	}
 }
+
+// TestLoadCredentialRateLimits 断言上游令牌池契约配额解析与校验（多 key：
+// per_key / shared / key_limits 三层至少一层；形状与 rate_limit 同口径）。
+func TestLoadCredentialRateLimits(t *testing.T) {
+	okRaw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+      "credential_rate_limits": [{"key_ref": "OPENAI_API_KEY",
+        "per_key": {"tpm": 1000000, "rpm": 10000, "burst_s": 10},
+        "shared": {"tpm": 4000000, "rpm": 40000, "burst_s": 10},
+        "key_limits": [{"tpm": 500000, "rpm": 5000, "burst_s": 10}, null]}]}`
+	reg, err := Load(writeConfig(t, okRaw))
+	if err != nil {
+		t.Fatalf("合法 credential_rate_limits 不应报错: %v", err)
+	}
+	crl := reg.CredentialRateLimits[0]
+	if crl.KeyRef != "OPENAI_API_KEY" || crl.PerKey == nil || crl.Shared == nil || len(crl.KeyLimits) != 2 {
+		t.Fatalf("解析失真: %+v", crl)
+	}
+	for _, bad := range []string{
+		`{"per_key": {"tpm": 600, "rpm": 0, "burst_s": 1}}`, // 缺 key_ref
+		`{"key_ref": "K"}`, // 三层全空
+		`{"key_ref": "K", "per_key": {"tpm": 0, "rpm": 0, "burst_s": 1}}`, // 形状非法
+		`{"key_ref": "K", "key_limits": [null]}`,                          // null 项
+	} {
+		raw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+        "credential_rate_limits": [` + bad + `]}`
+		if _, err := Load(writeConfig(t, raw)); err == nil {
+			t.Fatalf("非法 credential_rate_limits 应报错：%s", bad)
+		}
+	}
+}
