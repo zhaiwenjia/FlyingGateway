@@ -5,7 +5,16 @@
       "name": "primary",
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-4o-mini",
+      "upstream_model": "gpt-4o-mini",
+      "provider_name": "openai",
       "context_window": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 30,
       "max_retries": 2,
       "priority": 0
@@ -14,7 +23,16 @@
       "name": "backup",
       "base_url": "https://api.deepseek.com/v1",
       "model": "gpt-4o-mini",
+      "upstream_model": "deepseek-chat",
+      "provider_name": "deepseek",
       "context_window": 64000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": false
+      },
+      "credential_ref": "DEEPSEEK_API_KEY",
       "timeout_s": 45,
       "max_retries": 1,
       "priority": 1
@@ -23,7 +41,16 @@
       "name": "local",
       "base_url": "http://127.0.0.1:8000/v1",
       "model": "gpt-4o-mini",
+      "upstream_model": "qwen2.5-7b-instruct",
+      "provider_name": "qwen",
       "context_window": 32768,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": false
+      },
+      "credential_ref": "VLLM_API_KEY",
       "timeout_s": 60,
       "max_retries": 0,
       "priority": 2
@@ -32,10 +59,27 @@
       "name": "large-context",
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-4o",
+      "upstream_model": "gpt-4o",
+      "provider_name": "openai",
       "context_window": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 60,
       "max_retries": 2,
       "priority": 0
     }
-  ]
+  ],
+  "fallback_chains": {
+    "general": ["backup", "local"],
+    "context_window": ["large-context"],
+    "content_policy": ["backup"],
+    "rate_limit": ["backup", "local"],
+    "timeout": ["backup"],
+    "upstream_error": ["backup", "local"]
+  }
 }

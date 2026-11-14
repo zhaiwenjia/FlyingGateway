@@ -113,9 +113,9 @@ type Rates struct {
 
 // ratesFile 是 config/rates.json 的顶层结构。
 type ratesFile struct {
-	USDToCNY     float64      `json:"usd_to_cny"`
-	SnapshotDate string       `json:"snapshot_date"`
-	Rates        []ModelRate  `json:"rates"`
+	USDToCNY     float64     `json:"usd_to_cny"`
+	SnapshotDate string      `json:"snapshot_date"`
+	Rates        []ModelRate `json:"rates"`
 }
 
 // LoadRates 加载费率表并做加载期自检（统一 SDD 5.5）：

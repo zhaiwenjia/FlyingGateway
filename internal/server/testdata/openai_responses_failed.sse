@@ -1,0 +1,5 @@
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":0,"item_id":"msg_fixture_3","output_index":0,"content_index":0,"delta":"Hello"}
+
+event: response.failed
+data: {"type":"response.failed","sequence_number":1,"response":{"id":"resp_fixture_3","object":"response","created_at":1763100000,"status":"failed","model":"gpt-4o-mini","output":[],"error":{"code":"upstream_error","message":"模型服务内部错误"}}}

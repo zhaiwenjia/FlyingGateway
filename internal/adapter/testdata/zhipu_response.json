@@ -1,0 +1,23 @@
+{
+  "id": "resp_zp_001",
+  "status": "completed",
+  "model": "glm-4.7",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_zp_001",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "被拦截"}],
+      "reasoning_content": "推理正文"
+    }
+  ],
+  "output_text": "被拦截",
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 60,
+    "total_tokens": 160,
+    "prompt_tokens_details": {"cached_tokens": 30},
+    "completion_tokens_details": {"reasoning_tokens": 20}
+  },
+  "finish_reason": "sensitive"
+}

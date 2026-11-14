@@ -22,35 +22,49 @@
 
 ## 二、目录结构
 
-⚠️ **本段按实测写**（口径：`find . -name '*.go' | wc -l`），
+⚠️ **本段按实测写**（口径：`find . -name '*.go' -not -path './reference/*' | wc -l`），
 改动目录结构后请重新实测再改这里（`AGENTS.md` 铁律 2：文档描述必须与实况一致）。
 
-> 当前实测（2026-11-14 约束 Go 化）：`.go` 文件 **1** 个（`internal/version`），
-> 实现代码待写；测试 **0** 项。
+> 当前实测（2026-11-14 统一 SDD 实现落地后）：`.go` 文件 **94** 个（实现 55 + 测试 39），
+> 测试 **288** 项全绿（`go test -race ./...`）；模块划分与依赖方向见
+> 《docs/20261114-统一SDD实现-实现计划.md》，逐项测试清单见
+> 《docs/20261114-统一SDD实现-测试报告.md》。
 
 ```
 FlyingGateway/                ← 仓库根
-├── go.mod                    module github.com/zhaiwenjia/FlyingGateway（go 1.27）
+├── go.mod                    module github.com/zhaiwenjia/FlyingGateway（go 1.27，零第三方依赖）
 ├── .env                      运行配置（含真值，不提交）
 ├── .env.example              配置模板（提交，告诉别人要配哪些项）
 ├── .gitignore
 ├── AGENTS.md                 ★ 协作规则的唯一来源
 ├── README.md
 ├── LICENSE
+├── cmd/
+│   └── gateway/              进程入口（装配/标志/优雅关闭/-version）
 ├── internal/
+│   ├── core/                 规范模型（Request/Response/Usage/Cost/ErrorDetail/Resolution）
+│   ├── stream/               统一帧抽象 + SSE/NDJSON 容错解析核心
+│   ├── detect/               供应商识别（host 优先 / 前缀兜底 / 歧义消解）
+│   ├── routing/              上下文越界判定 + 按失败类型分链
+│   ├── registry/             端点注册表（9.2 schema，未知字段拒绝）
+│   ├── codec/
+│   │   ├── chat/             入站 Chat 形状 ⇄ 规范 + 客户端帧编码器
+│   │   └── responses/        入站 Responses 形状 ⇄ 规范 + 事件编码器
+│   ├── adapter/              11 家供应商适配器（请求构造/响应解析/usage/流式解码）
+│   ├── usage/                token 用量归一化（逐家口径）
+│   ├── cost/                 费用计算（峰谷/阶梯/缓存分档/费率加载自检）
+│   ├── errors/               错误分类（九值）+ 原始上游信息保留
+│   ├── security/             凭据解析 + 出网校验 + 出口层统一遮蔽
+│   ├── policy/               token 级限流 / 预算 / 护栏
+│   ├── telemetry/            gen_ai.* / gateway.* 属性单一映射层 + span + 指标
+│   ├── server/               路由/执行/取消注册表/响应收口/管理面
 │   └── version/              版本载体（ldflags 注入点）
-│       └── version.go
-├── cmd/                      程序入口（待建）
 ├── config/
-│   └── gateway.example.json  示例网关配置
-├── docs/                     调研与结论文档
-│   ├── README.md
-│   └── images/               项目图等静态资源
+│   ├── gateway.example.json  示例网关配置（9.2 完整字段 + fallback_chains）
+│   └── rates.json            费率数据（生成物，与统一 SDD 5.4 对账由单测钉住）
+├── docs/                     调研与结论文档（含统一 SDD、实现计划、测试报告）
 ├── progress/                 事件流日文件（YYYY-MM-DD.md）
-│   ├── README.md
-│   └── 2026-11-1x.md
 ├── specs/                    需求规格（spec 驱动）
-│   └── README.md
 └── reference/                外部参考代码（只读，不参与构建/测试/CI）
 ```
 

@@ -1,0 +1,23 @@
+{
+  "id": "resp_mm_001",
+  "status": "completed",
+  "model": "mimo-v2.6-pro",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_mm_001",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "重复检测截断"}],
+      "reasoning_content": "推理正文"
+    }
+  ],
+  "output_text": "重复检测截断",
+  "usage": {
+    "prompt_tokens": 80,
+    "completion_tokens": 20,
+    "total_tokens": 100,
+    "prompt_tokens_details": {"cached_tokens": 15},
+    "completion_tokens_details": {"reasoning_tokens": 4}
+  },
+  "finish_reason": "repetition_truncation"
+}

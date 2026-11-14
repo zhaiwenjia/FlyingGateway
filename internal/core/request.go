@@ -98,7 +98,13 @@ type ReasoningConfig struct {
 }
 
 // CacheControl 是 Anthropic 缓存断点（统一 SDD 4.3.2）。
+// ⚠️ json tag 必须是小写 `type` / `ttl`（4.3.2 字段名逐字）——2026-11-14 实测：
+// 无 tag 时编码成 `Type`/`TTL`（Go 字段名原样），上游认不了断点 ⇒ 缓存静默失效；
+// 现象（实测输出）：请求体 `cache_control:map[TTL:5m Type:ephemeral]`；
+// 根因：结构体直接被 anthropic 请求体嵌入序列化，字段名默认取 Go 标识符；
+// 为什么不另写一份 anthropic 侧结构：两份结构就是两份字段真值，改一处漏一处；
+// 不修会怎样：断点无效且上游未必报错（缓存不命中表现为成本上升，无任何错误信号）。
 type CacheControl struct {
-	Type string // "ephemeral"
-	TTL  string // "5m" / "1h"
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }

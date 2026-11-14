@@ -4,6 +4,7 @@
 package cost
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -398,5 +399,49 @@ func TestLookupMissingModel(t *testing.T) {
 	}
 	if r := (*Rates)(nil).Lookup("deepseek-flash"); r != nil {
 		t.Fatal("nil Rates 的 Lookup 应返回 nil")
+	}
+}
+
+// TestLoadRatesFieldPresence 钉住「字段齐」（SDD 5.4.13 字段清单 + 扩展 cache_write_long_cny）：
+// config/rates.json 每一行都必须带齐 schema 全部键 —— 缺键在 Go 零值语义下会静默变 0
+// （如 peak_multiplier 缺失会当 1.0 口径失效、cache_price_unknown 缺失会当 false 照价猜算），
+// ⛔ 不能靠零值兜底。键名逐字取自 ModelRate / ratesFile 的 json tag。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/cost/ -run TestLoadRatesFieldPresence -v
+func TestLoadRatesFieldPresence(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config", "rates.json"))
+	if err != nil {
+		t.Fatalf("读 config/rates.json 失败：%v", err)
+	}
+	var doc struct {
+		Rates []map[string]json.RawMessage `json:"rates"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("解析 config/rates.json 失败：%v", err)
+	}
+	want := []string{
+		"model", "provider", // 5.4.13 必填标识
+		"input_price_cny", "cache_read_explicit_cny", "cache_read_implicit_cny",
+		"cache_write_cny", "output_price_cny", // 5.4.13 单价五列
+		"cache_write_long_cny",     // 扩展列（5.4 各表写入价 5m/1h、30m/12h 两档，5.4.13 注记）
+		"peak_multiplier",          // 5.4.13（DeepSeek = 2.0，其余 1.0）
+		"input_tiers",              // 5.4.13（空 = 单档）
+		"long_context_multiplier",  // 5.4.13（OpenAI / xAI 长上下文档）
+		"long_context_threshold",   // 5.4.13（272K / 200K）
+		"price_valid_until",        // 5.4.13（Gemini 限价行）
+		"region",                   // 5.4.13（Qwen 华北2（北京）/ Grok us-east-1）
+		"cache_price_unknown",      // 5.4.13（qwen3.8-max / qwen3.8-flash）
+		"batch_discount",           // 5.4.13（0 = 不支持）
+		"local_deployment",         // 5.4.13（Ollama）
+		"context_window",           // 5.4.13（Kimi / Qwen / MiMo）
+		"currency", "price_source", // 5.4.13（币种与来源，5.5 自检依据）
+		"snapshot_date", // 5.4.12（费率时效唯一依据）
+	}
+	for i, row := range doc.Rates {
+		name := string(row["model"])
+		for _, k := range want {
+			if _, ok := row[k]; !ok {
+				t.Fatalf("第 %d 行 %q 缺字段 %q（SDD 5.4.13 字段清单必须齐）", i+1, name, k)
+			}
+		}
 	}
 }

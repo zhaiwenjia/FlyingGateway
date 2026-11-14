@@ -1,0 +1,6 @@
+{
+  "total_tokens": 81,
+  "input_tokens": 17,
+  "output_tokens": 64,
+  "output_tokens_details": {"reasoning_tokens": 12}
+}

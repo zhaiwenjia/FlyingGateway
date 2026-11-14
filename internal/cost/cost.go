@@ -83,12 +83,12 @@ func CalculateCost(usage *core.Usage, rate *ModelRate, callTime time.Time) core.
 	total := inputCost + cacheReadCost + cacheWriteCost + outputCost
 
 	return core.Cost{
-		CostCNY:          round4(total),
-		CostUSD:          round4(total / usdToCNY),
-		InputCostCNY:     round4(inputCost),
-		CacheReadCostCNY: round4(cacheReadCost),
+		CostCNY:           round4(total),
+		CostUSD:           round4(total / usdToCNY),
+		InputCostCNY:      round4(inputCost),
+		CacheReadCostCNY:  round4(cacheReadCost),
 		CacheWriteCostCNY: round4(cacheWriteCost),
-		OutputCostCNY:    round4(outputCost),
+		OutputCostCNY:     round4(outputCost),
 		// 费率表计算一律 Source=Estimated（5.6 ② ③：usage 实测 / 估算都由费率表算出，非供应商自报）；
 		// Estimated 标志与 Usage.Estimated 联动透传（5.6）。
 		Source:       core.CostEstimated,

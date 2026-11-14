@@ -1,0 +1,546 @@
+// 日期: 2026-11-14 15:07:19.509
+// 作者: Zhai Wenjia
+
+package server
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+)
+
+// 本文件是请求管线的功能测试（统一 SDD 12.1 A2 / A11 / A12 / 12.2 D2 / D3 / D5 / 11.4）：
+// 双入口非流式与流式、/v1/models、404、会话态、prompt_cache_key、非法请求、
+// 治理三件套、egress、上下文、重试与降级、鉴权三形态注入。
+
+const chatHelloBody = `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`
+
+// dataLine 取 SSE 块里的 data: JSON。
+func dataLine(t *testing.T, block string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(block, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(payload), &m); err == nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// TestChatCompletionsNonStream 断言 Chat 入口非流式跑通（A2）：内容、usage、finish_reason。
+func TestChatCompletionsNonStream(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200（原文 %s）", resp.StatusCode, readRaw(t, resp))
+	}
+	m := readBody(t, resp)
+	if m["object"] != "chat.completion" {
+		t.Fatalf("object = %v，期望 chat.completion", m["object"])
+	}
+	choices, _ := m["choices"].([]any)
+	c0, _ := choices[0].(map[string]any)
+	msg, _ := c0["message"].(map[string]any)
+	if msg["content"] != "Hello, world!" {
+		t.Errorf("message.content = %v，期望 Hello, world!", msg["content"])
+	}
+	if fr, _ := c0["finish_reason"].(string); fr == "" {
+		t.Errorf("finish_reason 为空，期望非空终止原因")
+	}
+	usage, _ := m["usage"].(map[string]any)
+	if usage["prompt_tokens"] != float64(12) || usage["completion_tokens"] != float64(7) || usage["total_tokens"] != float64(19) {
+		t.Errorf("usage = %v，期望 prompt=12 completion=7 total=19（fixture 逐字）", usage)
+	}
+}
+
+// TestResponsesNonStream 断言 Responses 入口非流式跑通（A2）：status / output_text / usage。
+func TestResponsesNonStream(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/responses", `{"model":"gpt-4o-mini","input":"hi"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	m := readBody(t, resp)
+	if m["status"] != "completed" {
+		t.Errorf("status = %v，期望 completed", m["status"])
+	}
+	if m["output_text"] != "Hello, world!" {
+		t.Errorf("output_text = %v，期望 Hello, world!", m["output_text"])
+	}
+	usage, _ := m["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(12) || usage["output_tokens"] != float64(7) {
+		t.Errorf("usage = %v，期望 input=12 output=7（fixture 逐字）", usage)
+	}
+}
+
+// TestChatStreamFrameSequence 断言流式帧序列、末帧 usage 与终止哨兵（11.4）。
+func TestChatStreamFrameSequence(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/chat/completions", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream":true}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q，期望 text/event-stream", ct)
+	}
+	raw := readRaw(t, resp)
+	blocks := splitBlocks(raw)
+
+	// 帧序列：内容分片（fixture 顺序 Hello / ", world!"）→ 终止帧（finish_reason 非 null）
+	// → usage 块（choices: []）→ data: [DONE] 哨兵。
+	if got := countContent(blocks); got != 2 {
+		t.Fatalf("内容分片数 = %d，期望 2（fixture 两段 delta）", got)
+	}
+	var seenText []string
+	var sawFinish, sawUsage, sawUsageChunk bool
+	for _, b := range blocks {
+		m := dataLine(t, b)
+		if m == nil {
+			continue
+		}
+		if m["object"] != "chat.completion.chunk" {
+			continue
+		}
+		choices, _ := m["choices"].([]any)
+		if len(choices) > 0 {
+			c0, _ := choices[0].(map[string]any)
+			if fr, ok := c0["finish_reason"].(string); ok && fr != "" {
+				sawFinish = true
+			}
+			delta, _ := c0["delta"].(map[string]any)
+			if content, _ := delta["content"].(string); content != "" {
+				seenText = append(seenText, content)
+			}
+		}
+		if usage, ok := m["usage"].(map[string]any); ok && usage != nil {
+			sawUsage = true
+			if len(choices) == 0 {
+				sawUsageChunk = true
+			}
+			if usage["prompt_tokens"] != float64(12) || usage["completion_tokens"] != float64(7) {
+				t.Errorf("末帧 usage = %v，期望 prompt=12 completion=7（fixture 逐字）", usage)
+			}
+		}
+	}
+	if strings.Join(seenText, "") != "Hello, world!" {
+		t.Errorf("内容序列 = %q，期望 Hello, world!（分片顺序保持）", strings.Join(seenText, ""))
+	}
+	if !sawFinish {
+		t.Error("缺终止帧（finish_reason 非 null）")
+	}
+	if !sawUsage || !sawUsageChunk {
+		t.Errorf("缺 usage 块（usage=%v usageChunk=%v，期望终止后独立 usage 块）", sawUsage, sawUsageChunk)
+	}
+	if !hasSentinel(blocks) {
+		t.Error("缺终止哨兵 data: [DONE]")
+	}
+}
+
+// TestResponsesStreamTerminal 断言 Responses 入口流式跑通（A2）：事件序列 + 终态 + 哨兵。
+func TestResponsesStreamTerminal(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/responses", `{"model":"gpt-4o-mini","input":"hi","stream":true}`, nil)
+	raw := readRaw(t, resp)
+	blocks := splitBlocks(raw)
+	var deltas int
+	var completed bool
+	for _, b := range blocks {
+		if strings.Contains(b, "event: response.output_text.delta") {
+			deltas++
+		}
+		if strings.Contains(b, "event: response.completed") {
+			completed = true
+			m := dataLine(t, b)
+			if m != nil {
+				inner, _ := m["response"].(map[string]any)
+				if inner != nil && inner["status"] != "completed" {
+					t.Errorf("终态 response.status = %v，期望 completed", inner["status"])
+				}
+			}
+		}
+	}
+	if deltas != 2 {
+		t.Errorf("output_text.delta 事件数 = %d，期望 2", deltas)
+	}
+	if !completed {
+		t.Error("缺 response.completed 终态事件")
+	}
+	if !hasSentinel(blocks) {
+		t.Error("缺终止哨兵 data: [DONE]")
+	}
+}
+
+// TestUnsupportedCapabilityPreviousResponseID 断言会话态口径（A11）：
+// previous_response_id 打到不支持上游 ⇒ 400 unsupported_capability，⛔ 不静默丢弃。
+func TestUnsupportedCapabilityPreviousResponseID(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		return []epSpec{primaryEP(base), claudeEP(base)}
+	}, nil, nil)
+	e.up.setEventsFor("/responses", loadSSE(t, "openai_responses_stream.sse"))
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
+
+	resp := e.postJSON("/v1/responses",
+		`{"model":"claude-3-5-sonnet","input":"hi","previous_response_id":"prev_1"}`, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400", resp.StatusCode)
+	}
+	typ, code, msg := errorFields(t, readBody(t, resp))
+	if code != "unsupported_capability" {
+		t.Errorf("code = %q，期望 unsupported_capability（type=%q）", code, typ)
+	}
+	if !strings.Contains(msg, "该上游不支持服务端会话，请改为客户端带全量历史") {
+		t.Errorf("错误信息 = %q，须写明「该上游不支持服务端会话，请改为客户端带全量历史」", msg)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0（⛔ 不静默丢弃也不发上游）", n)
+	}
+}
+
+// TestPreviousResponseIDPassthrough 断言支持上游的 previous_response_id 原样透传（3.5）。
+func TestPreviousResponseIDPassthrough(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/responses",
+		`{"model":"gpt-4o-mini","input":"hi","previous_response_id":"prev_9"}`, nil)
+	readBody(t, resp)
+	if !strings.Contains(string(e.up.lastBody()), `"previous_response_id":"prev_9"`) {
+		t.Errorf("上游请求体未透传 previous_response_id：%s", e.up.lastBody())
+	}
+}
+
+// TestPromptCacheKeyPassthrough 断言 prompt_cache_key 始终透传（A12 / 3.5 优化字段）。
+func TestPromptCacheKeyPassthrough(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/responses",
+		`{"model":"gpt-4o-mini","input":"hi","prompt_cache_key":"pck-123"}`, nil)
+	readBody(t, resp)
+	if !strings.Contains(string(e.up.lastBody()), `"prompt_cache_key":"pck-123"`) {
+		t.Errorf("上游请求体未透传 prompt_cache_key：%s", e.up.lastBody())
+	}
+}
+
+// TestInvalidBody400NoUpstream 断言非法请求 400 且 ⛔ 不发起上游请求。
+func TestInvalidBody400NoUpstream(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	resp := e.postJSON("/v1/chat/completions", `{not-json`, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400", resp.StatusCode)
+	}
+	typ, code, _ := errorFields(t, readBody(t, resp))
+	if code != "invalid_request" || typ != "invalid_request" {
+		t.Errorf("error = %q/%q，期望 invalid_request/invalid_request", typ, code)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0", n)
+	}
+}
+
+// TestBudgetExceeded429 断言预算触顶 ⇒ 429 budget_exceeded（上游调用 0，7.2 / 8.3）。
+func TestBudgetExceeded429(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, func(o *Options) {
+		o.Budget = policy.NewBudget(10)
+	})
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("状态 = %d，期望 429", resp.StatusCode)
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "budget_exceeded" {
+		t.Errorf("code = %q，期望 budget_exceeded", code)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0（⛔ 触顶即拒、发起上游之前）", n)
+	}
+}
+
+// TestGuardrailContentPolicy403 断言护栏命中 ⇒ 403 content_policy（上游调用 0）。
+func TestGuardrailContentPolicy403(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, func(o *Options) {
+		o.Guardrail = policy.NewGuardrail([]*regexp.Regexp{regexp.MustCompile("forbidden-word")}, "", nil)
+	})
+	resp := e.postJSON("/v1/chat/completions",
+		`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"say forbidden-word now"}]}`, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("状态 = %d，期望 403", resp.StatusCode)
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "content_policy" {
+		t.Errorf("code = %q，期望 content_policy", code)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0", n)
+	}
+}
+
+// TestRateLimit429RetryAfter 断言 token 级限流超限 ⇒ 429 + Retry-After（2.3 治理三件套）。
+func TestRateLimit429RetryAfter(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, func(o *Options) {
+		o.TokenBucket = policy.NewTokenBucket(1, 0.0001)
+	})
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("状态 = %d，期望 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("缺 Retry-After 头（429 须带）")
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "rate_limit" {
+		t.Errorf("code = %q，期望 rate_limit", code)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0", n)
+	}
+}
+
+// TestEgressDenied403 断言出网管控（8.2）：私网地址 ⇒ 403 egress_denied、⛔ 不改投。
+func TestEgressDenied403(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		ep := primaryEP(base)
+		ep.base = "http://10.0.0.9" // 私网（默认拒绝段）
+		return []epSpec{ep}
+	}, nil, nil)
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("状态 = %d，期望 403", resp.StatusCode)
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "egress_denied" {
+		t.Errorf("code = %q，期望 egress_denied", code)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0（⛔ 不改投其他端点）", n)
+	}
+}
+
+// TestContextExceeded400 断言上下文越界显式报错（A2/D2）：400 context_exceeded、⛔ 不静默截断。
+func TestContextExceeded400(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		ep := primaryEP(base)
+		ep.ctxWindow = 100
+		return []epSpec{ep}
+	}, nil, nil)
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"` + strings.Repeat("x", 400) + `"}],"max_tokens":200}`
+	resp := e.postJSON("/v1/chat/completions", body, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400", resp.StatusCode)
+	}
+	_, code, msg := errorFields(t, readBody(t, resp))
+	if code != "context_exceeded" {
+		t.Errorf("code = %q，期望 context_exceeded", code)
+	}
+	if !strings.Contains(msg, "context_exceeded") {
+		t.Errorf("错误信息 = %q，须含越界判定明细", msg)
+	}
+	if n, _, _, _ := e.up.stats(); n != 0 {
+		t.Errorf("上游调用数 = %d，期望 0（⛔ 不静默截断后发出）", n)
+	}
+}
+
+// TestContextWindowFallbackChain 断言上下文越界走 context_window 专用降级链（2.3 / 7.4）：
+// 同名模型组里主端点窗口不足 ⇒ 降级到链内大窗口端点（⛔ 不静默截断、⛔ 不报错了事）。
+func TestContextWindowFallbackChain(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		primary := primaryEP(base)
+		primary.ctxWindow = 100
+		large := primaryEP(base)
+		large.name = "large" // 同名模型组（model 同为 gpt-4o-mini），窗口更大
+		large.ctxWindow = 128000
+		large.priority = 1
+		return []epSpec{primary, large}
+	}, map[string][]string{"context_window": {"large"}}, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"` + strings.Repeat("x", 400) + `"}],"max_tokens":200}`
+	resp := e.postJSON("/v1/chat/completions", body, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200（走 context_window 专用链的大窗口端点）", resp.StatusCode)
+	}
+	if n, _, _, _ := e.up.stats(); n != 1 {
+		t.Errorf("上游调用数 = %d，期望 1（链内大窗口端点命中即发）", n)
+	}
+}
+
+// TestRetrySameEndpointThenSuccess 断言重试打同一端点、上限 = Endpoint.MaxRetries（7.4）。
+func TestRetrySameEndpointThenSuccess(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		ep := primaryEP(base)
+		ep.maxRetries = 1
+		return []epSpec{ep}
+	}, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	e.up.setFailFirstN(1) // 首次 500、第二次成功
+
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200（首次 500、重试成功）", resp.StatusCode)
+	}
+	if n, _, _, _ := e.up.stats(); n != 2 {
+		t.Errorf("上游调用数 = %d，期望 2（1 次失败 + 1 次重试）", n)
+	}
+}
+
+// TestDegradeToChainEndpoint 断言降级换端点（7.4）：按失败类型分链、⛔ 不合成兜底循环。
+func TestDegradeToChainEndpoint(t *testing.T) {
+	up2 := newFakeUpstream(t)
+	t.Cleanup(up2.close)
+	up2.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	e := newEnv(t, func(base string) []epSpec {
+		primary := primaryEP(base)
+		backup := primaryEP(up2.srv.URL)
+		backup.name = "backup"
+		backup.priority = 1
+		return []epSpec{primary, backup}
+	}, map[string][]string{"upstream_error": {"backup"}}, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	e.up.setFailFirstN(99) // 主端点恒 500
+
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200（降级到 backup）", resp.StatusCode)
+	}
+	if n, _, _, _ := e.up.stats(); n != 1 {
+		t.Errorf("主端点上游调用数 = %d，期望 1（重试上限 0）", n)
+	}
+	if n, _, _, _ := up2.stats(); n != 1 {
+		t.Errorf("backup 上游调用数 = %d，期望 1", n)
+	}
+}
+
+// TestAuthHeaderInjectionThreeForms 断言鉴权头三种形态按 provider 注入（D5 / 8.4）：
+// Authorization: Bearer / x-api-key + anthropic-version / api-key；⛔ 不透传调用方凭据。
+func TestAuthHeaderInjectionThreeForms(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		return []epSpec{primaryEP(base), claudeEP(base), mimoEP(base)}
+	}, nil, nil)
+	e.up.setEventsFor("/responses", loadSSE(t, "openai_responses_stream.sse"))
+	e.up.setEventsFor("/messages", loadSSE(t, "anthropic_messages_stream.sse"))
+
+	// OpenAI 形：Authorization: Bearer <网关凭据>（⛔ 不是调用方凭据）。
+	resp := e.postJSON("/v1/chat/completions", chatHelloBody,
+		map[string]string{"Authorization": "Bearer caller-secret", "X-Api-Key": "caller-x"})
+	readBody(t, resp)
+	h0 := e.up.headersAt(0)
+	if got := h0.Get("Authorization"); got != "Bearer sk-gw-openai-0001" {
+		t.Errorf("OpenAI 上游 Authorization = %q，期望 Bearer sk-gw-openai-0001（⛔ 不透传调用方凭据）", got)
+	}
+	if got := h0.Get("X-Api-Key"); got != "" {
+		t.Errorf("OpenAI 上游 X-Api-Key = %q，期望空（⛔ 不透传调用方凭据）", got)
+	}
+
+	// Anthropic 形：x-api-key + anthropic-version。
+	resp2 := e.postJSON("/v1/chat/completions",
+		`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"Authorization": "Bearer caller-secret"})
+	readBody(t, resp2)
+	h1 := e.up.headersAt(1)
+	if got := h1.Get("X-Api-Key"); got != "sk-gw-anthropic-0002" {
+		t.Errorf("Anthropic 上游 x-api-key = %q，期望 sk-gw-anthropic-0002", got)
+	}
+	if got := h1.Get("Anthropic-Version"); got == "" {
+		t.Error("Anthropic 上游缺 anthropic-version 头（ExtraHeaders 须随鉴权头同批注入）")
+	}
+	if got := h1.Get("Authorization"); got != "" {
+		t.Errorf("Anthropic 上游 Authorization = %q，期望空（⛔ 不透传调用方凭据）", got)
+	}
+
+	// MiMo 形：api-key（非标准头名）。
+	resp3 := e.postJSON("/v1/chat/completions",
+		`{"model":"mimo-v2","messages":[{"role":"user","content":"hi"}]}`, nil)
+	readBody(t, resp3)
+	h2 := e.up.headersAt(2)
+	if got := h2.Get("Api-Key"); got != "sk-gw-mimo-0003" {
+		t.Errorf("MiMo 上游 api-key = %q，期望 sk-gw-mimo-0003", got)
+	}
+	if got := h2.Get("Authorization"); got != "" {
+		t.Errorf("MiMo 上游 Authorization = %q，期望空（⛔ 不用全局硬编码头名）", got)
+	}
+}
+
+// TestAnthropicResidualUsage 断言 Anthropic 残值语义（A6）：
+// InputTokens = input_tokens(20) + cache_creation(0) + cache_read(3) = 23。
+func TestAnthropicResidualUsage(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		return []epSpec{claudeEP(base)}
+	}, nil, nil)
+	e.up.setEvents(loadSSE(t, "anthropic_messages_stream.sse"))
+
+	resp := e.postJSON("/v1/chat/completions",
+		`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`, nil)
+	m := readBody(t, resp)
+	usage, _ := m["usage"].(map[string]any)
+	if usage["prompt_tokens"] != float64(23) {
+		t.Errorf("prompt_tokens = %v，期望 23（残值合成 20+0+3，A6）", usage["prompt_tokens"])
+	}
+	details, _ := usage["prompt_tokens_details"].(map[string]any)
+	if details["cached_tokens"] != float64(3) {
+		t.Errorf("cached_tokens = %v，期望 3（缓存命中单列）", details["cached_tokens"])
+	}
+	if usage["completion_tokens"] != float64(5) {
+		t.Errorf("completion_tokens = %v，期望 5", usage["completion_tokens"])
+	}
+}
+
+// claudeEP 是 Anthropic 形端点（x-api-key 注入、⛔ 不支持服务端会话）。
+func claudeEP(base string) epSpec {
+	return epSpec{
+		name: "claude", base: base, model: "claude-3-5-sonnet", upstreamModel: "claude-3-5-sonnet",
+		provider: "anthropic", credRef: "TEST_KEY_ANTHROPIC",
+		ctxWindow: 200000, maxOut: 8192, maxRetries: 0, priority: 1, timeoutS: 5,
+	}
+}
+
+// mimoEP 是小米 MiMo 端点（api-key 非标准头名注入）。
+func mimoEP(base string) epSpec {
+	return epSpec{
+		name: "mimo", base: base, model: "mimo-v2", upstreamModel: "mimo-v2",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 4096, maxRetries: 0, priority: 2, timeoutS: 5,
+	}
+}
+
+// readRaw 读响应体原文。
+func readRaw(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读响应体失败: %v", err)
+	}
+	return string(raw)
+}
+
+// splitBlocks 把 SSE 响应原文切成事件块。
+func splitBlocks(raw string) []string {
+	var out []string
+	for _, b := range strings.Split(raw, "\n\n") {
+		if strings.TrimSpace(b) != "" {
+			out = append(out, b+"\n\n")
+		}
+	}
+	return out
+}
