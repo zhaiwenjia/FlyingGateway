@@ -1,21 +1,12 @@
-# ---- Python 虚拟环境 ----
-# ⚠️ **两种形式都要写，缺一不可**（老宅 AGENTS.md 规则 17 同款处置）：
-#   .venv   不带斜杠 —— 同时匹配**符号链接**（git 把软链当普通文件跟踪）；
-#   .venv/  带斜杠   —— 匹配**目录**。
-# 只写 `.venv/` 时，在 worktree 里把 `.venv` 做成软链指向主目录复用依赖，
-# 那条软链会被当成文件跟踪入库，而 `.venv/.gitignore`（uv 自建，内容为 `*`）
-# 只在 `.venv` 是真目录时生效、对软链无效 ⇒ CI 全新 runner 上 `uv sync`
-# 报 `failed to create directory .../.venv: File exists`。
-# 加完后务必实测：`git check-ignore -v .venv .venv/`
-.venv
-.venv/
-
-# ---- Python 字节码与构建产物 ----
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
+# ---- Go 构建产物与测试产物 ----
+# go build / go test 的输出不入库。
+bin/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+vendor/
 
 # ---- 环境变量（含真值，不入库）----
 .env
@@ -23,11 +14,9 @@ dist/
 .env.*.local
 
 # ---- 工具缓存 ----
-.ruff_cache/
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
+# Go 的构建缓存在 GOCACHE（默认 ~/Library/Caches/go-build），不在仓内；
+# 这里只挡误生成在仓根的本地工具产物。
+.cache/
 
 # ---- Claude Code 运行态 ----
 .claude/scheduled_tasks.lock
@@ -43,7 +32,7 @@ output/
 logs/
 *.log
 # ---- 参考代码（只读，不参与构建/测试/CI）----
-# 老宅 AGENTS.md 规则 18：历史代码一律只读，不参与构建、测试与 CI。
+# AGENTS.md 规则 18：历史代码一律只读，不参与构建、测试与 CI。
 # reference/ 下存放外部项目的克隆/副本，仅供查阅实现参考。
 reference/
 
@@ -51,4 +40,3 @@ reference/
 # Finder 会在目录里塞 .DS_Store（. 开头 ⇒ git 默认不跟踪它，
 # 但它会污染 `git status`，看着像有未跟踪改动）。
 .DS_Store
-
