@@ -1,0 +1,6 @@
+{
+  "input_tokens": 200,
+  "output_tokens": 50,
+  "total_tokens": 250,
+  "cost_in_usd_ticks": 987654321
+}

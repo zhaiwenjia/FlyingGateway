@@ -1,0 +1,6 @@
+{
+  "strategy": "priority",
+  "endpoints": [
+    {"name": "fake", "base_url": "http://127.0.0.1:9099/v1", "model": "mimo-v2.6-flash", "upstream_model": "mimo-v2.6-flash", "provider_name": "xiaomi", "context_window": 128000, "max_output_tokens": 4096, "capabilities": {"supports_tools": true, "supports_stream": true, "supports_vision": false}, "credential_ref": "MIMO_API_KEY", "timeout_s": 30, "max_retries": 1, "priority": 0}
+  ]
+}

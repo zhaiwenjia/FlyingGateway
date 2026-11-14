@@ -1,0 +1,38 @@
+{
+  "id": "resp_001",
+  "object": "response",
+  "created_at": 1763100000,
+  "status": "completed",
+  "model": "gpt-5.3",
+  "output": [
+    {
+      "id": "rs_001",
+      "type": "reasoning",
+      "summary": [
+        {"type": "summary_text", "text": "先判断题型"}
+      ],
+      "encrypted_content": "gAAAA-enc-blob",
+      "status": "completed"
+    },
+    {
+      "id": "msg_001",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {"type": "output_text", "text": "答案是 42", "annotations": []}
+      ]
+    }
+  ],
+  "output_text": "答案是 42",
+  "usage": {
+    "input_tokens": 200,
+    "output_tokens": 50,
+    "total_tokens": 250,
+    "input_tokens_details": {
+      "cached_tokens": 20,
+      "cache_write_tokens": {"ttl_30m_tokens": 5, "ttl_12h_tokens": 3}
+    },
+    "output_tokens_details": {"reasoning_tokens": 10}
+  }
+}

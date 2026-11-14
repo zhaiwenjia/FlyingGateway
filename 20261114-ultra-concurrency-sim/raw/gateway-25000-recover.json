@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "hold_s": 30,
+    "mode": "quick",
+    "model": "ultra-model",
+    "ramp_per_s": 2000,
+    "src_ips": 1,
+    "target": 100,
+    "tool": "ultraload",
+    "ts": "2026-11-14 20:18:59.201",
+    "url": "http://127.0.0.1:8090",
+    "wall_ms": 52
+  },
+  "result": {
+    "completed": 100,
+    "errors": {},
+    "failed": 0,
+    "inflight_curve": [],
+    "launched": 100,
+    "peak_inflight": 13,
+    "status": {
+      "200": 100
+    },
+    "total_ms": {
+      "p50": 1.977,
+      "p90": 3.29,
+      "p99": 5.031,
+      "p999": 5.206,
+      "max": 5.206
+    },
+    "ttfb_ms": {
+      "p50": 1.942,
+      "p90": 3.256,
+      "p99": 5.002,
+      "p999": 5.191,
+      "max": 5.191
+    }
+  }
+}

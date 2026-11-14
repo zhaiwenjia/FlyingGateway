@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {"text": "你好，"},
+          {"text": "我是 Gemini"}
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 100,
+    "candidatesTokenCount": 30,
+    "thoughtsTokenCount": 10,
+    "toolUsePromptTokenCount": 20,
+    "cachedContentTokenCount": 40,
+    "totalTokenCount": 160
+  }
+}

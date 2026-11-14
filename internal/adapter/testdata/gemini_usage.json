@@ -1,0 +1,8 @@
+{
+  "promptTokenCount": 100,
+  "candidatesTokenCount": 30,
+  "thoughtsTokenCount": 10,
+  "toolUsePromptTokenCount": 20,
+  "cachedContentTokenCount": 40,
+  "totalTokenCount": 160
+}

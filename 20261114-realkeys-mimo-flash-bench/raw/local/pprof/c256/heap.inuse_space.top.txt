@@ -1,0 +1,66 @@
+File: gateway-local
+Type: inuse_space
+Time: 2026-11-14 18:54:16 CST
+Showing nodes accounting for 15225.65kB, 100% of 15225.65kB total
+Showing top 60 nodes out of 141
+      flat  flat%   sum%        cum   cum%
+ 3588.70kB 23.57% 23.57%  3588.70kB 23.57%  runtime.mallocgc
+ 2056.01kB 13.50% 37.07%  2056.01kB 13.50%  bufio.NewReaderSize (inline)
+ 1762.94kB 11.58% 48.65%  1762.94kB 11.58%  runtime/pprof.StartCPUProfile
+    1028kB  6.75% 55.40%     1028kB  6.75%  bufio.NewWriterSize (inline)
+  596.16kB  3.92% 59.32%   596.16kB  3.92%  reflect.compiledTypelinks
+  544.67kB  3.58% 62.90%   544.67kB  3.58%  regexp/syntax.(*compiler).inst
+  528.17kB  3.47% 66.37%   528.17kB  3.47%  net/http.init.func2
+  512.44kB  3.37% 69.73%   512.44kB  3.37%  fmt.(*buffer).writeByte (inline)
+  512.16kB  3.36% 73.10%  2054.16kB 13.49%  net/http.(*Transport).dialConn
+  512.12kB  3.36% 76.46%   512.12kB  3.36%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*cancelRegistry).register
+  512.07kB  3.36% 79.82%   512.07kB  3.36%  net/url.parse
+  512.06kB  3.36% 83.19%   512.06kB  3.36%  sync.(*poolChain).pushHead
+  512.05kB  3.36% 86.55%   512.05kB  3.36%  net/http.(*persistConn).readLoop
+  512.05kB  3.36% 89.91%   512.05kB  3.36%  net/http.(*persistConn).roundTrip
+  512.02kB  3.36% 93.27%   512.02kB  3.36%  go.opencensus.io/metric/metricproducer.GlobalManager.func1
+  512.02kB  3.36% 96.64%   512.02kB  3.36%  net/http.(*Transport).prepareTransportCancel
+  512.01kB  3.36%   100%   512.01kB  3.36%  net/textproto.readMIMEHeader
+         0     0%   100%     1028kB  6.75%  bufio.NewReader
+         0     0%   100%   596.16kB  3.92%  encoding/gob.buildTypeInfo
+         0     0%   100%   596.16kB  3.92%  encoding/gob.getBaseType
+         0     0%   100%   596.16kB  3.92%  encoding/gob.getType
+         0     0%   100%   596.16kB  3.92%  encoding/gob.getTypeInfo
+         0     0%   100%   596.16kB  3.92%  encoding/gob.implementsInterface
+         0     0%   100%   596.16kB  3.92%  encoding/gob.init
+         0     0%   100%   596.16kB  3.92%  encoding/gob.mustGetTypeInfo
+         0     0%   100%   596.16kB  3.92%  encoding/gob.newTypeObject
+         0     0%   100%   596.16kB  3.92%  encoding/gob.userType
+         0     0%   100%   596.16kB  3.92%  encoding/gob.validUserType
+         0     0%   100%   512.06kB  3.36%  encoding/json.Marshal (inline)
+         0     0%   100%   512.06kB  3.36%  encoding/json/v2.Marshal
+         0     0%   100%   512.06kB  3.36%  encoding/json/v2.makeMethodArshaler.func3
+         0     0%   100%   512.06kB  3.36%  encoding/json/v2.marshalEncode
+         0     0%   100%   512.44kB  3.37%  fmt.(*pp).doPrintf
+         0     0%   100%   512.44kB  3.37%  fmt.(*pp).printArg
+         0     0%   100%   512.44kB  3.37%  fmt.(*pp).printValue
+         0     0%   100%   512.44kB  3.37%  fmt.Sprintf
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3.ChatCompletionMessageParamUnion.MarshalJSON
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3.ChatCompletionNewParams.MarshalJSON
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3.ChatCompletionUserMessageParam.MarshalJSON
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3.ChatCompletionUserMessageParamContentUnion.MarshalJSON
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.(*encodeState).marshal
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.(*encodeState).reflectValue
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.Marshal
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.addrMarshalerEncoder
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.arrayEncoder.encode
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.condAddrEncoder.encode
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.marshalerEncoder
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.ptrEncoder.encode
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.sliceEncoder.encode
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/internal/encoding/json.structEncoder.encode
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalObject[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b]
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalObject[go.shape.struct { Content github.com/openai/openai-go/v3.ChatCompletionUserMessageParamContentUnion "json:\"content,omitzero\" api:\"required\""; Name github.com/openai/openai-go/v3/packages/param.Opt[string] "json:\"name,omitzero\""; Role github.com/openai/openai-go/v3/shared/constant.User "json:\"role\" default:\"user\""; github.com/openai/openai-go/v3.paramObj = github.com/openai/openai-go/v3/packages/param.APIObject }]
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalUnion[go.shape.5daecc500d3c7183cfe11e676b8a390b671719e96ebd115eef2c33fc7afb095e]
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalUnion[go.shape.struct { OfString github.com/openai/openai-go/v3/packages/param.Opt[string] "json:\",omitzero,inline\""; OfArrayOfContentParts []github.com/openai/openai-go/v3.ChatCompletionContentPartUnionParam "json:\",omitzero,inline\""; github.com/openai/openai-go/v3.paramUnion = github.com/openai/openai-go/v3/packages/param.APIUnion }]
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalWithExtras[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b,go.shape.interface {}]
+         0     0%   100%   512.06kB  3.36%  github.com/openai/openai-go/v3/packages/param.MarshalWithExtras[go.shape.struct { Content github.com/openai/openai-go/v3.ChatCompletionUserMessageParamContentUnion "json:\"content,omitzero\" api:\"required\""; Name github.com/openai/openai-go/v3/packages/param.Opt[string] "json:\"name,omitzero\""; Role github.com/openai/openai-go/v3/shared/constant.User "json:\"role\" default:\"user\""; github.com/openai/openai-go/v3.paramObj = github.com/openai/openai-go/v3/packages/param.APIObject },go.shape.interface {}]
+         0     0%   100%   512.06kB  3.36%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).BuildRequest
+         0     0%   100%  1536.14kB 10.09%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).StreamStart
+         0     0%   100%   512.06kB  3.36%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.marshalBody
+         0     0%   100%  1536.14kB 10.09%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.streamRequest

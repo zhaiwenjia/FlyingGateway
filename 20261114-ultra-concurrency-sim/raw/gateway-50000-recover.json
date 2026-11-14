@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "hold_s": 30,
+    "mode": "quick",
+    "model": "ultra-model",
+    "ramp_per_s": 2000,
+    "src_ips": 1,
+    "target": 100,
+    "tool": "ultraload",
+    "ts": "2026-11-14 20:21:00.332",
+    "url": "http://127.0.0.1:8090",
+    "wall_ms": 163
+  },
+  "result": {
+    "completed": 93,
+    "errors": {
+      "other: Post \"http://127.0.0.1:8090/v1/chat/completions\": dial tcp 127.0.0.1:0-\u003e127.0.0.1:8090: bind: can't assign requested address": 7
+    },
+    "failed": 7,
+    "inflight_curve": [],
+    "launched": 100,
+    "peak_inflight": 90,
+    "status": {
+      "200": 10,
+      "502": 83
+    },
+    "total_ms": {
+      "p50": 110.173,
+      "p90": 135.374,
+      "p99": 137.913,
+      "p999": 137.913,
+      "max": 137.913
+    },
+    "ttfb_ms": {
+      "p50": 110.152,
+      "p90": 135.36,
+      "p99": 137.91,
+      "p999": 137.91,
+      "max": 137.91
+    }
+  }
+}

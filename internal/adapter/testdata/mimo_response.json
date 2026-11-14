@@ -1,0 +1,24 @@
+{
+  "id": "resp_mm_001",
+  "object": "chat.completion",
+  "created": 1763100000,
+  "model": "mimo-v2.6-pro",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "重复检测截断",
+        "reasoning_content": "推理正文"
+      },
+      "finish_reason": "repetition_truncation"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 80,
+    "completion_tokens": 20,
+    "total_tokens": 100,
+    "prompt_tokens_details": {"cached_tokens": 15},
+    "completion_tokens_details": {"reasoning_tokens": 4}
+  }
+}

@@ -1,0 +1,265 @@
+{
+ "ts": "2026-11-14 18:04:32",
+ "matrix": {
+  "qwen3.8-flash": {
+   "models_list": {
+    "ok": true,
+    "latency_s": 0.004,
+    "evidence": "{\"data\":[{\"id\":\"deepseek-flash\",\"object\":\"model\",\"owned_by\":\"deepseek\",\"context_window\":128000,\"max_output_tokens\":16384"
+   },
+   "chat_nonstream": {
+    "ok": true,
+    "latency_s": 1.647,
+    "evidence": "usage={'prompt_tokens': 67, 'completion_tokens': 51, 'total_tokens': 118, 'prompt_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 0}}"
+   },
+   "chat_stream": {
+    "ok": true,
+    "latency_s": 1.212,
+    "evidence": "delta=True done=True usage=True"
+   },
+   "responses_nonstream": {
+    "ok": true,
+    "latency_s": 1.08,
+    "evidence": "status=completed usage_in=67 out=39"
+   },
+   "responses_stream": {
+    "ok": true,
+    "latency_s": 1.123,
+    "evidence": "events=14 completed=True"
+   },
+   "tools": {
+    "ok": true,
+    "latency_s": 1.499,
+    "evidence": "tool_calls=1 name=get_weather"
+   },
+   "reasoning": {
+    "ok": true,
+    "latency_s": 1.419,
+    "evidence": "reasoning_len=62 content_len=7"
+   },
+   "prompt_cache_key": {
+    "ok": true,
+    "latency_s": 1.659,
+    "evidence": "{\"id\":\"resp-gw-6890583dbabb14a732b2969f2321e1c8\",\"object\":\"response\",\"created_at\":1794650547,\"status\":\"completed\",\"model"
+   },
+   "previous_response_id": {
+    "ok": true,
+    "latency_s": 0.003,
+    "evidence": "HTTP 400 {\"error\":{\"message\":\"该上游不支持服务端会话，请改为客户端带全量历史\",\"type\":\"invalid_request\",\"code\":\"unsupported_capabilit"
+   },
+   "err_404_model_not_found": {
+    "ok": true,
+    "latency_s": 0.004,
+    "evidence": "{\"error\":{\"message\":\"model_not_found: 模型 \\\"nonexistent-model-xyz\\\" 不在注册表（⛔ 不透传任意模型名）\",\"type\":\"invali"
+   }
+  },
+  "glm-5.3-flash": {
+   "models_list": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "{\"data\":[{\"id\":\"deepseek-flash\",\"object\":\"model\",\"owned_by\":\"deepseek\",\"context_window\":128000,\"max_output_tokens\":16384"
+   },
+   "chat_nonstream": {
+    "ok": true,
+    "latency_s": 1.445,
+    "evidence": "usage={'prompt_tokens': 18, 'completion_tokens': 24, 'total_tokens': 42, 'prompt_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 20}}"
+   },
+   "chat_stream": {
+    "ok": true,
+    "latency_s": 1.08,
+    "evidence": "delta=True done=True usage=True"
+   },
+   "responses_nonstream": {
+    "ok": true,
+    "latency_s": 0.94,
+    "evidence": "status=completed usage_in=18 out=24"
+   },
+   "responses_stream": {
+    "ok": true,
+    "latency_s": 0.977,
+    "evidence": "events=21 completed=True"
+   },
+   "tools": {
+    "ok": true,
+    "latency_s": 11.736,
+    "evidence": "tool_calls=1 name=get_weather"
+   },
+   "reasoning": {
+    "ok": true,
+    "latency_s": 2.526,
+    "evidence": "reasoning_len=245 content_len=0"
+   },
+   "prompt_cache_key": {
+    "ok": true,
+    "latency_s": 1.04,
+    "evidence": "{\"id\":\"resp-gw-d45fcb03360eca84c283ad9d69f79865\",\"object\":\"response\",\"created_at\":1794650567,\"status\":\"completed\",\"model"
+   },
+   "previous_response_id": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "HTTP 400 {\"error\":{\"message\":\"该上游不支持服务端会话，请改为客户端带全量历史\",\"type\":\"invalid_request\",\"code\":\"unsupported_capabilit"
+   },
+   "err_404_model_not_found": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "{\"error\":{\"message\":\"model_not_found: 模型 \\\"nonexistent-model-xyz\\\" 不在注册表（⛔ 不透传任意模型名）\",\"type\":\"invali"
+   }
+  },
+  "deepseek-flash": {
+   "models_list": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "{\"data\":[{\"id\":\"deepseek-flash\",\"object\":\"model\",\"owned_by\":\"deepseek\",\"context_window\":128000,\"max_output_tokens\":16384"
+   },
+   "chat_nonstream": {
+    "ok": true,
+    "latency_s": 0.842,
+    "evidence": "usage={'prompt_tokens': 36, 'completion_tokens': 19, 'total_tokens': 55, 'prompt_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 0}}"
+   },
+   "chat_stream": {
+    "ok": true,
+    "latency_s": 0.804,
+    "evidence": "delta=True done=True usage=True"
+   },
+   "responses_nonstream": {
+    "ok": true,
+    "latency_s": 0.674,
+    "evidence": "status=completed usage_in=36 out=24"
+   },
+   "responses_stream": {
+    "ok": true,
+    "latency_s": 0.972,
+    "evidence": "events=25 completed=True"
+   },
+   "tools": {
+    "ok": true,
+    "latency_s": 0.66,
+    "evidence": "tool_calls=1 name=get_weather"
+   },
+   "reasoning": {
+    "ok": true,
+    "latency_s": 0.967,
+    "evidence": "reasoning_len=138 content_len=32"
+   },
+   "prompt_cache_key": {
+    "ok": true,
+    "latency_s": 0.722,
+    "evidence": "{\"id\":\"resp-gw-71232796d61bd947d07076f5c929eeea\",\"object\":\"response\",\"created_at\":1794650573,\"status\":\"completed\",\"model"
+   },
+   "previous_response_id": {
+    "ok": true,
+    "latency_s": 0.003,
+    "evidence": "HTTP 400 {\"error\":{\"message\":\"该上游不支持服务端会话，请改为客户端带全量历史\",\"type\":\"invalid_request\",\"code\":\"unsupported_capabilit"
+   },
+   "err_404_model_not_found": {
+    "ok": true,
+    "latency_s": 0.001,
+    "evidence": "{\"error\":{\"message\":\"model_not_found: 模型 \\\"nonexistent-model-xyz\\\" 不在注册表（⛔ 不透传任意模型名）\",\"type\":\"invali"
+   }
+  },
+  "kimi-k3.1-pro": {
+   "models_list": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "{\"data\":[{\"id\":\"deepseek-flash\",\"object\":\"model\",\"owned_by\":\"deepseek\",\"context_window\":128000,\"max_output_tokens\":16384"
+   },
+   "chat_nonstream": {
+    "ok": true,
+    "latency_s": 1.402,
+    "evidence": "usage={'prompt_tokens': 91, 'completion_tokens': 24, 'total_tokens': 115, 'prompt_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 0}}"
+   },
+   "chat_stream": {
+    "ok": true,
+    "latency_s": 1.437,
+    "evidence": "delta=True done=True usage=True"
+   },
+   "responses_nonstream": {
+    "ok": true,
+    "latency_s": 1.52,
+    "evidence": "status=completed usage_in=91 out=24"
+   },
+   "responses_stream": {
+    "ok": true,
+    "latency_s": 24.941,
+    "evidence": "events=22 completed=True"
+   },
+   "tools": {
+    "ok": true,
+    "latency_s": 2.413,
+    "evidence": "tool_calls=1 name=get_weather"
+   },
+   "reasoning": {
+    "ok": true,
+    "latency_s": 3.811,
+    "evidence": "reasoning_len=137 content_len=0"
+   },
+   "prompt_cache_key": {
+    "ok": true,
+    "latency_s": 48.292,
+    "evidence": "{\"id\":\"resp-gw-6b2b083c62d060aa410e0c14b9449f7b\",\"object\":\"response\",\"created_at\":1794650656,\"status\":\"completed\",\"model"
+   },
+   "previous_response_id": {
+    "ok": true,
+    "latency_s": 0.002,
+    "evidence": "HTTP 400 {\"error\":{\"message\":\"该上游不支持服务端会话，请改为客户端带全量历史\",\"type\":\"invalid_request\",\"code\":\"unsupported_capabilit"
+   },
+   "err_404_model_not_found": {
+    "ok": true,
+    "latency_s": 0.001,
+    "evidence": "{\"error\":{\"message\":\"model_not_found: 模型 \\\"nonexistent-model-xyz\\\" 不在注册表（⛔ 不透传任意模型名）\",\"type\":\"invali"
+   }
+  },
+  "mimo-v2.6-flash": {
+   "models_list": {
+    "ok": true,
+    "latency_s": 0.001,
+    "evidence": "{\"data\":[{\"id\":\"deepseek-flash\",\"object\":\"model\",\"owned_by\":\"deepseek\",\"context_window\":128000,\"max_output_tokens\":16384"
+   },
+   "chat_nonstream": {
+    "ok": true,
+    "latency_s": 1.698,
+    "evidence": "usage={'prompt_tokens': 13, 'completion_tokens': 24, 'total_tokens': 37, 'prompt_tokens_details': {'cached_tokens': 0, 'cache_write_tokens': 0}, 'completion_tokens_details': {'reasoning_tokens': 15}}"
+   },
+   "chat_stream": {
+    "ok": true,
+    "latency_s": 2.161,
+    "evidence": "delta=True done=True usage=True"
+   },
+   "responses_nonstream": {
+    "ok": true,
+    "latency_s": 1.937,
+    "evidence": "status=completed usage_in=13 out=24"
+   },
+   "responses_stream": {
+    "ok": true,
+    "latency_s": 1.824,
+    "evidence": "events=6 completed=True"
+   },
+   "tools": {
+    "ok": true,
+    "latency_s": 1.476,
+    "evidence": "tool_calls=1 name=get_weather"
+   },
+   "reasoning": {
+    "ok": true,
+    "latency_s": 3.831,
+    "evidence": "reasoning_len=70 content_len=52"
+   },
+   "prompt_cache_key": {
+    "ok": true,
+    "latency_s": 2.491,
+    "evidence": "{\"id\":\"resp-gw-36126019a0ffb0691f0998d65ca71dc1\",\"object\":\"response\",\"created_at\":1794650672,\"status\":\"completed\",\"model"
+   },
+   "previous_response_id": {
+    "ok": true,
+    "latency_s": 0.003,
+    "evidence": "HTTP 400 {\"error\":{\"message\":\"该上游不支持服务端会话，请改为客户端带全量历史\",\"type\":\"invalid_request\",\"code\":\"unsupported_capabilit"
+   },
+   "err_404_model_not_found": {
+    "ok": true,
+    "latency_s": 0.003,
+    "evidence": "{\"error\":{\"message\":\"model_not_found: 模型 \\\"nonexistent-model-xyz\\\" 不在注册表（⛔ 不透传任意模型名）\",\"type\":\"invali"
+   }
+  }
+ }
+}

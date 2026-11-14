@@ -1,0 +1,134 @@
+{
+ "ts": "2026-11-14 17:52:04",
+ "summary": {
+  "target": "litellm",
+  "model": "mimo-v2.6-flash",
+  "concurrency": 1,
+  "requests": 16,
+  "ok": 16,
+  "fail": 0,
+  "wall_s": 22.347,
+  "throughput_rps": 0.72,
+  "latency_ms": {
+   "p50": 1372.7,
+   "p90": 2054.6,
+   "p99": 2205.7,
+   "mean": 1396.6,
+   "max": 2205.7
+  }
+ },
+ "results": [
+  {
+   "i": 0,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.0266,
+   "err": ""
+  },
+  {
+   "i": 1,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.384,
+   "err": ""
+  },
+  {
+   "i": 2,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.3727,
+   "err": ""
+  },
+  {
+   "i": 3,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.8657,
+   "err": ""
+  },
+  {
+   "i": 4,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.6503,
+   "err": ""
+  },
+  {
+   "i": 5,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.9408,
+   "err": ""
+  },
+  {
+   "i": 6,
+   "ok": true,
+   "status": 200,
+   "latency_s": 2.0546,
+   "err": ""
+  },
+  {
+   "i": 7,
+   "ok": true,
+   "status": 200,
+   "latency_s": 2.0465,
+   "err": ""
+  },
+  {
+   "i": 8,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.9912,
+   "err": ""
+  },
+  {
+   "i": 9,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.9326,
+   "err": ""
+  },
+  {
+   "i": 10,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.5513,
+   "err": ""
+  },
+  {
+   "i": 11,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.0687,
+   "err": ""
+  },
+  {
+   "i": 12,
+   "ok": true,
+   "status": 200,
+   "latency_s": 2.2057,
+   "err": ""
+  },
+  {
+   "i": 13,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.2251,
+   "err": ""
+  },
+  {
+   "i": 14,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.9986,
+   "err": ""
+  },
+  {
+   "i": 15,
+   "ok": true,
+   "status": 200,
+   "latency_s": 1.0309,
+   "err": ""
+  }
+ ]
+}

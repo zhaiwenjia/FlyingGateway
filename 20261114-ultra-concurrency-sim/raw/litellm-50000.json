@@ -1,0 +1,520 @@
+{
+  "meta": {
+    "hold_s": 30,
+    "mode": "storm",
+    "model": "ultra-model",
+    "ramp_per_s": 3333,
+    "src_ips": 1,
+    "target": 50000,
+    "tool": "ultraload",
+    "ts": "2026-11-14 20:32:18.964",
+    "url": "http://127.0.0.1:8081",
+    "wall_ms": 60019
+  },
+  "result": {
+    "completed": 2000,
+    "errors": {
+      "deadline": 2089,
+      "dial_no_port": 1286,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20183-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20213-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20232-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20314-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20351-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20702-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20737-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21033-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21059-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21271-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21281-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21287-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21300-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21342-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21585-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21592-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21594-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21749-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21764-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21790-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21818-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21820-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21897-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22258-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22296-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22321-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22442-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22467-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22469-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22471-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22492-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22506-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22579-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22580-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22688-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22792-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22820-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23121-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23256-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23268-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23336-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23363-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23395-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23396-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23397-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23547-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23848-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24057-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24103-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24110-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24148-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24184-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24203-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24218-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24219-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24234-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24235-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24244-\u003e127.0.0.1:8081: write: broken pipe": 2,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24826-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24841-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24861-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24953-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24954-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25051-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25303-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25380-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25388-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25498-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25562-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25622-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25627-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25754-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25866-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25867-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25923-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:25924-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26239-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26437-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26478-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26486-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26720-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26795-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26883-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26910-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26945-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:26957-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:27511-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:27759-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28172-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28204-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28331-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28357-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28785-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28791-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:28792-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29018-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29058-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29084-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29097-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29538-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29785-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29787-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29813-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29881-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:29890-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30352-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30383-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30606-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30648-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30721-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30767-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30780-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:30788-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31187-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31190-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31614-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31640-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31660-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31672-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31701-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31856-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31922-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:31960-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32142-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32183-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32748-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32820-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32830-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32933-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:32941-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33009-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33019-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33034-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33324-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33325-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33326-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33624-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33626-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33631-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33821-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33822-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:33846-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34016-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34589-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34591-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34636-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34708-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34758-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34789-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34804-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:34856-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35058-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35060-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35069-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35410-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35411-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35431-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35443-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35464-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35500-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35508-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35557-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35558-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35577-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35628-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35637-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35651-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35658-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35732-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35739-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35760-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35761-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35793-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:35801-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:36178-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:36389-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:36472-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:36655-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:37389-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:37680-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:37874-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:37905-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:37946-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:38500-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:38675-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:38778-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:38879-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39008-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39144-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39145-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39148-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39150-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39269-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39511-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39516-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39526-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39628-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39630-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39744-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:39867-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40354-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40394-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40421-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40478-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40541-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:40635-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41119-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41755-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41929-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41970-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41971-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41974-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:41984-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:42732-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:42743-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:42747-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:43523-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:43576-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:43992-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:44373-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:44435-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:44453-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:44544-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:45131-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:45748-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:46106-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:46172-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:46174-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:46766-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:46793-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:47654-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:47657-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:47673-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:47867-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:48046-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:48342-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "reset": 44388
+    },
+    "failed": 48000,
+    "inflight_curve": [
+      {
+        "sec": 0,
+        "inflight": 283
+      },
+      {
+        "sec": 1,
+        "inflight": 465
+      },
+      {
+        "sec": 2,
+        "inflight": 610
+      },
+      {
+        "sec": 3,
+        "inflight": 805
+      },
+      {
+        "sec": 4,
+        "inflight": 935
+      },
+      {
+        "sec": 5,
+        "inflight": 1129
+      },
+      {
+        "sec": 6,
+        "inflight": 1396
+      },
+      {
+        "sec": 7,
+        "inflight": 1708
+      },
+      {
+        "sec": 8,
+        "inflight": 2067
+      },
+      {
+        "sec": 9,
+        "inflight": 2320
+      },
+      {
+        "sec": 10,
+        "inflight": 2630
+      },
+      {
+        "sec": 11,
+        "inflight": 2980
+      },
+      {
+        "sec": 12,
+        "inflight": 3320
+      },
+      {
+        "sec": 13,
+        "inflight": 3505
+      },
+      {
+        "sec": 14,
+        "inflight": 3858
+      },
+      {
+        "sec": 15,
+        "inflight": 4089
+      },
+      {
+        "sec": 16,
+        "inflight": 4089
+      },
+      {
+        "sec": 17,
+        "inflight": 4089
+      },
+      {
+        "sec": 18,
+        "inflight": 4089
+      },
+      {
+        "sec": 19,
+        "inflight": 4089
+      },
+      {
+        "sec": 20,
+        "inflight": 4089
+      },
+      {
+        "sec": 21,
+        "inflight": 4089
+      },
+      {
+        "sec": 22,
+        "inflight": 4089
+      },
+      {
+        "sec": 23,
+        "inflight": 4089
+      },
+      {
+        "sec": 24,
+        "inflight": 4089
+      },
+      {
+        "sec": 25,
+        "inflight": 4089
+      },
+      {
+        "sec": 26,
+        "inflight": 4089
+      },
+      {
+        "sec": 27,
+        "inflight": 4089
+      },
+      {
+        "sec": 28,
+        "inflight": 4089
+      },
+      {
+        "sec": 29,
+        "inflight": 4089
+      },
+      {
+        "sec": 30,
+        "inflight": 3946
+      },
+      {
+        "sec": 31,
+        "inflight": 3762
+      },
+      {
+        "sec": 32,
+        "inflight": 3613
+      },
+      {
+        "sec": 33,
+        "inflight": 3430
+      },
+      {
+        "sec": 34,
+        "inflight": 3287
+      },
+      {
+        "sec": 35,
+        "inflight": 3105
+      },
+      {
+        "sec": 36,
+        "inflight": 3089
+      },
+      {
+        "sec": 37,
+        "inflight": 3089
+      },
+      {
+        "sec": 38,
+        "inflight": 3089
+      },
+      {
+        "sec": 39,
+        "inflight": 3089
+      },
+      {
+        "sec": 40,
+        "inflight": 3089
+      },
+      {
+        "sec": 41,
+        "inflight": 3089
+      },
+      {
+        "sec": 42,
+        "inflight": 3089
+      },
+      {
+        "sec": 43,
+        "inflight": 3089
+      },
+      {
+        "sec": 44,
+        "inflight": 3089
+      },
+      {
+        "sec": 45,
+        "inflight": 3089
+      },
+      {
+        "sec": 46,
+        "inflight": 3089
+      },
+      {
+        "sec": 47,
+        "inflight": 3089
+      },
+      {
+        "sec": 48,
+        "inflight": 3089
+      },
+      {
+        "sec": 49,
+        "inflight": 3089
+      },
+      {
+        "sec": 50,
+        "inflight": 3089
+      },
+      {
+        "sec": 51,
+        "inflight": 3089
+      },
+      {
+        "sec": 52,
+        "inflight": 3089
+      },
+      {
+        "sec": 53,
+        "inflight": 3089
+      },
+      {
+        "sec": 54,
+        "inflight": 3089
+      },
+      {
+        "sec": 55,
+        "inflight": 3089
+      },
+      {
+        "sec": 56,
+        "inflight": 3089
+      },
+      {
+        "sec": 57,
+        "inflight": 3089
+      },
+      {
+        "sec": 58,
+        "inflight": 3089
+      },
+      {
+        "sec": 59,
+        "inflight": 3089
+      }
+    ],
+    "launched": 50000,
+    "peak_inflight": 4100,
+    "status": {
+      "200": 2000
+    },
+    "total_ms": {
+      "p50": 30966.631,
+      "p90": 53728.584,
+      "p99": 54525.119,
+      "p999": 54636.301,
+      "max": 54646.846
+    },
+    "ttfb_ms": {
+      "p50": 987.502,
+      "p90": 26670.464,
+      "p99": 27400.112,
+      "p999": 27601.659,
+      "max": 27639.36
+    }
+  }
+}

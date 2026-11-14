@@ -1,0 +1,68 @@
+File: gateway-local
+Type: cpu
+Time: 2026-11-14 18:53:07 CST
+Duration: 30.01s, Total samples = 4.81s (16.03%)
+Showing nodes accounting for 4.34s, 90.23% of 4.81s total
+Dropped 196 nodes (cum <= 0.02s)
+Showing top 60 nodes out of 207
+      flat  flat%   sum%        cum   cum%
+     2.12s 44.07% 44.07%      2.12s 44.07%  syscall.rawsyscalln
+     0.47s  9.77% 53.85%      0.47s  9.77%  runtime.usleep
+     0.45s  9.36% 63.20%      0.45s  9.36%  runtime.kevent
+     0.24s  4.99% 68.19%      0.25s  5.20%  runtime.pthread_cond_wait
+     0.23s  4.78% 72.97%      0.23s  4.78%  runtime.madvise
+     0.22s  4.57% 77.55%      0.22s  4.57%  runtime.pthread_cond_signal
+     0.19s  3.95% 81.50%      0.19s  3.95%  runtime.pthread_kill
+     0.09s  1.87% 83.37%      0.09s  1.87%  runtime.tryDeferToSpanScan
+     0.06s  1.25% 84.62%      0.12s  2.49%  runtime.scanObjectsSmall
+     0.04s  0.83% 85.45%      0.06s  1.25%  runtime.pcvalue
+     0.04s  0.83% 86.28%      0.04s  0.83%  runtime.typePointers.next
+     0.03s  0.62% 86.90%      0.03s  0.62%  runtime.findObject
+     0.03s  0.62% 87.53%      0.03s  0.62%  runtime.pthread_cond_timedwait_relative_np
+     0.02s  0.42% 87.94%      0.03s  0.62%  runtime.(*lfstack).pop
+     0.02s  0.42% 88.36%      0.30s  6.24%  runtime.lock2
+     0.02s  0.42% 88.77%      0.03s  0.62%  runtime.scanblock
+     0.01s  0.21% 88.98%      0.03s  0.62%  github.com/zhaiwenjia/FlyingGateway/internal/telemetry.(*Span).SetAttr
+     0.01s  0.21% 89.19%      0.04s  0.83%  runtime.(*stackScanState).addObject
+     0.01s  0.21% 89.40%      0.05s  1.04%  runtime.(*unwinder).next
+     0.01s  0.21% 89.60%      0.05s  1.04%  runtime.mallocgcSmallScanSlowPath
+     0.01s  0.21% 89.81%      0.04s  0.83%  runtime.mapassign_faststr
+     0.01s  0.21% 90.02%      0.05s  1.04%  runtime.unlock2
+     0.01s  0.21% 90.23%      0.03s  0.62%  sync.(*poolDequeue).popTail
+         0     0% 90.23%      0.05s  1.04%  _.goready.func1
+         0     0% 90.23%      0.56s 11.64%  bufio.(*Reader).Peek
+         0     0% 90.23%      0.56s 11.64%  bufio.(*Reader).fill
+         0     0% 90.23%      0.75s 15.59%  bufio.(*Writer).Flush
+         0     0% 90.23%      0.06s  1.25%  encoding/json.Marshal (inline)
+         0     0% 90.23%      0.05s  1.04%  encoding/json.Unmarshal (inline)
+         0     0% 90.23%      0.06s  1.25%  encoding/json/v2.Marshal
+         0     0% 90.23%      0.05s  1.04%  encoding/json/v2.Unmarshal
+         0     0% 90.23%      0.03s  0.62%  encoding/json/v2.makeMethodArshaler.func3
+         0     0% 90.23%      0.05s  1.04%  encoding/json/v2.makeMethodArshaler.func6
+         0     0% 90.23%      0.06s  1.25%  encoding/json/v2.marshalEncode
+         0     0% 90.23%      0.05s  1.04%  encoding/json/v2.unmarshalDecode
+         0     0% 90.23%      0.03s  0.62%  fmt.(*pp).doPrintf
+         0     0% 90.23%      0.03s  0.62%  fmt.(*pp).printArg
+         0     0% 90.23%      0.03s  0.62%  fmt.(*pp).printValue
+         0     0% 90.23%      0.03s  0.62%  fmt.Sprintf
+         0     0% 90.23%      0.05s  1.04%  github.com/openai/openai-go/v3.(*ChatCompletionChunk).UnmarshalJSON
+         0     0% 90.23%      0.03s  0.62%  github.com/openai/openai-go/v3.ChatCompletionNewParams.MarshalJSON
+         0     0% 90.23%      0.05s  1.04%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).newStructTypeDecoder.func1
+         0     0% 90.23%      0.05s  1.04%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).unmarshal
+         0     0% 90.23%      0.05s  1.04%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).unmarshalResult
+         0     0% 90.23%      0.05s  1.04%  github.com/openai/openai-go/v3/internal/apijson.UnmarshalRoot (inline)
+         0     0% 90.23%      0.03s  0.62%  github.com/openai/openai-go/v3/internal/apijson.indirectUnmarshalerDecoder
+         0     0% 90.23%      0.03s  0.62%  github.com/openai/openai-go/v3/packages/param.MarshalObject[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b]
+         0     0% 90.23%      0.03s  0.62%  github.com/openai/openai-go/v3/packages/param.MarshalWithExtras[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b,go.shape.interface {}]
+         0     0% 90.23%      0.05s  1.04%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).BuildRequest
+         0     0% 90.23%      0.12s  2.49%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).StreamStart
+         0     0% 90.23%      0.08s  1.66%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decode
+         0     0% 90.23%      0.08s  1.66%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decodeOne
+         0     0% 90.23%      0.09s  1.87%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*sseIter).Next
+         0     0% 90.23%      0.04s  0.83%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.marshalBody
+         0     0% 90.23%      0.06s  1.25%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.newSSEIter (inline)
+         0     0% 90.23%      0.03s  0.62%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.streamRequest
+         0     0% 90.23%      0.63s 13.10%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).endEndpointSpan
+         0     0% 90.23%      0.19s  3.95%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).finalizeExec
+         0     0% 90.23%      0.59s 12.27%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).finishSpan
+         0     0% 90.23%      1.13s 23.49%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).handle

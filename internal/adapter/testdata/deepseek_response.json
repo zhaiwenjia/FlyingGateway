@@ -1,0 +1,25 @@
+{
+  "id": "resp_ds_001",
+  "object": "chat.completion",
+  "created": 1763100000,
+  "model": "deepseek-reasoner",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "完成",
+        "reasoning_content": "推理正文"
+      },
+      "finish_reason": "aborted"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 7,
+    "completion_tokens": 11,
+    "total_tokens": 18,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 7
+  }
+}

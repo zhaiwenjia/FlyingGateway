@@ -1,0 +1,67 @@
+File: gateway-local
+Type: alloc_objects
+Time: 2026-11-14 18:53:37 CST
+Showing nodes accounting for 2819946, 92.63% of 3044302 total
+Dropped 119 nodes (cum <= 15221)
+Showing top 60 nodes out of 200
+      flat  flat%   sum%        cum   cum%
+    476109 15.64% 15.64%     476109 15.64%  reflect.unsafe_New
+    152917  5.02% 20.66%     152917  5.02%  github.com/openai/openai-go/v3/internal/apijson.setMetadataSubField
+    148893  4.89% 25.55%     148893  4.89%  github.com/tidwall/gjson.Result.arrayOrMap
+    145117  4.77% 30.32%     293941  9.66%  github.com/openai/openai-go/v3/internal/encoding/json.Marshal
+    131074  4.31% 34.63%     838795 27.55%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).newStructTypeDecoder.func1
+     98304  3.23% 37.85%     102109  3.35%  net/http.(*Request).write
+     96960  3.18% 41.04%     681699 22.39%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).BuildRequest
+     66743  2.19% 43.23%      99511  3.27%  net/textproto.readMIMEHeader
+     65536  2.15% 45.38%     838795 27.55%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).unmarshalResult
+     65536  2.15% 47.54%      81920  2.69%  github.com/openai/openai-go/v3/packages/param.Opt[go.shape.string].MarshalJSON
+     65536  2.15% 49.69%     270394  8.88%  github.com/zhaiwenjia/FlyingGateway/internal/telemetry.(*Span).End
+     57346  1.88% 51.57%      81922  2.69%  github.com/tidwall/sjson.set
+     49153  1.61% 53.19%      49153  1.61%  slices.AppendSeq[go.shape.[]go.shape.string,go.shape.string] (inline)
+     46421  1.52% 54.71%     573851 18.85%  github.com/openai/openai-go/v3/internal/apijson.indirectUnmarshalerDecoder
+     43695  1.44% 56.15%      43695  1.44%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.qwenChatMessage
+     43692  1.44% 57.58%      43692  1.44%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.joinURL (inline)
+     43691  1.44% 59.02%      54195  1.78%  github.com/zhaiwenjia/FlyingGateway/internal/codec/chat.EncodeResponse
+     42327  1.39% 60.41%      42327  1.39%  sync.(*poolChain).pushHead
+     42014  1.38% 61.79%      51376  1.69%  context.(*cancelCtx).propagateCancel
+     39758  1.31% 63.10%     941478 30.93%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decodeOne
+     37449  1.23% 64.33%      37449  1.23%  regexp/syntax.(*Regexp).Simplify
+     37387  1.23% 65.55%      37387  1.23%  github.com/tidwall/gjson.ParseBytes (inline)
+     32771  1.08% 66.63%      32771  1.08%  net/url.parse
+     32769  1.08% 67.71%      32769  1.08%  net/textproto.(*Reader).ReadLine (inline)
+     32768  1.08% 68.78%      66858  2.20%  context.WithDeadlineCause
+     32768  1.08% 69.86%      33652  1.11%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).finalizeExec
+     32768  1.08% 70.94%      32768  1.08%  io.NopCloser (inline)
+     32768  1.08% 72.01%      32768  1.08%  net/textproto.canonicalMIMEHeaderKey
+     30039  0.99% 73.00%      30039  0.99%  net/http.setupRewindBody (inline)
+     29465  0.97% 73.97%      29465  0.97%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*frameAccumulator).result
+     26817  0.88% 74.85%      26817  0.88%  net/textproto.MIMEHeader.Set (inline)
+     26216  0.86% 75.71%      43502  1.43%  context.withCancel (inline)
+     24579  0.81% 76.52%     197976  6.50%  github.com/openai/openai-go/v3/internal/encoding/json.marshalerEncoder
+     22941  0.75% 77.27%      22941  0.75%  github.com/zhaiwenjia/FlyingGateway/internal/stream.splitSSEField
+     21845  0.72% 77.99%     107861  3.54%  github.com/openai/openai-go/v3.ChatCompletionUserMessageParamContentUnion.MarshalJSON
+     21845  0.72% 78.70%    2049120 67.31%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).runEndpoint
+     21845  0.72% 79.42%      32768  1.08%  github.com/zhaiwenjia/FlyingGateway/internal/server.clientRequestID
+     21845  0.72% 80.14%      21845  0.72%  io.LimitReader
+     21845  0.72% 80.86%      39999  1.31%  reflect.MakeSlice
+     21641  0.71% 81.57%      21641  0.71%  bytes.Clone (inline)
+     21517  0.71% 82.28%      37901  1.24%  github.com/zhaiwenjia/FlyingGateway/internal/codec/chat.DecodeRequest
+     21351   0.7% 82.98%      21351   0.7%  net/http.Header.Clone (inline)
+     21305   0.7% 83.68%     158229  5.20%  net/http.readRequestLimit
+     20492  0.67% 84.35%      20492  0.67%  github.com/zhaiwenjia/FlyingGateway/internal/telemetry.(*Span).SetAttr
+     20482  0.67% 85.02%      20482  0.67%  github.com/zhaiwenjia/FlyingGateway/internal/codec/chat.NewChunkEncoder (inline)
+     19662  0.65% 85.67%      19662  0.65%  net/http.readTransfer
+     18154   0.6% 86.26%      18154   0.6%  reflect.unsafe_NewArray
+     17298  0.57% 86.83%     195269  6.41%  fmt.Sprintf
+     16386  0.54% 87.37%     444679 14.61%  github.com/openai/openai-go/v3/packages/param.MarshalWithExtras[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b,go.shape.interface {}]
+     16385  0.54% 87.91%      16385  0.54%  strings.genSplit
+     16384  0.54% 88.45%      16384  0.54%  github.com/tidwall/sjson.appendStringify
+     16384  0.54% 88.99%      16384  0.54%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).streamDecoder (inline)
+     16384  0.54% 89.52%      16384  0.54%  go.opencensus.io/metric/metricproducer.GlobalManager.func1
+     16384  0.54% 90.06%      16384  0.54%  syscall.anyToSockaddr
+     15321   0.5% 90.57%      21875  0.72%  net/http.(*Transport).getConn
+     13942  0.46% 91.02%     460669 15.13%  encoding/json/v2.makeMethodArshaler.func3
+     13110  0.43% 91.45%      27276   0.9%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.newSSEIter (inline)
+     13108  0.43% 91.88%     108653  3.57%  net/http.(*Transport).roundTrip
+     12873  0.42% 92.31%      54776  1.80%  net/http.(*persistConn).readLoop
+      9831  0.32% 92.63%     951681 31.26%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decode

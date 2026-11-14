@@ -1,0 +1,13 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture_1","object":"response","created_at":1763100000,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"delta":"Hello"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"delta":", world!"}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_fixture_1","object":"response","created_at":1763100000,"status":"completed","model":"gpt-4o-mini","output":[{"type":"message","id":"msg_fixture_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello, world!"}]}],"output_text":"Hello, world!","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":2},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":19}}}
+
+data: [DONE]

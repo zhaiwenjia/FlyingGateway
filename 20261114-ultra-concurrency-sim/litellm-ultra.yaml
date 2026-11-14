@@ -1,0 +1,71 @@
+# 日期: 2026-11-14 19:52:00.000
+# 作者: Zhai Wenjia
+# LiteLLM 超高并发等价模拟配置：ultra-model 经 8 个 openai-compatible 部署指向「同一假上游」
+# （127.0.0.1:9102-9109），与 FlyingGateway 同源。weight 相同 ⇒ 路由层负载均衡到 8 个上游端口，
+# 网关→上游端口空间各 16384 ⇒ 上游侧不人为设限（公平对比，瓶颈留给进程本身）。
+model_list:
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9102/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-1 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9103/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-2 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9104/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-3 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9105/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-4 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9106/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-5 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9107/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-6 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9108/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-7 }
+  - model_name: ultra-model
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: http://127.0.0.1:9109/v1
+      api_key: sk-ultra-fake
+      weight: 1
+    model_info: { id: ultra-8 }
+
+litellm_settings:
+  num_retries: 0
+  request_timeout: 300
+  drop_params: true
+
+router_settings:
+  strategy: simple-shuffle
+  num_retries: 0

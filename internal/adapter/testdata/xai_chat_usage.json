@@ -1,0 +1,8 @@
+{
+  "prompt_tokens": 100,
+  "completion_tokens": 20,
+  "total_tokens": 120,
+  "reasoning_tokens": 5,
+  "cached_prompt_text_tokens": 40,
+  "cost_in_usd_ticks": 123456789
+}

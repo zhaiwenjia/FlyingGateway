@@ -1,0 +1,29 @@
+{
+  "id": "mm_ok_001",
+  "created": 1763100000,
+  "model": "MiniMax-Text-01",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "正文内容",
+        "reasoning_content": "显式思考"
+      },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 30,
+    "total_tokens": 130,
+    "total_characters": 500,
+    "completion_tokens_details": {"reasoning_tokens": 5}
+  },
+  "base_resp": {
+    "status_code": 0,
+    "status_msg": ""
+  },
+  "input_sensitive": false,
+  "output_sensitive": false
+}

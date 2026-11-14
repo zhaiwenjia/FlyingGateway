@@ -1,0 +1,54 @@
+{"t": 0.0, "tgt_rss_kb": 3020224, "tgt_fds": 1425, "up_rss_kb": 508512, "up_fds": 2090}
+{"t": 1.45, "tgt_rss_kb": 3551024, "up_rss_kb": 508512}
+{"t": 2.47, "tgt_rss_kb": 3925888, "up_rss_kb": 508512}
+{"t": 3.49, "tgt_rss_kb": 4249568, "up_rss_kb": 508512}
+{"t": 4.51, "tgt_rss_kb": 4253152, "up_rss_kb": 508528}
+{"t": 5.53, "tgt_rss_kb": 4254320, "up_rss_kb": 508560}
+{"t": 6.55, "tgt_rss_kb": 4255344, "tgt_fds": 45453, "up_rss_kb": 508576, "up_fds": 16299}
+{"t": 8.36, "tgt_rss_kb": 4255424, "up_rss_kb": 508576}
+{"t": 9.38, "tgt_rss_kb": 4255456, "up_rss_kb": 508576}
+{"t": 10.4, "tgt_rss_kb": 4255488, "up_rss_kb": 508576}
+{"t": 11.42, "tgt_rss_kb": 4255536, "up_rss_kb": 508576}
+{"t": 12.43, "tgt_rss_kb": 4255584, "up_rss_kb": 508576}
+{"t": 13.45, "tgt_rss_kb": 4255648, "tgt_fds": 45462, "up_rss_kb": 508576, "up_fds": 16302}
+{"t": 15.35, "tgt_rss_kb": 4255744, "up_rss_kb": 508576}
+{"t": 16.37, "tgt_rss_kb": 4255792, "up_rss_kb": 508576}
+{"t": 17.39, "tgt_rss_kb": 4255840, "up_rss_kb": 508576}
+{"t": 18.41, "tgt_rss_kb": 4255888, "up_rss_kb": 508576}
+{"t": 19.43, "tgt_rss_kb": 4255936, "up_rss_kb": 508576}
+{"t": 20.45, "tgt_rss_kb": 4256000, "tgt_fds": 44536, "up_rss_kb": 508576, "up_fds": 16304}
+{"t": 22.39, "tgt_rss_kb": 4256096, "up_rss_kb": 508576}
+{"t": 23.41, "tgt_rss_kb": 4256144, "up_rss_kb": 508576}
+{"t": 24.44, "tgt_rss_kb": 4256192, "up_rss_kb": 508576}
+{"t": 25.46, "tgt_rss_kb": 4256256, "up_rss_kb": 508576}
+{"t": 26.48, "tgt_rss_kb": 4256304, "tgt_fds": 44086, "up_rss_kb": 508576, "up_fds": 16304}
+{"t": 28.33, "tgt_rss_kb": 4256816, "up_rss_kb": 508576}
+{"t": 29.36, "tgt_rss_kb": 4257328, "up_rss_kb": 508576}
+{"t": 30.38, "tgt_rss_kb": 4257328, "up_rss_kb": 510592}
+{"t": 31.4, "tgt_rss_kb": 4257328, "up_rss_kb": 514016}
+{"t": 32.42, "tgt_rss_kb": 4257328, "up_rss_kb": 516240}
+{"t": 33.45, "tgt_rss_kb": 4257328, "tgt_fds": 43964, "up_rss_kb": 518848, "up_fds": 16307}
+{"t": 35.37, "tgt_rss_kb": 4265536, "up_rss_kb": 520944}
+{"t": 36.39, "tgt_rss_kb": 4265536, "up_rss_kb": 521776}
+{"t": 37.4, "tgt_rss_kb": 4265536, "up_rss_kb": 521968}
+{"t": 38.42, "tgt_rss_kb": 4265536, "up_rss_kb": 521968}
+{"t": 39.44, "tgt_rss_kb": 4265536, "up_rss_kb": 521984}
+{"t": 40.46, "tgt_rss_kb": 4265536, "tgt_fds": 2937, "up_rss_kb": 522048, "up_fds": 1423}
+{"t": 41.82, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 42.84, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 43.86, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 44.88, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 45.9, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 46.93, "tgt_rss_kb": 4265536, "tgt_fds": 1575, "up_rss_kb": 522048, "up_fds": 792}
+{"t": 48.3, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 49.32, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 50.34, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 51.36, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 52.39, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 53.42, "tgt_rss_kb": 4265536, "tgt_fds": 1566, "up_rss_kb": 522048, "up_fds": 792}
+{"t": 54.78, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 55.82, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 56.84, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 57.87, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 58.9, "tgt_rss_kb": 4265536, "up_rss_kb": 522048}
+{"t": 59.93, "tgt_rss_kb": 4265536, "tgt_fds": 88, "up_rss_kb": 522048, "up_fds": 792}

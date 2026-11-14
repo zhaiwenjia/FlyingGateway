@@ -1,0 +1,16 @@
+{
+  "id": "chatcmpl-ollama-001",
+  "model": "qwen3:8b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "你好"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 30,
+    "completion_tokens": 12,
+    "total_tokens": 42
+  }
+}

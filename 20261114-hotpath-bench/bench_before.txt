@@ -1,0 +1,231 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/usage
+cpu: Apple M1 Max
+BenchmarkNormalize/anthropic-cachewrite-10         	  792612	      1505 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachewrite-10         	  790598	      1500 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachewrite-10         	  800582	      1515 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachewrite-10         	  792616	      1496 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachewrite-10         	  795542	      1502 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachehit-10           	  801796	      1482 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachehit-10           	  789157	      1495 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachehit-10           	  804786	      1489 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachehit-10           	  797048	      1492 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/anthropic-cachehit-10           	  797559	      1490 ns/op	     496 B/op	       3 allocs/op
+BenchmarkNormalize/openai-responses-10             	  915369	      1298 ns/op	     432 B/op	       5 allocs/op
+BenchmarkNormalize/openai-responses-10             	  915014	      1298 ns/op	     432 B/op	       5 allocs/op
+BenchmarkNormalize/openai-responses-10             	  911859	      1298 ns/op	     432 B/op	       5 allocs/op
+BenchmarkNormalize/openai-responses-10             	  905700	      1298 ns/op	     432 B/op	       5 allocs/op
+BenchmarkNormalize/openai-responses-10             	  909196	      1298 ns/op	     432 B/op	       5 allocs/op
+BenchmarkNormalize/openai-chat-10                  	  479124	      2501 ns/op	     800 B/op	       3 allocs/op
+BenchmarkNormalize/openai-chat-10                  	  473172	      2492 ns/op	     800 B/op	       3 allocs/op
+BenchmarkNormalize/openai-chat-10                  	  478816	      2494 ns/op	     800 B/op	       3 allocs/op
+BenchmarkNormalize/openai-chat-10                  	  480532	      2496 ns/op	     800 B/op	       3 allocs/op
+BenchmarkNormalize/openai-chat-10                  	  474613	      2499 ns/op	     800 B/op	       3 allocs/op
+BenchmarkNormalize/gemini-10                       	 1000000	      1174 ns/op	     448 B/op	       3 allocs/op
+BenchmarkNormalize/gemini-10                       	 1000000	      1174 ns/op	     448 B/op	       3 allocs/op
+BenchmarkNormalize/gemini-10                       	 1000000	      1174 ns/op	     448 B/op	       3 allocs/op
+BenchmarkNormalize/gemini-10                       	 1000000	      1177 ns/op	     448 B/op	       3 allocs/op
+BenchmarkNormalize/gemini-10                       	 1000000	      1173 ns/op	     448 B/op	       3 allocs/op
+BenchmarkNormalize/deepseek-10                     	 1000000	      1041 ns/op	     344 B/op	       4 allocs/op
+BenchmarkNormalize/deepseek-10                     	 1000000	      1042 ns/op	     344 B/op	       4 allocs/op
+BenchmarkNormalize/deepseek-10                     	 1000000	      1040 ns/op	     344 B/op	       4 allocs/op
+BenchmarkNormalize/deepseek-10                     	 1000000	      1043 ns/op	     344 B/op	       4 allocs/op
+BenchmarkNormalize/deepseek-10                     	 1000000	      1040 ns/op	     344 B/op	       4 allocs/op
+BenchmarkNormalize/kimi-10                         	 1223365	       980.2 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/kimi-10                         	 1222275	       982.0 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/kimi-10                         	 1215787	       978.8 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/kimi-10                         	 1220418	       981.9 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/kimi-10                         	 1217908	       980.4 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/zhipu-10                        	 1230708	       979.4 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/zhipu-10                        	 1225744	       978.4 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/zhipu-10                        	 1228866	       977.6 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/zhipu-10                        	 1226899	       977.1 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/zhipu-10                        	 1228657	       981.3 ns/op	     336 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-compat-10                  	 1541814	       775.1 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-compat-10                  	 1550463	       772.3 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-compat-10                  	 1554613	       774.3 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-compat-10                  	 1549316	       770.0 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-compat-10                  	 1559216	       774.5 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-native-10                  	 1664566	       720.5 ns/op	     272 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-native-10                  	 1660087	       719.8 ns/op	     272 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-native-10                  	 1673348	       718.5 ns/op	     272 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-native-10                  	 1668180	       721.7 ns/op	     272 B/op	       3 allocs/op
+BenchmarkNormalize/qwen-native-10                  	 1671970	       720.7 ns/op	     272 B/op	       3 allocs/op
+BenchmarkNormalize/minimax-10                      	 1339310	       893.8 ns/op	     304 B/op	       3 allocs/op
+BenchmarkNormalize/minimax-10                      	 1338327	       895.8 ns/op	     304 B/op	       3 allocs/op
+BenchmarkNormalize/minimax-10                      	 1343295	       895.2 ns/op	     304 B/op	       3 allocs/op
+BenchmarkNormalize/minimax-10                      	 1341007	       893.8 ns/op	     304 B/op	       3 allocs/op
+BenchmarkNormalize/minimax-10                      	 1343830	       894.8 ns/op	     304 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-asr-10                     	  954346	      1230 ns/op	     368 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-asr-10                     	  961768	      1232 ns/op	     368 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-asr-10                     	  942466	      1234 ns/op	     368 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-asr-10                     	  948073	      1232 ns/op	     368 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-asr-10                     	  960376	      1230 ns/op	     368 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-audio-10                   	 1000000	      1109 ns/op	     352 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-audio-10                   	 1000000	      1105 ns/op	     352 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-audio-10                   	 1000000	      1108 ns/op	     352 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-audio-10                   	 1000000	      1107 ns/op	     352 B/op	       3 allocs/op
+BenchmarkNormalize/mimo-audio-10                   	 1000000	      1108 ns/op	     352 B/op	       3 allocs/op
+BenchmarkNormalize/grok-responses-10               	 1795788	       671.7 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/grok-responses-10               	 1808468	       663.3 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/grok-responses-10               	 1805674	       664.0 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/grok-responses-10               	 1808084	       662.4 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/grok-responses-10               	 1804148	       662.7 ns/op	     288 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-real-10                  	  660217	      1800 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-real-10                  	  665221	      1804 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-real-10                  	  659840	      1804 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-real-10                  	  658958	      1801 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-real-10                  	  665034	      1800 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-docs-10                  	  680156	      1767 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-docs-10                  	  670482	      1770 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-docs-10                  	  672720	      1769 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-docs-10                  	  678312	      1772 ns/op	     488 B/op	       3 allocs/op
+BenchmarkNormalize/ollama-docs-10                  	  663322	      1774 ns/op	     488 B/op	       3 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/usage	121.724s
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/cost
+cpu: Apple M1 Max
+BenchmarkCalculateCost/flat-10         	 6993284	       151.6 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/flat-10         	 7364984	       164.1 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/flat-10         	 7891995	       151.7 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/flat-10         	 7245933	       163.8 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/flat-10         	 7825784	       152.0 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/peak-10         	 2644660	       457.3 ns/op	     128 B/op	       6 allocs/op
+BenchmarkCalculateCost/peak-10         	 2713760	       438.9 ns/op	     128 B/op	       6 allocs/op
+BenchmarkCalculateCost/peak-10         	 2629788	       451.6 ns/op	     128 B/op	       6 allocs/op
+BenchmarkCalculateCost/peak-10         	 2741265	       441.1 ns/op	     128 B/op	       6 allocs/op
+BenchmarkCalculateCost/peak-10         	 2646754	       456.8 ns/op	     128 B/op	       6 allocs/op
+BenchmarkCalculateCost/tiered-10       	 7886602	       153.0 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/tiered-10       	 7261129	       165.4 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/tiered-10       	 7832780	       153.4 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/tiered-10       	 7278981	       165.7 ns/op	      96 B/op	       4 allocs/op
+BenchmarkCalculateCost/tiered-10       	 7744124	       153.3 ns/op	      96 B/op	       4 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/cost	22.390s
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/errors
+cpu: Apple M1 Max
+BenchmarkFromUpstream/openai-429-10         	   24771	     47098 ns/op	    4708 B/op	      75 allocs/op
+BenchmarkFromUpstream/openai-429-10         	   25471	     46988 ns/op	    4720 B/op	      75 allocs/op
+BenchmarkFromUpstream/openai-429-10         	   25622	     47081 ns/op	    4717 B/op	      75 allocs/op
+BenchmarkFromUpstream/openai-429-10         	   25495	     47154 ns/op	    4715 B/op	      75 allocs/op
+BenchmarkFromUpstream/openai-429-10         	   25620	     47282 ns/op	    4713 B/op	      75 allocs/op
+BenchmarkFromUpstream/minimax-200-business-error-10         	   38362	     31346 ns/op	    2977 B/op	      70 allocs/op
+BenchmarkFromUpstream/minimax-200-business-error-10         	   38491	     31304 ns/op	    2981 B/op	      70 allocs/op
+BenchmarkFromUpstream/minimax-200-business-error-10         	   38113	     31326 ns/op	    2973 B/op	      70 allocs/op
+BenchmarkFromUpstream/minimax-200-business-error-10         	   38150	     31348 ns/op	    2974 B/op	      70 allocs/op
+BenchmarkFromUpstream/minimax-200-business-error-10         	   38294	     31342 ns/op	    2988 B/op	      70 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/errors	16.350s
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/security
+cpu: Apple M1 Max
+BenchmarkRedact/clean-long-text-10         	    1472	    710570 ns/op	   75650 B/op	      21 allocs/op
+BenchmarkRedact/clean-long-text-10         	    1706	    702063 ns/op	   75771 B/op	      21 allocs/op
+BenchmarkRedact/clean-long-text-10         	    1699	    702311 ns/op	   75725 B/op	      21 allocs/op
+BenchmarkRedact/clean-long-text-10         	    1698	    703120 ns/op	   75728 B/op	      21 allocs/op
+BenchmarkRedact/clean-long-text-10         	    1702	    703695 ns/op	   75852 B/op	      21 allocs/op
+BenchmarkRedact/json-form-10               	   20280	     59047 ns/op	    5954 B/op	      37 allocs/op
+BenchmarkRedact/json-form-10               	   20353	     59118 ns/op	    5939 B/op	      37 allocs/op
+BenchmarkRedact/json-form-10               	   20235	     59020 ns/op	    5950 B/op	      37 allocs/op
+BenchmarkRedact/json-form-10               	   20258	     59166 ns/op	    5948 B/op	      37 allocs/op
+BenchmarkRedact/json-form-10               	   20275	     59210 ns/op	    5943 B/op	      37 allocs/op
+BenchmarkRedact/big-base64-token-10        	     597	   2003122 ns/op	  130410 B/op	      23 allocs/op
+BenchmarkRedact/big-base64-token-10        	     596	   2006417 ns/op	  134032 B/op	      23 allocs/op
+BenchmarkRedact/big-base64-token-10        	     595	   2005477 ns/op	  132855 B/op	      23 allocs/op
+BenchmarkRedact/big-base64-token-10        	     597	   2013836 ns/op	  132802 B/op	      23 allocs/op
+BenchmarkRedact/big-base64-token-10        	     596	   1999554 ns/op	  131641 B/op	      23 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/security	22.571s
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/codec/chat
+cpu: Apple M1 Max
+BenchmarkDecodeRequest/small-10   	  540810	      2203 ns/op	    1417 B/op	      13 allocs/op
+BenchmarkDecodeRequest/small-10   	  531772	      2203 ns/op	    1417 B/op	      13 allocs/op
+BenchmarkDecodeRequest/small-10   	  530212	      2210 ns/op	    1417 B/op	      13 allocs/op
+BenchmarkDecodeRequest/small-10   	  550581	      2204 ns/op	    1417 B/op	      13 allocs/op
+BenchmarkDecodeRequest/small-10   	  540297	      2209 ns/op	    1417 B/op	      13 allocs/op
+BenchmarkDecodeRequest/tools-10   	  138235	      8520 ns/op	    6069 B/op	      45 allocs/op
+BenchmarkDecodeRequest/tools-10   	  139605	      8467 ns/op	    6070 B/op	      45 allocs/op
+BenchmarkDecodeRequest/tools-10   	  140630	      8490 ns/op	    6070 B/op	      45 allocs/op
+BenchmarkDecodeRequest/tools-10   	  139222	      8444 ns/op	    6069 B/op	      45 allocs/op
+BenchmarkDecodeRequest/tools-10   	  142178	      8463 ns/op	    6069 B/op	      45 allocs/op
+BenchmarkEncodeResponse-10        	  595980	      1983 ns/op	    1072 B/op	       9 allocs/op
+BenchmarkEncodeResponse-10        	  592881	      1984 ns/op	    1072 B/op	       9 allocs/op
+BenchmarkEncodeResponse-10        	  606812	      1985 ns/op	    1072 B/op	       9 allocs/op
+BenchmarkEncodeResponse-10        	  592822	      1993 ns/op	    1072 B/op	       9 allocs/op
+BenchmarkEncodeResponse-10        	  602361	      1984 ns/op	    1072 B/op	       9 allocs/op
+BenchmarkChunkEncoderEncode-10    	 1422418	       840.0 ns/op	     656 B/op	       5 allocs/op
+BenchmarkChunkEncoderEncode-10    	 1426152	       843.4 ns/op	     656 B/op	       5 allocs/op
+BenchmarkChunkEncoderEncode-10    	 1425652	       840.5 ns/op	     656 B/op	       5 allocs/op
+BenchmarkChunkEncoderEncode-10    	 1428777	       842.9 ns/op	     656 B/op	       5 allocs/op
+BenchmarkChunkEncoderEncode-10    	 1422524	       841.6 ns/op	     656 B/op	       5 allocs/op
+BenchmarkParseChunk/delta-10      	  992880	      1216 ns/op	     256 B/op	       3 allocs/op
+BenchmarkParseChunk/delta-10      	  982904	      1216 ns/op	     256 B/op	       3 allocs/op
+BenchmarkParseChunk/delta-10      	 1000000	      1216 ns/op	     256 B/op	       3 allocs/op
+BenchmarkParseChunk/delta-10      	  985372	      1214 ns/op	     256 B/op	       3 allocs/op
+BenchmarkParseChunk/delta-10      	  990241	      1214 ns/op	     256 B/op	       3 allocs/op
+BenchmarkParseChunk/usage-10      	  509719	      2349 ns/op	     688 B/op	       6 allocs/op
+BenchmarkParseChunk/usage-10      	  516506	      2345 ns/op	     688 B/op	       6 allocs/op
+BenchmarkParseChunk/usage-10      	  506902	      2326 ns/op	     688 B/op	       6 allocs/op
+BenchmarkParseChunk/usage-10      	  514574	      2342 ns/op	     688 B/op	       6 allocs/op
+BenchmarkParseChunk/usage-10      	  515596	      2337 ns/op	     688 B/op	       6 allocs/op
+BenchmarkPickFields/unmarshal-full-struct-10         	  139546	      8563 ns/op	    6071 B/op	      45 allocs/op
+BenchmarkPickFields/unmarshal-full-struct-10         	  142725	      8570 ns/op	    6071 B/op	      45 allocs/op
+BenchmarkPickFields/unmarshal-full-struct-10         	  140644	      8541 ns/op	    6071 B/op	      45 allocs/op
+BenchmarkPickFields/unmarshal-full-struct-10         	  138043	      8599 ns/op	    6071 B/op	      45 allocs/op
+BenchmarkPickFields/unmarshal-full-struct-10         	  140575	      8582 ns/op	    6071 B/op	      45 allocs/op
+BenchmarkPickFields/unmarshal-mini-struct-10         	  336912	      3535 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPickFields/unmarshal-mini-struct-10         	  339890	      3548 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPickFields/unmarshal-mini-struct-10         	  338472	      3537 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPickFields/unmarshal-mini-struct-10         	  340408	      3542 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPickFields/unmarshal-mini-struct-10         	  339568	      3535 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPickFields/decoder-token-10                 	  177783	      6787 ns/op	    3703 B/op	     168 allocs/op
+BenchmarkPickFields/decoder-token-10                 	  174196	      6752 ns/op	    3703 B/op	     168 allocs/op
+BenchmarkPickFields/decoder-token-10                 	  179737	      6778 ns/op	    3704 B/op	     168 allocs/op
+BenchmarkPickFields/decoder-token-10                 	  177184	      6782 ns/op	    3704 B/op	     168 allocs/op
+BenchmarkPickFields/decoder-token-10                 	  177097	      6781 ns/op	    3704 B/op	     168 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/codec/chat	61.065s
+goos: darwin
+goarch: arm64
+pkg: github.com/zhaiwenjia/FlyingGateway/internal/codec/responses
+cpu: Apple M1 Max
+BenchmarkDecodeRequest/string-input-10         	 1226559	       964.7 ns/op	     704 B/op	       6 allocs/op
+BenchmarkDecodeRequest/string-input-10         	 1242997	       967.0 ns/op	     704 B/op	       6 allocs/op
+BenchmarkDecodeRequest/string-input-10         	 1243566	       966.6 ns/op	     704 B/op	       6 allocs/op
+BenchmarkDecodeRequest/string-input-10         	 1242938	       962.7 ns/op	     704 B/op	       6 allocs/op
+BenchmarkDecodeRequest/string-input-10         	 1245152	       968.2 ns/op	     704 B/op	       6 allocs/op
+BenchmarkDecodeRequest/item-array-10           	  142908	      8317 ns/op	    4524 B/op	      32 allocs/op
+BenchmarkDecodeRequest/item-array-10           	  144268	      8318 ns/op	    4524 B/op	      32 allocs/op
+BenchmarkDecodeRequest/item-array-10           	  144028	      8328 ns/op	    4523 B/op	      32 allocs/op
+BenchmarkDecodeRequest/item-array-10           	  145093	      8333 ns/op	    4524 B/op	      32 allocs/op
+BenchmarkDecodeRequest/item-array-10           	  144548	      8363 ns/op	    4524 B/op	      32 allocs/op
+BenchmarkEncodeResponse-10                     	  370168	      3267 ns/op	    2113 B/op	      19 allocs/op
+BenchmarkEncodeResponse-10                     	  367642	      3231 ns/op	    2113 B/op	      19 allocs/op
+BenchmarkEncodeResponse-10                     	  365653	      3247 ns/op	    2113 B/op	      19 allocs/op
+BenchmarkEncodeResponse-10                     	  374067	      3231 ns/op	    2113 B/op	      19 allocs/op
+BenchmarkEncodeResponse-10                     	  365686	      3231 ns/op	    2113 B/op	      19 allocs/op
+BenchmarkEventEncoderEncode-10                 	 2595884	       459.9 ns/op	     445 B/op	       4 allocs/op
+BenchmarkEventEncoderEncode-10                 	 2595878	       459.0 ns/op	     445 B/op	       4 allocs/op
+BenchmarkEventEncoderEncode-10                 	 2528852	       458.5 ns/op	     447 B/op	       4 allocs/op
+BenchmarkEventEncoderEncode-10                 	 2587342	       459.8 ns/op	     446 B/op	       4 allocs/op
+BenchmarkEventEncoderEncode-10                 	 2582239	       459.3 ns/op	     446 B/op	       4 allocs/op
+BenchmarkParseEvent/delta-10                   	 1516348	       794.0 ns/op	     320 B/op	       3 allocs/op
+BenchmarkParseEvent/delta-10                   	 1521883	       794.6 ns/op	     320 B/op	       3 allocs/op
+BenchmarkParseEvent/delta-10                   	 1520839	       791.9 ns/op	     320 B/op	       3 allocs/op
+BenchmarkParseEvent/delta-10                   	 1522190	       788.3 ns/op	     320 B/op	       3 allocs/op
+BenchmarkParseEvent/delta-10                   	 1517954	       789.3 ns/op	     320 B/op	       3 allocs/op
+BenchmarkParseEvent/completed-10               	  347678	      3441 ns/op	    1457 B/op	      11 allocs/op
+BenchmarkParseEvent/completed-10               	  349345	      3427 ns/op	    1457 B/op	      11 allocs/op
+BenchmarkParseEvent/completed-10               	  349983	      3415 ns/op	    1457 B/op	      11 allocs/op
+BenchmarkParseEvent/completed-10               	  347528	      3425 ns/op	    1457 B/op	      11 allocs/op
+BenchmarkParseEvent/completed-10               	  352845	      3425 ns/op	    1457 B/op	      11 allocs/op
+PASS
+ok  	github.com/zhaiwenjia/FlyingGateway/internal/codec/responses	48.308s
