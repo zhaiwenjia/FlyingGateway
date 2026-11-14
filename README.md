@@ -102,6 +102,8 @@ curl http://127.0.0.1:8080/health
 
 ## 四、出入口使用
 
+入口是**调用面**（客户端怎么调），出口是**运维面**（上游怎么配）。调用顺序看 4.1 → 4.2 → 4.3；部署配置看 4.4。
+
 ### 4.1 入口（客户端 → 网关）
 
 OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
@@ -138,106 +140,10 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 （fire-and-forget：查不到 / 已收口静默忽略）。同 id 已有执行在途 ⇒ 409 `request_in_flight`；
 该 id 已进取消终态 ⇒ 409 `request_cancelled`。
 
-**错误形态**：统一 OpenAI 风格 error 对象（`code` / `type` / `message`），错误九分类
-（auth、invalid_request、request_too_large、request_in_flight、request_cancelled、
-rate_limited、timeout、cancelled、upstream_error 等）；凭据类信息一律脱敏。
-
 **请求上限**：请求体 32 MB（超出 413 `request_too_large`）。
+出错时的错误对象形状与全部错误码见 4.3。
 
-### 4.2 出口（网关 → 上游）
-
-出口由**端点注册表**（`-config` 指定的 JSON）描述，`strategy` 定路由策略，
-`endpoints[]` 每条登记一个上游端点：
-
-| 字段                  | 含义                                                                                                                                                                      |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`              | 端点名（日志 / 指标用）                                                                                                                                                   |
-| `base_url`          | 上游地址（含 `/v1`）                                                                                                                                                    |
-| `model`             | **用户面模型别名**（客户端 `model` 字段填它）                                                                                                                     |
-| `upstream_model`    | 上游真实模型名（网关出站时替换）                                                                                                                                          |
-| `provider_name`     | 适配器：`openai` / `anthropic` / `gemini` / `deepseek` / `qwen` / `zhipu` / `moonshot` / `minimax` / `xai` / `xiaomi` / `ollama`                    |
-| `context_window`    | 上下文窗口（token）                                                                                                                                                       |
-| `max_output_tokens` | 输出上限（token）                                                                                                                                                         |
-| `capabilities`      | 能力标记：`supports_tools` / `supports_stream` / `supports_vision`                                                                                                  |
-| `credential_ref`    | **凭据来源引用**（环境变量名，⛔ 不是凭据本身）                                                                                                                     |
-| `timeout_s`         | 单次上游调用超时（秒）                                                                                                                                                    |
-| `max_retries`       | 重试上限（重试打同一端点，与降级分开计数）                                                                                                                                |
-| `priority`          | 降级优先级（`strategy=priority` 时数值小者先）                                                                                                                          |
-| `rate_limit`        | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值                                             |
-| `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口）                                                              |
-| `limits_group`      | 可选，配额共享组名：同组端点共享一份 `rate_limit` / `concurrency_limit` 计数（同供应商多模型 / 多 key / 多部署共享配额池的语义）；空 = 自成一组，同组声明必须逐字一致 |
-
-- **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
-  不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。
-- **配额与过载（锚点分离）**：限流锚定套餐契约（`rate_limit` / 顶层 `caller_rate_limits`
-  按 key 登记，`key_ref` = 环境变量名），过载保护锚定实测容量（`--max-in-flight`）；
-  两道闸并联判定，超限一律 `429` + `Retry-After`。多供应商混合流量下，每次上游尝试
-  占它命中端点（或其共享组）的并发位与配额 —— 降级换供应商即换计数主体。
-- **上游多 key（`credential_rate_limits`）**：同一供应商多个 key（`credential_ref` 环境变量值
-  逗号/换行分隔）可按三层登记套餐配额 —— `per_key` 每 key 一份桶（N key = N 份容量）、
-  `shared` 全池共享（org/项目级配额池）、`key_limits` 逐 key 覆盖（不同订阅档混池）；
-  未登记不限流。**核算**：聚合稳态 = min(Σ 各 key 配额, shared)——10 个同规格 key = 10 份
-  套餐容量，共享桶封顶取 min；选键先探后扣、桶空溢出下一槽，429 只冷却命中的 key；
-  每 key 桶余量可查管理面 `GET /admin/credential-pools`。
-  ⚠️ **两域解耦**：调用方令牌（外部项目签发，只管理本系统的消费额度）与上游自有令牌
-  互不相通，⛔ 调用方凭据永不发给供应商。
-- **出站协议**：统一 Chat Completions 形（实测裁定），流式经 SSE 逐帧转发；
-  usage 逐家归一后计量费用（费率表）。
-- **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
-- **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
-  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）与
-  `GET /admin/health`。⛔ 管理面不绑公网。
-
-### 4.3 错误代码列表
-
-错误对象为 OpenAI 风格 `{"error": {"type", "code", "message"}}`：`type` 是归一化分类（九类），
-`code` 是具体错误码；429 一律带 `Retry-After`；上游错误对内保留原始上游状态码与请求 ID。
-
-**分类 → HTTP 状态**：
-
-| 分类（type） | HTTP | 含义 |
-|---|---|---|
-| `invalid_request` | 400 | 请求不合法（解析失败 / 参数非法 / 能力不匹配） |
-| `context_exceeded` | 400 | 估算输入 + 输出上限超出注册表上下文窗口 |
-| `content_policy` | 403 | 护栏命中（正则 / Webhook） |
-| `auth` | 401 | 鉴权失败 |
-| `rate_limit` | 429 | 限流（各闸，带 `Retry-After`） |
-| `budget_exceeded` | 429 | 预算触顶（发起上游前拒绝） |
-| `timeout` | 504 | 上游超时 |
-| `cancelled` | 499 | 执行取消（客户端断连 / 显式取消 / 进程关闭） |
-| `upstream_error` | 502 | 上游失败 |
-
-**具体错误码**：
-
-| HTTP | code | 触发场景 |
-|---|---|---|
-| 400 | `invalid_request` | 请求体解析失败 / 字段非法 |
-| 400 | `context_exceeded` | 估算输入 + 输出上限超出 `context_window` |
-| 400 | `unsupported_capability` | 请求能力超出端点能力（如不支持的 `previous_response_id`） |
-| 400 | `detect_failed` | 端点供应商识别失败（`base_url` / `upstream_model` 推断不出供应商） |
-| 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
-| 401 | `unauthorized` | 调用方 API key 缺失或无效（`GATEWAY_CALLER_KEYS` 非空时） |
-| 403 | `content_policy` | 护栏命中 |
-| 403 | `egress_denied` | 出网目标被拒（内网地址；本地环回需 `-allow-loopback`） |
-| 404 | `model_not_found` | 模型名不在注册表（⛔ 不透传任意模型名） |
-| 409 | `request_in_flight` | 同 `client_request_id` 已有执行在途 |
-| 409 | `request_cancelled` | 该 id 已进取消终态 |
-| 413 | `request_too_large` | 请求体超 32 MB |
-| 429 | `rate_limit` | 限流超限（全局桶 / 调用方桶 / 契约桶 / 并发位 / 端点配额），带 `Retry-After` |
-| 429 | `token_pool_exhausted` | 全部自有令牌受限（`Retry-After` = 最短等待） |
-| 429 | `overloaded` | 过载闸满（`--max-in-flight`），带 `Retry-After` |
-| 429 | `budget_exceeded` | 预算触顶 |
-| 499 | `cancelled` | 执行取消收口 |
-| 500 | `internal` | 网关内部错误 |
-| 500 | `credential_unresolved` | `credential_ref` 环境变量解析失败 |
-| 500 | `auth_scheme_missing` | 适配器未声明鉴权头 |
-| 502 | `upstream_error` | 上游 5xx / 错误体 / 响应解析失败（对内诊断子码：`response_parse_failed`、`encode_failed`、`stream_encode_failed`、`stream_finish_failed`、`request_build_failed`、`request_marshal_failed` 等） |
-| 504 | `timeout` | 单次上游调用超时（端点 `timeout_s` 预算） |
-
-**可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限）；
-`499` 不重试（取消后抑制重试）；其余 4xx 为请求问题，不重试。
-
-### 4.4 请求 / 响应 Schema（输入 / 输出）
+### 4.2 请求 / 响应 Schema（输入 / 输出）
 
 **通用 HTTP 头**（两个入口一致）：
 
@@ -357,6 +263,99 @@ part 数组：`{type:"text", text}` / `{type:"image_url", image_url:{url}}`）�
 | `GET /v1/models` | — | `{"object":"list","data":[{id, object:"model", owned_by, context_window, max_output_tokens, capabilities:{supports_tools, supports_stream, supports_vision}}]}` |
 | `POST /v1/cancel` | `{"client_request_id": "..."}` | `{"cancelled": true\|false}` |
 | `GET /health` | — | `{"status":"ok"}` |
+
+### 4.3 错误代码列表
+
+错误对象为 OpenAI 风格 `{"error": {"type", "code", "message"}}`：`type` 是归一化分类（九类），
+`code` 是具体错误码；429 一律带 `Retry-After`；上游错误对内保留原始上游状态码与请求 ID。
+
+**分类 → HTTP 状态**：
+
+| 分类（type） | HTTP | 含义 |
+|---|---|---|
+| `invalid_request` | 400 | 请求不合法（解析失败 / 参数非法 / 能力不匹配） |
+| `context_exceeded` | 400 | 估算输入 + 输出上限超出注册表上下文窗口 |
+| `content_policy` | 403 | 护栏命中（正则 / Webhook） |
+| `auth` | 401 | 鉴权失败 |
+| `rate_limit` | 429 | 限流（各闸，带 `Retry-After`） |
+| `budget_exceeded` | 429 | 预算触顶（发起上游前拒绝） |
+| `timeout` | 504 | 上游超时 |
+| `cancelled` | 499 | 执行取消（客户端断连 / 显式取消 / 进程关闭） |
+| `upstream_error` | 502 | 上游失败 |
+
+**具体错误码**：
+
+| HTTP | code | 触发场景 |
+|---|---|---|
+| 400 | `invalid_request` | 请求体解析失败 / 字段非法 |
+| 400 | `context_exceeded` | 估算输入 + 输出上限超出 `context_window` |
+| 400 | `unsupported_capability` | 请求能力超出端点能力（如不支持的 `previous_response_id`） |
+| 400 | `detect_failed` | 端点供应商识别失败（`base_url` / `upstream_model` 推断不出供应商） |
+| 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
+| 401 | `unauthorized` | 调用方 API key 缺失或无效（`GATEWAY_CALLER_KEYS` 非空时） |
+| 403 | `content_policy` | 护栏命中 |
+| 403 | `egress_denied` | 出网目标被拒（内网地址；本地环回需 `-allow-loopback`） |
+| 404 | `model_not_found` | 模型名不在注册表（⛔ 不透传任意模型名） |
+| 409 | `request_in_flight` | 同 `client_request_id` 已有执行在途 |
+| 409 | `request_cancelled` | 该 id 已进取消终态 |
+| 413 | `request_too_large` | 请求体超 32 MB |
+| 429 | `rate_limit` | 限流超限（全局桶 / 调用方桶 / 契约桶 / 并发位 / 端点配额），带 `Retry-After` |
+| 429 | `token_pool_exhausted` | 全部自有令牌受限（`Retry-After` = 最短等待） |
+| 429 | `overloaded` | 过载闸满（`--max-in-flight`），带 `Retry-After` |
+| 429 | `budget_exceeded` | 预算触顶 |
+| 499 | `cancelled` | 执行取消收口 |
+| 500 | `internal` | 网关内部错误 |
+| 500 | `credential_unresolved` | `credential_ref` 环境变量解析失败 |
+| 500 | `auth_scheme_missing` | 适配器未声明鉴权头 |
+| 502 | `upstream_error` | 上游 5xx / 错误体 / 响应解析失败（对内诊断子码：`response_parse_failed`、`encode_failed`、`stream_encode_failed`、`stream_finish_failed`、`request_build_failed`、`request_marshal_failed` 等） |
+| 504 | `timeout` | 单次上游调用超时（端点 `timeout_s` 预算） |
+
+**可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限）；
+`499` 不重试（取消后抑制重试）；其余 4xx 为请求问题，不重试。
+
+### 4.4 出口（网关 → 上游）
+
+出口由**端点注册表**（`-config` 指定的 JSON）描述，`strategy` 定路由策略，
+`endpoints[]` 每条登记一个上游端点：
+
+| 字段                  | 含义                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`              | 端点名（日志 / 指标用）                                                                                                                                                   |
+| `base_url`          | 上游地址（含 `/v1`）                                                                                                                                                    |
+| `model`             | **用户面模型别名**（客户端 `model` 字段填它）                                                                                                                     |
+| `upstream_model`    | 上游真实模型名（网关出站时替换）                                                                                                                                          |
+| `provider_name`     | 适配器：`openai` / `anthropic` / `gemini` / `deepseek` / `qwen` / `zhipu` / `moonshot` / `minimax` / `xai` / `xiaomi` / `ollama`                    |
+| `context_window`    | 上下文窗口（token）                                                                                                                                                       |
+| `max_output_tokens` | 输出上限（token）                                                                                                                                                         |
+| `capabilities`      | 能力标记：`supports_tools` / `supports_stream` / `supports_vision`                                                                                                  |
+| `credential_ref`    | **凭据来源引用**（环境变量名，⛔ 不是凭据本身）                                                                                                                     |
+| `timeout_s`         | 单次上游调用超时（秒）                                                                                                                                                    |
+| `max_retries`       | 重试上限（重试打同一端点，与降级分开计数）                                                                                                                                |
+| `priority`          | 降级优先级（`strategy=priority` 时数值小者先）                                                                                                                          |
+| `rate_limit`        | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值                                             |
+| `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口）                                                              |
+| `limits_group`      | 可选，配额共享组名：同组端点共享一份 `rate_limit` / `concurrency_limit` 计数（同供应商多模型 / 多 key / 多部署共享配额池的语义）；空 = 自成一组，同组声明必须逐字一致 |
+
+- **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
+  不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。
+- **配额与过载（锚点分离）**：限流锚定套餐契约（`rate_limit` / 顶层 `caller_rate_limits`
+  按 key 登记，`key_ref` = 环境变量名），过载保护锚定实测容量（`--max-in-flight`）；
+  两道闸并联判定，超限一律 `429` + `Retry-After`。多供应商混合流量下，每次上游尝试
+  占它命中端点（或其共享组）的并发位与配额 —— 降级换供应商即换计数主体。
+- **上游多 key（`credential_rate_limits`）**：同一供应商多个 key（`credential_ref` 环境变量值
+  逗号/换行分隔）可按三层登记套餐配额 —— `per_key` 每 key 一份桶（N key = N 份容量）、
+  `shared` 全池共享（org/项目级配额池）、`key_limits` 逐 key 覆盖（不同订阅档混池）；
+  未登记不限流。**核算**：聚合稳态 = min(Σ 各 key 配额, shared)——10 个同规格 key = 10 份
+  套餐容量，共享桶封顶取 min；选键先探后扣、桶空溢出下一槽，429 只冷却命中的 key；
+  每 key 桶余量可查管理面 `GET /admin/credential-pools`。
+  ⚠️ **两域解耦**：调用方令牌（外部项目签发，只管理本系统的消费额度）与上游自有令牌
+  互不相通，⛔ 调用方凭据永不发给供应商。
+- **出站协议**：统一 Chat Completions 形（实测裁定），流式经 SSE 逐帧转发；
+  usage 逐家归一后计量费用（费率表）。
+- **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
+- **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
+  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）与
+  `GET /admin/health`。⛔ 管理面不绑公网。
 
 ## 五、运行参数
 
