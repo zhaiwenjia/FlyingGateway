@@ -152,3 +152,32 @@ func TestNew_RedactsMessage(t *testing.T) {
 		t.Fatalf("Category=%s HTTPStatus=%d, 期望 auth/401", d.Category, d.HTTPStatus)
 	}
 }
+
+// ---- 微基准（错误归一化路径；先测后改，基线 vs 优化对照）----
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/errors/ -bench=. -benchmem
+
+// benchErrBodyOpenAI / benchErrBodyMinimax 是两类典型上游错误体
+// （OpenAI 形 error 对象 / MiniMax 形 base_resp，均带真实凭据形态供遮蔽计价）。
+var (
+	benchErrBodyOpenAI  = []byte(`{"error":{"message":"Rate limit reached for sk-live-9f8e7d6c5b4a3311 on requests per min","type":"requests","code":"rate_limit_exceeded"}}`)
+	benchErrBodyMinimax = []byte(`{"base_resp":{"status_code":1002,"status_msg":"rate limited, key json-x-key-445566778899"}}`)
+)
+
+// BenchmarkFromUpstream 测上游错误归一化（分类 + 提取 + 出口遮蔽）。
+func BenchmarkFromUpstream(b *testing.B) {
+	for _, c := range []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{"openai-429", 429, benchErrBodyOpenAI},
+		{"minimax-200-business-error", 200, benchErrBodyMinimax},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = FromUpstream(core.ProviderOpenAI, c.status, c.body, "req_bench")
+			}
+		})
+	}
+}

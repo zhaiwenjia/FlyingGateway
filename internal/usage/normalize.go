@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 11:54:49.166
+// 日期: 2026-11-14 19:39:55.250
 // 作者: Zhai Wenjia
 
 // Package usage 实现 token 用量归一化（统一 SDD 3.2 / 4.4）：
@@ -165,19 +165,26 @@ func parseResponses(raw json.RawMessage) (*core.Usage, error) {
 // cache_write_tokens 可能是数值，也可能是 {ttl_30m_tokens, ttl_12h_tokens} 细分对象（4.4.2），
 // 两级都没有时退回 details 顶层的 TTL 细分字段。两个 TTL 档是**互斥分段**（30m 与 12h 各写各的），
 // 相加是分段求和、⛔ 不是同值双报累加。
+// 按字面形状分派、每种形态只 Unmarshal 一次（旧实现「先试数值、再试对象」对对象形态
+// 必白跑一次失败解析）；实测口径：null/字符串/布尔/数组两种做法都退回 TTL 顶字段
+// ⇒ 分派后的行为与旧实现逐字一致。
 func resolveResponsesCacheWrite(d responsesDetails) int64 {
 	raw := bytes.TrimSpace(d.CacheWriteTokens)
 	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		var n int64
-		if err := json.Unmarshal(raw, &n); err == nil {
-			return n
-		}
-		var sub struct {
-			TTL30mTokens int64 `json:"ttl_30m_tokens"`
-			TTL12hTokens int64 `json:"ttl_12h_tokens"`
-		}
-		if err := json.Unmarshal(raw, &sub); err == nil {
-			return sub.TTL30mTokens + sub.TTL12hTokens
+		switch raw[0] {
+		case '{':
+			var sub struct {
+				TTL30mTokens int64 `json:"ttl_30m_tokens"`
+				TTL12hTokens int64 `json:"ttl_12h_tokens"`
+			}
+			if err := json.Unmarshal(raw, &sub); err == nil {
+				return sub.TTL30mTokens + sub.TTL12hTokens
+			}
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			var n int64
+			if err := json.Unmarshal(raw, &n); err == nil {
+				return n
+			}
 		}
 	}
 	return d.TTL30mTokens + d.TTL12hTokens

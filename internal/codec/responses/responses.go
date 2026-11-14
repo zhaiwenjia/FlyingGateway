@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 16:08:29.743
+// 日期: 2026-11-14 19:39:55.264
 // 作者: Zhai Wenjia
 
 // Package responses 实现 OpenAI Responses 形状的入站双模式编解码（统一 SDD 3.4）。
@@ -137,6 +137,10 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		return nil, err
 	}
 	out.Messages = msgs
+	// 结构预分配：tools 按入参条数预留（空入参保持 nil，序列化形态不变）。
+	if len(req.Tools) > 0 {
+		out.Tools = make([]core.Tool, 0, len(req.Tools))
+	}
 	for _, t := range req.Tools {
 		tool := core.Tool{Type: t.Type}
 		if t.Function != nil {
@@ -204,7 +208,11 @@ func decodeInput(raw json.RawMessage) ([]core.Message, error) {
 	if err := json.Unmarshal(trim, &items); err != nil {
 		return nil, fmt.Errorf("responses: input 解析失败: %w", err)
 	}
+	// 结构预分配：messages 按 item 条数预留（空数组保持 nil，序列化形态不变）。
 	var out []core.Message
+	if len(items) > 0 {
+		out = make([]core.Message, 0, len(items))
+	}
 	for _, it := range items {
 		switch it.Type {
 		case "message":
@@ -458,14 +466,19 @@ type xGatewayOut struct {
 // 此处透传上游适配层识别的丢失记录（resp.Degradations），同 (field, reason) 只记一次
 // （统一 SDD 3.4 / 验收 A8、A14，⛔ 不静默丢）。
 func collectDegradations(resp *core.Response) []degradationOut {
-	seen := make(map[string]bool)
+	// seen 懒建：无降级（常见路径）零分配——读 nil map 合法，首条降级才建表去重。
+	var seen map[string]bool
 	var out []degradationOut
 	add := func(d degradationOut) {
 		key := d.Field + "|" + d.Reason
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, d)
+		if seen[key] {
+			return
 		}
+		if seen == nil {
+			seen = make(map[string]bool)
+		}
+		seen[key] = true
+		out = append(out, d)
 	}
 	for _, d := range resp.Degradations {
 		add(degradationOut{Field: d.Field, Reason: d.Reason, Detail: d.Detail})
@@ -665,12 +678,29 @@ type EventEncoder struct {
 	degradations []degradationOut
 	callIndex    map[string]int
 	callSeq      int
+	// ---- 逐帧序列化复用暂存（Encode/Finish 持 e.mu 串行使用，⛔ 不并发）----
+	// 事件装配结构与序列化缓冲帧间复用（减分配）：输出字节是暂存的独立拷贝，
+	// 「返回值可跨帧持有」的既有契约不变。
+	ev   respEventOut // 事件装配结构（每帧整值替换，⛔ 无脏字段残留）
+	sink byteSink     // JSON 直接追加的复用暂存
+	jenc *json.Encoder
 }
+
+// byteSink 把 json.Encoder 的写入直接追加进复用缓冲（⛔ 不经中间 []byte）。
+type byteSink struct{ b []byte }
+
+func (s *byteSink) Write(p []byte) (int, error) {
+	s.b = append(s.b, p...)
+	return len(p), nil
+}
+
+// reset 暂存复位并写入前缀。
+func (s *byteSink) reset(prefix string) { s.b = append(s.b[:0], prefix...) }
 
 // NewEventEncoder 构造编码器；id / created_at 在此定下（单调生成）。
 func NewEventEncoder(model string) *EventEncoder {
 	id, created := nextEventID()
-	return &EventEncoder{
+	e := &EventEncoder{
 		model:     model,
 		id:        id,
 		created:   created,
@@ -678,6 +708,8 @@ func NewEventEncoder(model string) *EventEncoder {
 		callArgs:  make(map[string]string),
 		callIndex: make(map[string]int),
 	}
+	e.jenc = json.NewEncoder(&e.sink)
+	return e
 }
 
 // AddDegradation 登记一条不可逆语义丢失标记，随终态事件的 response 对象输出
@@ -821,21 +853,22 @@ func (e *EventEncoder) callIndexFor(toolCallID string) int {
 }
 
 // marshalEvent 组一条事件：`event:` + `data:` 双字段（事件名与 data.type 一致），
-// sequence_number 单调递增。
+// sequence_number 单调递增。装配走编码器复用暂存（ev 整值替换）、序列化直写
+// sink（⛔ 不经中间 []byte）；返回值是暂存的独立拷贝（⛔ 不返回 sink 别名）。
 func (e *EventEncoder) marshalEvent(name string, ev respEventOut) ([]byte, error) {
-	ev.SequenceNumber = e.seq
+	e.ev = ev // 整值替换：上一帧的未设置字段随值拷贝归零，⛔ 无脏字段残留
+	e.ev.SequenceNumber = e.seq
 	e.seq++
-	b, err := json.Marshal(ev)
-	if err != nil {
+	e.sink.reset("event: ")
+	e.sink.b = append(e.sink.b, name...)
+	e.sink.b = append(e.sink.b, '\n')
+	e.sink.b = append(e.sink.b, "data: "...)
+	if err := e.jenc.Encode(&e.ev); err != nil {
 		return nil, fmt.Errorf("responses: 事件序列化失败: %w", err)
 	}
-	out := make([]byte, 0, len(name)+len(b)+16)
-	out = append(out, "event: "...)
-	out = append(out, name...)
-	out = append(out, '\n')
-	out = append(out, "data: "...)
-	out = append(out, b...)
-	out = append(out, '\n', '\n')
+	e.sink.b = append(e.sink.b, '\n') // Encode 自带一个 \n，补足 SSE 事件空行
+	out := make([]byte, len(e.sink.b))
+	copy(out, e.sink.b)
 	return out, nil
 }
 

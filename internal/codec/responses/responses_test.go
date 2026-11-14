@@ -843,3 +843,104 @@ func TestDecodeRequestReasoningSignatureRoundTrip(t *testing.T) {
 		t.Fatalf("EncryptedContent/ReasoningContent = %q/%q", m.EncryptedContent, m.ReasoningContent)
 	}
 }
+
+// ---- 微基准（编解码热路径；先测后改，基线 vs 优化对照）----
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/codec/responses/ -bench=. -benchmem
+
+// benchRespReqString 是 input 为字符串的请求体。
+var benchRespReqString = []byte(`{"model":"gpt-5.6-sol","input":"你好，介绍一下北京","stream":false}`)
+
+// benchRespReqItems 是 input 为 item 数组（message / function_call / function_call_output /
+// reasoning）的典型请求体。
+var benchRespReqItems = []byte(`{"model":"gpt-5.6-sol","instructions":"你是助手","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"北京今天天气"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"北京\"}"},{"type":"function_call_output","call_id":"call_1","output":"晴 25°C"},{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"先查天气"}],"encrypted_content":"enc-1","signature":"sig-1"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"查询城市天气","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}],"tool_choice":"auto","stream":true,"reasoning":{"effort":"medium"}}`)
+
+// benchRespEventDelta / benchRespEventCompleted 是上游事件的两种典型形态。
+var (
+	benchRespEventDelta = []byte(`{"type":"response.output_text.delta","sequence_number":7,"output_index":0,"content_index":0,"delta":"你好"}`)
+	benchRespEventDone  = []byte(`{"type":"response.completed","sequence_number":99,"response":{"id":"resp_1","object":"response","created_at":1763100000,"status":"completed","model":"gpt-5.6-sol","output":[],"output_text":"你好","usage":{"input_tokens":309,"output_tokens":118,"total_tokens":427,"input_tokens_details":{"cached_tokens":53,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":53}}}}`)
+)
+
+// BenchmarkDecodeRequest 测入站请求解码（每请求必经一次）。
+func BenchmarkDecodeRequest(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"string-input", benchRespReqString},
+		{"item-array", benchRespReqItems},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := DecodeRequest(c.body); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// benchRespResponse 是出站编码的典型响应（message + reasoning + function_call）。
+func benchRespResponse() *core.Response {
+	return &core.Response{
+		ID:     "resp_bench",
+		Model:  "gpt-5.6-sol",
+		Status: core.StatusCompleted,
+		OutputItems: []core.OutputItem{
+			{Type: "reasoning", ID: "rs_1", ReasoningText: "先查天气", ThinkingSignature: "sig-1"},
+			{Type: "message", Role: "assistant", Content: []core.ContentPart{{Type: "output_text", Text: "北京今天晴，25°C。"}}},
+			{Type: "function_call", ID: "fc_1", CallID: "call_1", Name: "get_weather", Arguments: `{"city":"北京"}`},
+		},
+		Usage: &core.Usage{
+			InputTokens: 309, CacheReadTokens: 53, InputTokensUncached: 256,
+			OutputTokens: 118, ReasoningTokens: 53, TotalTokens: 427,
+		},
+	}
+}
+
+// BenchmarkEncodeResponse 测出站 response 对象序列化。
+func BenchmarkEncodeResponse(b *testing.B) {
+	resp := benchRespResponse()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := EncodeResponse(resp); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkEventEncoderEncode 测流式逐帧事件编码（N 帧共享一个编码器）。
+func BenchmarkEventEncoderEncode(b *testing.B) {
+	enc := NewEventEncoder("gpt-5.6-sol")
+	frame := stream.Frame{Kind: stream.FrameTextDelta, Text: "增量文本"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := enc.Encode(frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkParseEvent 测上游事件解码（流式每帧必经；completed 事件含 usage.Normalize）。
+func BenchmarkParseEvent(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"delta", benchRespEventDelta},
+		{"completed", benchRespEventDone},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			ev := stream.SSEEvent{Data: string(c.data)}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := ParseEvent(core.ProviderOpenAI, ev); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

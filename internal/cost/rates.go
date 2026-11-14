@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 11:54:49.173
+// 日期: 2026-11-14 19:39:55.229
 // 作者: Zhai Wenjia
 
 // Package cost 实现费用计量（统一 SDD 第五编）：费率数据结构与加载自检（5.4 / 5.5）、
@@ -97,7 +97,9 @@ func (r *ModelRate) SnapshotID(callTime time.Time) string {
 	if r.PeakMultiplier > 1.0 && isPeakHour(callTime) {
 		slot = "peak"
 	}
-	return fmt.Sprintf("%s@%s-%s-%s", r.Model, r.SnapshotDate, slot, HolidayCalendarCNFixed)
+	// 快照标识每请求拼一次（计量热路径）：字符串直拼 1 次分配，
+	// 比 fmt.Sprintf（格式解析 + 缓冲）省 1 次分配；输出逐字节一致。
+	return r.Model + "@" + r.SnapshotDate + "-" + slot + "-" + HolidayCalendarCNFixed
 }
 
 // Rates 是整张费率表（配置字段 + 费率行索引）。

@@ -1,10 +1,9 @@
-// 日期: 2026-11-14 11:54:49.174
+// 日期: 2026-11-14 19:39:55.236
 // 作者: Zhai Wenjia
 
 package cost
 
 import (
-	"fmt"
 	"math"
 	"time"
 
@@ -114,7 +113,8 @@ func FromUSDTicks(ticks int64, rate *ModelRate) core.Cost {
 	}
 	if rate != nil {
 		// 自报费用不参与费率表计价 ⇒ 快照标识只记兜底费率行与时态来源，不标峰谷时段。
-		c.RateSnapshot = fmt.Sprintf("%s@%s-provider-reported", rate.Model, rate.SnapshotDate)
+		// 字符串直拼替代 fmt.Sprintf（省格式解析与 1 次分配，输出逐字节一致）。
+		c.RateSnapshot = rate.Model + "@" + rate.SnapshotDate + "-provider-reported"
 	}
 	return c
 }

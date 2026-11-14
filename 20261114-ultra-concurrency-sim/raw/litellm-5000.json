@@ -1,0 +1,198 @@
+{
+  "meta": {
+    "hold_s": 30,
+    "mode": "storm",
+    "model": "ultra-model",
+    "ramp_per_s": 2000,
+    "src_ips": 1,
+    "target": 5000,
+    "tool": "ultraload",
+    "ts": "2026-11-14 20:26:12.620",
+    "url": "http://127.0.0.1:8081",
+    "wall_ms": 33250
+  },
+  "result": {
+    "completed": 585,
+    "errors": {
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20170-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20239-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20336-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20590-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:20714-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21035-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21285-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:21442-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22522-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22523-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22849-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:22867-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23035-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23338-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:23339-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24133-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24163-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24164-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24265-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24267-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24276-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24302-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24304-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "other: Post \"http://127.0.0.1:8081/v1/chat/completions\": write tcp 127.0.0.1:24918-\u003e127.0.0.1:8081: write: broken pipe": 1,
+      "reset": 4391
+    },
+    "failed": 4415,
+    "inflight_curve": [
+      {
+        "sec": 0,
+        "inflight": 310
+      },
+      {
+        "sec": 1,
+        "inflight": 504
+      },
+      {
+        "sec": 2,
+        "inflight": 585
+      },
+      {
+        "sec": 3,
+        "inflight": 585
+      },
+      {
+        "sec": 4,
+        "inflight": 585
+      },
+      {
+        "sec": 5,
+        "inflight": 585
+      },
+      {
+        "sec": 6,
+        "inflight": 585
+      },
+      {
+        "sec": 7,
+        "inflight": 585
+      },
+      {
+        "sec": 8,
+        "inflight": 585
+      },
+      {
+        "sec": 9,
+        "inflight": 585
+      },
+      {
+        "sec": 10,
+        "inflight": 585
+      },
+      {
+        "sec": 11,
+        "inflight": 585
+      },
+      {
+        "sec": 12,
+        "inflight": 585
+      },
+      {
+        "sec": 13,
+        "inflight": 585
+      },
+      {
+        "sec": 14,
+        "inflight": 585
+      },
+      {
+        "sec": 15,
+        "inflight": 585
+      },
+      {
+        "sec": 16,
+        "inflight": 585
+      },
+      {
+        "sec": 17,
+        "inflight": 585
+      },
+      {
+        "sec": 18,
+        "inflight": 585
+      },
+      {
+        "sec": 19,
+        "inflight": 585
+      },
+      {
+        "sec": 20,
+        "inflight": 585
+      },
+      {
+        "sec": 21,
+        "inflight": 585
+      },
+      {
+        "sec": 22,
+        "inflight": 585
+      },
+      {
+        "sec": 23,
+        "inflight": 585
+      },
+      {
+        "sec": 24,
+        "inflight": 585
+      },
+      {
+        "sec": 25,
+        "inflight": 585
+      },
+      {
+        "sec": 26,
+        "inflight": 585
+      },
+      {
+        "sec": 27,
+        "inflight": 585
+      },
+      {
+        "sec": 28,
+        "inflight": 585
+      },
+      {
+        "sec": 29,
+        "inflight": 585
+      },
+      {
+        "sec": 30,
+        "inflight": 410
+      },
+      {
+        "sec": 31,
+        "inflight": 214
+      },
+      {
+        "sec": 32,
+        "inflight": 53
+      }
+    ],
+    "launched": 5000,
+    "peak_inflight": 615,
+    "status": {
+      "200": 585
+    },
+    "total_ms": {
+      "p50": 30698.045,
+      "p90": 30862.673,
+      "p99": 30878.516,
+      "p999": 30879.025,
+      "max": 30879.025
+    },
+    "ttfb_ms": {
+      "p50": 720.908,
+      "p90": 885.338,
+      "p99": 902.026,
+      "p999": 902.51,
+      "max": 902.51
+    }
+  }
+}

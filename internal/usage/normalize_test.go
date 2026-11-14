@@ -380,7 +380,7 @@ func TestNormalizeRawPreserved(t *testing.T) {
 // ---- 真实样本回归层（testdata/real/：来源 / 获取日期 / 真实性依据逐条见 testdata/real/README.md）----
 
 // loadRealUsage 读取 testdata/real/ 下的真实 usage 样本（原封不动照抄来源，⛔ 非合成）。
-func loadRealUsage(t *testing.T, name string) json.RawMessage {
+func loadRealUsage(t testing.TB, name string) json.RawMessage {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "real", name))
 	if err != nil {
@@ -389,7 +389,18 @@ func loadRealUsage(t *testing.T, name string) json.RawMessage {
 	return json.RawMessage(b)
 }
 
-// TestNormalizeRealSamples 钉住归一化口径在 11 家供应商真实样本上成立（期望值逐字推自样本数值）：
+// realSample 是真实样本回归层的用例行（期望值逐字推自样本数值）。
+// TestNormalizeRealSamples 与 BenchmarkNormalize 共用 realSampleCases（⛔ 单一真源，防清单漂移）。
+type realSample struct {
+	name               string
+	file               string
+	provider           core.Provider
+	shape              core.APIShape
+	in, read, write    int64
+	unc, out, rea, tot int64
+}
+
+// realSampleCases 钉住归一化口径在 11 家供应商真实样本上成立（期望值逐字推自样本数值）：
 // ① Anthropic 系残值合成 Input = input + cache_creation + cache_read（⛔ 不取 input_tokens 残值）；
 // ② Kimi 三分互斥 Uncached = prompt − cached − write；DeepSeek 有 prompt_cache_miss_tokens 取 miss、
 //
@@ -398,56 +409,52 @@ func loadRealUsage(t *testing.T, name string) json.RawMessage {
 // ③ Gemini Output = candidates + thoughts（独立加项），Total 保留原报 ⛔ 不重算。
 // 错误实现会红：Anthropic 直接取 input_tokens ⇒ cachewrite 样本 Input=4 ≠ 880 红；
 // Kimi 同值双报累加 ⇒ Read=20 ≠ 10 红；Gemini 不加 thoughts ⇒ Out=80 ≠ 655 红。
+var realSampleCases = []realSample{
+	// anthropic_usage_cachewrite.json（litellm 真实捕获，写缓存轮）：
+	// Input = 4 + 876 + 0 = 880（残值合成）；Uncached = 残值 4；Write = 876；Out = 235。
+	{"anthropic-cachewrite", "anthropic_usage_cachewrite.json", core.ProviderAnthropic, core.APIShapeAnthropicMessages, 880, 0, 876, 4, 235, 0, 0},
+	// anthropic_usage_cachehit.json（litellm 真实捕获，命中轮）：Input = 4 + 0 + 873 = 877；Read = 873。
+	{"anthropic-cachehit", "anthropic_usage_cachehit.json", core.ProviderAnthropic, core.APIShapeAnthropicMessages, 877, 873, 0, 4, 254, 0, 0},
+	// openai_responses_usage.json（litellm 真实捕获）：命中/写入均 0 ⇒ Uncached=309；Reasoning=53；Total=427。
+	{"openai-responses", "openai_responses_usage.json", core.ProviderOpenAI, core.APIShapeOpenAIResponses, 309, 0, 0, 309, 118, 53, 427},
+	// openai_chat_usage_azure.json（litellm 真实捕获，Chat 形）：Input=19/Out=5/Total=24；
+	// 未知字段 latency_checkpoint 随 Raw 保留、⛔ 不干扰解析。
+	{"openai-chat", "openai_chat_usage_azure.json", core.ProviderOpenAI, core.APIShapeOpenAIChat, 19, 0, 0, 19, 5, 0, 24},
+	// gemini_usage_metadata.json（litellm 真实捕获）：Out = 80 + 575 = 655（thoughts 独立加项）；
+	// Total=1013 保留原报（358+80+575 自洽）。
+	{"gemini", "gemini_usage_metadata.json", core.ProviderGemini, core.APIShapeGeminiNative, 358, 0, 0, 358, 655, 0, 1013},
+	// deepseek_usage.json（官方文档示例）：miss 字段 7 ⇒ Uncached=7（⛔ 非 prompt−hit 兜底路径）。
+	{"deepseek", "deepseek_usage.json", core.ProviderDeepSeek, core.APIShapeOpenAIChat, 7, 0, 0, 7, 11, 0, 18},
+	// kimi_usage.json（官方文档示例）：prompt=19 = 10 命中 + 0 写 + 9 未命中（三分互斥）。
+	{"kimi", "kimi_usage.json", core.ProviderMoonshot, core.APIShapeOpenAIChat, 19, 10, 0, 9, 21, 0, 40},
+	// zhipu_usage.json（官方文档示例）：命中 1024 单列；completion 含 reasoning ⇒ Out=241 ⛔ 不二次加。
+	{"zhipu", "zhipu_usage.json", core.ProviderZhipu, core.APIShapeOpenAIChat, 1075, 1024, 0, 51, 241, 0, 1316},
+	// qwen_compat_usage.json（官方文档示例）：命中 2048、无写入 ⇒ Uncached=971（隐式缓存档）。
+	{"qwen-compat", "qwen_compat_usage.json", core.ProviderQwen, core.APIShapeOpenAIChat, 3019, 2048, 0, 971, 104, 0, 3123},
+	// qwen_native_usage.json（官方文档示例）：⚠️ 2026-11-14 实测修正——原生样本带
+	// prompt_tokens_details.cached_tokens=2048，有字段就解析 ⇒ Read=2048、Uncached=971。
+	{"qwen-native", "qwen_native_usage.json", core.ProviderQwen, core.APIShapeQwenNative, 3019, 2048, 0, 971, 101, 0, 3120},
+	// minimax_usage.json（官方文档示例）：无缓存字段 ⇒ 读写 0；reasoning 214 单列；total_characters 随 Raw。
+	{"minimax", "minimax_usage.json", core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2, 26, 0, 0, 26, 223, 214, 249},
+	// mimo_usage_asr.json（官方文档示例）：命中 45 ⇒ Uncached = 46 − 45 = 1；seconds=4 随 Raw。
+	{"mimo-asr", "mimo_usage_asr.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 46, 45, 0, 1, 20, 0, 66},
+	// mimo_usage_audio.json（官方文档示例）：无命中 ⇒ Uncached=86；reasoning_tokens=66 入
+	// Reasoning（⚠️ 2026-11-14 实测修正：SDD 4.3.10 字段表列了该字段、实现原漏读）。
+	{"mimo-audio", "mimo_usage_audio.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 86, 0, 0, 86, 98, 66, 184},
+	// grok_responses_usage.json（官方文档示例）：Responses 树；cost_in_usd_ticks=158500 随 Raw 保留。
+	{"grok-responses", "grok_responses_usage.json", core.ProviderXAI, core.APIShapeOpenAIResponses, 199, 0, 0, 199, 1, 0, 200},
+	// ollama_usage_real.json（排障实录贴真机响应）：prompt_eval_count=40 含命中 ⇒ Uncached=40−24=16；
+	// 无总值原报 ⇒ Total=0。
+	{"ollama-real", "ollama_usage_real.json", core.ProviderOllama, core.APIShapeOllamaNative, 40, 24, 0, 16, 10, 0, 0},
+	// ollama_usage_docs.json（官方文档示例）：无 prompt_eval_cached_count ⇒ Read=0、Uncached=11。
+	{"ollama-docs", "ollama_usage_docs.json", core.ProviderOllama, core.APIShapeOllamaNative, 11, 0, 0, 11, 18, 0, 0},
+}
+
+// TestNormalizeRealSamples 把 realSampleCases 逐条钉在归一化结果上
+// （用例语义与「错误实现会红」对照点见 realSampleCases 注释）。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -run TestNormalizeRealSamples -v
 func TestNormalizeRealSamples(t *testing.T) {
-	cases := []struct {
-		name               string
-		file               string
-		provider           core.Provider
-		shape              core.APIShape
-		in, read, write    int64
-		unc, out, rea, tot int64
-	}{
-		// anthropic_usage_cachewrite.json（litellm 真实捕获，写缓存轮）：
-		// Input = 4 + 876 + 0 = 880（残值合成）；Uncached = 残值 4；Write = 876；Out = 235。
-		{"anthropic-cachewrite", "anthropic_usage_cachewrite.json", core.ProviderAnthropic, core.APIShapeAnthropicMessages, 880, 0, 876, 4, 235, 0, 0},
-		// anthropic_usage_cachehit.json（litellm 真实捕获，命中轮）：Input = 4 + 0 + 873 = 877；Read = 873。
-		{"anthropic-cachehit", "anthropic_usage_cachehit.json", core.ProviderAnthropic, core.APIShapeAnthropicMessages, 877, 873, 0, 4, 254, 0, 0},
-		// openai_responses_usage.json（litellm 真实捕获）：命中/写入均 0 ⇒ Uncached=309；Reasoning=53；Total=427。
-		{"openai-responses", "openai_responses_usage.json", core.ProviderOpenAI, core.APIShapeOpenAIResponses, 309, 0, 0, 309, 118, 53, 427},
-		// openai_chat_usage_azure.json（litellm 真实捕获，Chat 形）：Input=19/Out=5/Total=24；
-		// 未知字段 latency_checkpoint 随 Raw 保留、⛔ 不干扰解析。
-		{"openai-chat", "openai_chat_usage_azure.json", core.ProviderOpenAI, core.APIShapeOpenAIChat, 19, 0, 0, 19, 5, 0, 24},
-		// gemini_usage_metadata.json（litellm 真实捕获）：Out = 80 + 575 = 655（thoughts 独立加项）；
-		// Total=1013 保留原报（358+80+575 自洽）。
-		{"gemini", "gemini_usage_metadata.json", core.ProviderGemini, core.APIShapeGeminiNative, 358, 0, 0, 358, 655, 0, 1013},
-		// deepseek_usage.json（官方文档示例）：miss 字段 7 ⇒ Uncached=7（⛔ 非 prompt−hit 兜底路径）。
-		{"deepseek", "deepseek_usage.json", core.ProviderDeepSeek, core.APIShapeOpenAIChat, 7, 0, 0, 7, 11, 0, 18},
-		// kimi_usage.json（官方文档示例）：prompt=19 = 10 命中 + 0 写 + 9 未命中（三分互斥）。
-		{"kimi", "kimi_usage.json", core.ProviderMoonshot, core.APIShapeOpenAIChat, 19, 10, 0, 9, 21, 0, 40},
-		// zhipu_usage.json（官方文档示例）：命中 1024 单列；completion 含 reasoning ⇒ Out=241 ⛔ 不二次加。
-		{"zhipu", "zhipu_usage.json", core.ProviderZhipu, core.APIShapeOpenAIChat, 1075, 1024, 0, 51, 241, 0, 1316},
-		// qwen_compat_usage.json（官方文档示例）：命中 2048、无写入 ⇒ Uncached=971（隐式缓存档）。
-		{"qwen-compat", "qwen_compat_usage.json", core.ProviderQwen, core.APIShapeOpenAIChat, 3019, 2048, 0, 971, 104, 0, 3123},
-		// qwen_native_usage.json（官方文档示例）：⚠️ 2026-11-14 实测修正——原生样本带
-		// prompt_tokens_details.cached_tokens=2048，有字段就解析 ⇒ Read=2048、Uncached=971。
-		{"qwen-native", "qwen_native_usage.json", core.ProviderQwen, core.APIShapeQwenNative, 3019, 2048, 0, 971, 101, 0, 3120},
-		// minimax_usage.json（官方文档示例）：无缓存字段 ⇒ 读写 0；reasoning 214 单列；total_characters 随 Raw。
-		{"minimax", "minimax_usage.json", core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2, 26, 0, 0, 26, 223, 214, 249},
-		// mimo_usage_asr.json（官方文档示例）：命中 45 ⇒ Uncached = 46 − 45 = 1；seconds=4 随 Raw。
-		{"mimo-asr", "mimo_usage_asr.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 46, 45, 0, 1, 20, 0, 66},
-		// mimo_usage_audio.json（官方文档示例）：无命中 ⇒ Uncached=86；reasoning_tokens=66 入
-		// Reasoning（⚠️ 2026-11-14 实测修正：SDD 4.3.10 字段表列了该字段、实现原漏读）。
-		{"mimo-audio", "mimo_usage_audio.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 86, 0, 0, 86, 98, 66, 184},
-		// grok_responses_usage.json（官方文档示例）：Responses 树；cost_in_usd_ticks=158500 随 Raw 保留。
-		{"grok-responses", "grok_responses_usage.json", core.ProviderXAI, core.APIShapeOpenAIResponses, 199, 0, 0, 199, 1, 0, 200},
-		// ollama_usage_real.json（排障实录贴真机响应）：prompt_eval_count=40 含命中 ⇒ Uncached=40−24=16；
-		// 无总值原报 ⇒ Total=0。
-		{"ollama-real", "ollama_usage_real.json", core.ProviderOllama, core.APIShapeOllamaNative, 40, 24, 0, 16, 10, 0, 0},
-		// ollama_usage_docs.json（官方文档示例）：无 prompt_eval_cached_count ⇒ Read=0、Uncached=11。
-		{"ollama-docs", "ollama_usage_docs.json", core.ProviderOllama, core.APIShapeOllamaNative, 11, 0, 0, 11, 18, 0, 0},
-	}
-	for _, c := range cases {
+	for _, c := range realSampleCases {
 		t.Run(c.name, func(t *testing.T) {
 			u := Normalize(c.provider, c.shape, loadRealUsage(t, c.file))
 			if u.Estimated {
@@ -482,5 +489,27 @@ func TestNormalizeGrokChatCachedDetailsFallback(t *testing.T) {
 		`{"prompt_tokens":1258,"completion_tokens":121,"cached_prompt_text_tokens":62,"prompt_tokens_details":{"cached_tokens":62}}`))
 	if u2.CacheReadTokens != 62 {
 		t.Fatalf("两形态并存应取其一 ⇒ Read%d，期望 62（⛔ 不累加成 124）", u2.CacheReadTokens)
+	}
+}
+
+// ---- 微基准（计量热路径；真实样本逐条，先测后改）----
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -bench=BenchmarkNormalize -benchmem
+
+// BenchmarkNormalize 测 usage 归一化（usage.Normalize 在流式 usage 帧与响应收口各调用一次）。
+// 样本与 TestNormalizeRealSamples 同一真源（realSampleCases）；每轮校验解析成功，
+// 防止基准悄悄测到错误路径（Estimated=true 的保守结果）。
+func BenchmarkNormalize(b *testing.B) {
+	for _, c := range realSampleCases {
+		raw := loadRealUsage(b, c.file)
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				u := Normalize(c.provider, c.shape, raw)
+				if u.Estimated {
+					b.Fatalf("%s 解析失败（Estimated=true），基准测的不是成功路径", c.file)
+				}
+			}
+		})
 	}
 }

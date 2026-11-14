@@ -118,6 +118,19 @@ go run ./cmd/gateway             # 运行入口（待建）
 
 **解读**：真实上游的 6 轮中位两侧基本打平（轮间波动主导，c8 单轮双方都在 0.8–4.2 rps 荡）；**受控隔离下网关开销显著低于 LiteLLM**。c=8 档曾单独落后，瓶颈定位为 **Go 默认传输层 `MaxIdleConnsPerHost=2`**（中等并发下连接用完即关、下一波全量 TLS 重连）——已修复（保活 100/host），修复后网关 c8 单轮 2.80→4.16 rps、P99 4709→2439ms。网关的差异化在**治理语义**（超时可重试保成功率、取消即停、重试与降级分账、token 级限流、usage 归一与费用计量）与**低自身开销**。
 
+**超高并发等价模拟（1k→100k 在途风暴，长持 30s）**——详见 [`20261114-ultra-concurrency-sim/`](20261114-ultra-concurrency-sim/README.md)：
+
+| | FlyingGateway | LiteLLM |
+|---|---|---|
+| 成功在途封顶 | **~16–17k**（超限优雅 502） | **~2k**（超限 RST 丢连接） |
+| TTFB P50 | **1.7–2.4ms** | 654–721ms（~300×） |
+| RSS / 连接 | **~146KB** | ~450KB（~3×） |
+| 风暴后恢复 P50 | **1.5ms**（10 万过载后 123ms） | 267ms→4.9s |
+
+**决定性发现**：网关出站本地端口 bind 排他（Go Dialer 无 SO_REUSEADDR）⇒ 单源 IP 出站上限 = 临时端口池 **16,384**——100k 到不了的卡点是它（fd/内存均非瓶颈）；部署建议：多源 IP/多实例横向扩出站、fd 预算 ≈ 2× 在途、连接爬坡越过 `somaxconn=128`。
+
+**全链路性能优化（OPT-05~13 台账见 [`20261114-realkeys-mimo-flash-bench/OPT-LOG.md`](20261114-realkeys-mimo-flash-bench/OPT-LOG.md)）**：SSE 扫描器缓冲池化（alloc 54% 单点，B/op −57~64%）、帧编码器 5/4→1 allocs、chunk 解码去反射（ns 0.2×、allocs 52–55→4–7）、日志批量异步（−47% 且移出请求路径）、Redact 快路径（−94%、clean 0 alloc）、费用计算 −60%；330+ 测试全绿、逐项 `-benchmem` 前后对照。
+
 **实测驱动的修复**（真捕获样本钉死）：MiMo 流式 usage 两拍收口、Kimi `choices[0].usage` 非顶层探测、Grok/Qwen/MiMo 三处 usage 口径——详见测试报告第五节。
 
 ## 五、文档索引

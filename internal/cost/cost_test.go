@@ -356,3 +356,44 @@ func TestFromUSDTicks(t *testing.T) {
 		t.Fatalf("负 ticks 应按 0 落账：%v / %v", neg.CostCNY, neg.CostUSD)
 	}
 }
+
+// ---- 微基准（费用计算热路径；先测后改，基线 vs 优化对照）----
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/cost/ -bench=. -benchmem
+
+// benchCostUsage 是典型计量结果（含缓存命中 / 写入 / 推理）。
+var benchCostUsage = core.Usage{
+	InputTokens: 3019, CacheReadTokens: 2048, CacheWriteTokens: 128,
+	InputTokensUncached: 843, OutputTokens: 104, ReasoningTokens: 53, TotalTokens: 3123,
+}
+
+// BenchmarkCalculateCost 测费用计算（每请求必经一次；含 SnapshotID 拼接）。
+// 三档费率形态：单档（无峰谷）/ 峰谷倍率（DeepSeek 形）/ 阶梯分档。
+func BenchmarkCalculateCost(b *testing.B) {
+	flat := &ModelRate{Model: "bench-flat", Provider: "qwen",
+		InputPriceCNY: 0.8, CacheReadExplicitCNY: 0.16, CacheReadImplicitCNY: 0.08,
+		CacheWriteCNY: 2, OutputPriceCNY: 2, PeakMultiplier: 1.0, SnapshotDate: "2026-11-13"}
+	peak := &ModelRate{Model: "bench-peak", Provider: "deepseek",
+		InputPriceCNY: 1, CacheReadExplicitCNY: 0.02, CacheReadImplicitCNY: 0.02,
+		CacheWriteCNY: 2, OutputPriceCNY: 4, PeakMultiplier: 2.0, SnapshotDate: "2026-11-13"}
+	tiered := &ModelRate{Model: "bench-tiered", Provider: "openai",
+		InputPriceCNY: 1.25, CacheReadExplicitCNY: 0.125, CacheReadImplicitCNY: 0.125,
+		CacheWriteCNY: 2, OutputPriceCNY: 10, PeakMultiplier: 1.0, SnapshotDate: "2026-11-13",
+		InputTiers: []PriceTier{
+			{MaxInputTokens: 32000, InputPriceCNY: 1.25, OutputPriceCNY: 10},
+			{MaxInputTokens: 128000, InputPriceCNY: 2.5, OutputPriceCNY: 15},
+		}}
+	callTime := time.Date(2026, 11, 16, 10, 0, 0, 0, beijing) // 北京时间周一峰时窗口内
+	for _, c := range []struct {
+		name string
+		rate *ModelRate
+	}{
+		{"flat", flat}, {"peak", peak}, {"tiered", tiered},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = CalculateCost(&benchCostUsage, c.rate, callTime)
+			}
+		})
+	}
+}

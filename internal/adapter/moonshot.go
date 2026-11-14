@@ -334,8 +334,9 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 		}
 		return nil, true, nil
 	}
-	var c openai.ChatCompletionChunk
-	if err := json.Unmarshal([]byte(data), &c); err != nil {
+	// 两段式按需解码（chatchunk.go：轻量严格解码 ⇒ 异型帧 typed 兜底，帧语义零变化）。
+	c, ok := decodeChatChunk(data)
+	if !ok {
 		return nil, false, nil // 非 JSON 帧（keep-alive / 文档省略标记等）容忍跳过（3.7 流式容错）
 	}
 	var frames []stream.Frame
@@ -344,12 +345,8 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 		if ch.Delta.Content != "" {
 			frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: ch.Delta.Content})
 		}
-		var dq struct {
-			ReasoningContent string `json:"reasoning_content"`
-		}
-		_ = json.Unmarshal([]byte(ch.Delta.RawJSON()), &dq) // 扩展字段从原始 delta JSON 取
-		if dq.ReasoningContent != "" {
-			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: dq.ReasoningContent})
+		if ch.Delta.ReasoningContent != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: ch.Delta.ReasoningContent})
 		}
 		for _, tc := range ch.Delta.ToolCalls {
 			frames = append(frames, stream.Frame{
@@ -367,7 +364,7 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 			d.pendingDone = ch.FinishReason
 		}
 	}
-	if u := d.usageOfP(payload, c); u != nil {
+	if u := d.usageOfP(c); u != nil {
 		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
 		if d.pendingDone != "" {
 			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: d.pendingDone})
@@ -380,7 +377,7 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 
 // toolCallID 取工具调用 id：chunk 的 id 只在首块出现，后续块按 index 对齐（⛔ 不让参数帧断链）；
 // 全程无 id（畸形上游）⇒ 合成稳定的 per-index 占位 id。
-func (d *moonshotChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoiceDeltaToolCall) string {
+func (d *moonshotChatStreamDecoder) toolCallID(tc chatChunkToolCall) string {
 	if tc.ID != "" {
 		d.toolIDs[tc.Index] = tc.ID
 		return tc.ID
@@ -393,31 +390,25 @@ func (d *moonshotChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoi
 	return id
 }
 
-// usageOf 取 chunk 的 usage 原文（Kimi 三分字段原样，⛔ 不经 SDK 类型重整）：
+// usageOf 取 chunk 的 usage 原文（Kimi 三分字段原样，⛔ 不经类型重整）：
 // usage 为 null 或缺键 ⇒ 不发 usage 帧。
-func (d *moonshotChatStreamDecoder) usageOf(c openai.ChatCompletionChunk) *core.Usage {
-	raw := c.JSON.Usage.Raw()
-	if raw == "" || raw == "null" {
+func (d *moonshotChatStreamDecoder) usageOf(c chatChunk) *core.Usage {
+	raw := chunkUsageRaw(c.Usage)
+	if raw == nil {
 		return nil
 	}
-	return d.usageFn(json.RawMessage(raw))
+	return d.usageFn(raw)
 }
 
 // usageOfP 取 usage 原文（Moonshot quirk 兜底）：顶层 usage 优先；⚠️ 2026-11-14 真实样本
-// （kimi_stream_real.sse）实测 usage 放 choices[0].usage（非顶层）⇒ 顶层缺键时从 choice
-// 原文兜底，⛔ 不经 SDK 类型重整（cache_write_tokens 等扩展字段逐字保留）。
-func (d *moonshotChatStreamDecoder) usageOfP(payload string, c openai.ChatCompletionChunk) *core.Usage {
+// （kimi_stream_real.sse）实测 usage 放 choices[0].usage（非顶层）⇒ 顶层缺键时取二级，
+// ⛔ 不经类型重整（cache_write_tokens 等扩展字段逐字保留）。
+func (d *moonshotChatStreamDecoder) usageOfP(c chatChunk) *core.Usage {
 	if u := d.usageOf(c); u != nil {
 		return u
 	}
-	var probe struct {
-		Choices []struct {
-			Usage json.RawMessage `json:"usage"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal([]byte(payload), &probe); err == nil && len(probe.Choices) > 0 {
-		raw := probe.Choices[0].Usage
-		if len(raw) > 0 && string(raw) != "null" {
+	if len(c.Choices) > 0 {
+		if raw := chunkUsageRaw(c.Choices[0].Usage); raw != nil {
 			return d.usageFn(raw)
 		}
 	}

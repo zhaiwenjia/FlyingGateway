@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 11:50:04.126
+// 日期: 2026-11-14 19:39:55.243
 // 作者: Zhai Wenjia
 
 // Package errors 承载错误归一化（统一 SDD 7.1）：对外给归一化分类，
@@ -10,11 +10,12 @@
 package errors
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	stderrors "errors"
-	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -41,7 +42,7 @@ func FromUpstream(provider core.Provider, upstreamStatus int, body []byte, reque
 		code = string(cat)
 	}
 	if msg == "" {
-		msg = fmt.Sprintf("upstream returned HTTP %d", upstreamStatus)
+		msg = "upstream returned HTTP " + strconv.Itoa(upstreamStatus)
 	}
 	return &core.ErrorDetail{
 		Category:          cat,
@@ -90,7 +91,7 @@ func FromMiniMaxBaseResp(statusCode int, statusMsg string) *core.ErrorDetail {
 	return &core.ErrorDetail{
 		Category:   cat,
 		HTTPStatus: statusForCategory(cat),
-		Code:       fmt.Sprintf("minimax_%d", statusCode),
+		Code:       "minimax_" + strconv.Itoa(statusCode),
 		Message:    security.Redact(statusMsg),
 		Provider:   core.ProviderMiniMax,
 		// 业务错误承载于 HTTP 200 响应内（4.3.11），故 UpstreamStatus 记 200。
@@ -162,7 +163,7 @@ func extractUpstreamError(body []byte) (code, msg string) {
 	}
 	if env.BaseResp != nil {
 		// MiniMax 形状：业务码即对外码。
-		return fmt.Sprintf("minimax_%d", env.BaseResp.StatusCode), env.BaseResp.StatusMsg
+		return "minimax_" + strconv.Itoa(env.BaseResp.StatusCode), env.BaseResp.StatusMsg
 	}
 	if env.Error != nil {
 		code = rawCodeToString(env.Error.Code)
@@ -175,17 +176,25 @@ func extractUpstreamError(body []byte) (code, msg string) {
 }
 
 // rawCodeToString 兼容 error.code 为字符串或数字两种真实形态。
+// 按字面形状分派、每种形态只 Unmarshal 一次（旧实现「先试 string、再试 Number」
+// 对数字形态必白跑一次失败解析）；实测口径：null 落哪支都出空串、
+// true/数组/对象两种做法都拿不到值 ⇒ 分派后的行为与旧实现逐字一致。
 func rawCodeToString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return ""
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
-	}
-	var n json.Number
-	if err := json.Unmarshal(raw, &n); err == nil {
-		return n.String()
+	switch raw[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		var n json.Number
+		if err := json.Unmarshal(raw, &n); err == nil {
+			return n.String()
+		}
 	}
 	return ""
 }

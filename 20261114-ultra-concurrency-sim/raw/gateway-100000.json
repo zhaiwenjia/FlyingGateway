@@ -1,0 +1,285 @@
+{
+  "meta": {
+    "hold_s": 30,
+    "mode": "storm",
+    "model": "ultra-model",
+    "ramp_per_s": 6666,
+    "src_ips": 1,
+    "target": 100000,
+    "tool": "ultraload",
+    "ts": "2026-11-14 20:23:00.370",
+    "url": "http://127.0.0.1:8090",
+    "wall_ms": 60007
+  },
+  "result": {
+    "completed": 30596,
+    "errors": {
+      "deadline": 3,
+      "dial_no_port": 69382,
+      "reset": 19
+    },
+    "failed": 69404,
+    "inflight_curve": [
+      {
+        "sec": 0,
+        "inflight": 6567
+      },
+      {
+        "sec": 1,
+        "inflight": 13114
+      },
+      {
+        "sec": 2,
+        "inflight": 19185
+      },
+      {
+        "sec": 3,
+        "inflight": 25752
+      },
+      {
+        "sec": 4,
+        "inflight": 29131
+      },
+      {
+        "sec": 5,
+        "inflight": 29133
+      },
+      {
+        "sec": 6,
+        "inflight": 29263
+      },
+      {
+        "sec": 7,
+        "inflight": 29369
+      },
+      {
+        "sec": 8,
+        "inflight": 29693
+      },
+      {
+        "sec": 9,
+        "inflight": 29722
+      },
+      {
+        "sec": 10,
+        "inflight": 30025
+      },
+      {
+        "sec": 11,
+        "inflight": 29535
+      },
+      {
+        "sec": 12,
+        "inflight": 30034
+      },
+      {
+        "sec": 13,
+        "inflight": 29192
+      },
+      {
+        "sec": 14,
+        "inflight": 29369
+      },
+      {
+        "sec": 15,
+        "inflight": 29527
+      },
+      {
+        "sec": 16,
+        "inflight": 29180
+      },
+      {
+        "sec": 17,
+        "inflight": 29346
+      },
+      {
+        "sec": 18,
+        "inflight": 29149
+      },
+      {
+        "sec": 19,
+        "inflight": 29462
+      },
+      {
+        "sec": 20,
+        "inflight": 29379
+      },
+      {
+        "sec": 21,
+        "inflight": 29168
+      },
+      {
+        "sec": 22,
+        "inflight": 29700
+      },
+      {
+        "sec": 23,
+        "inflight": 29244
+      },
+      {
+        "sec": 24,
+        "inflight": 29131
+      },
+      {
+        "sec": 25,
+        "inflight": 29751
+      },
+      {
+        "sec": 26,
+        "inflight": 28801
+      },
+      {
+        "sec": 27,
+        "inflight": 28782
+      },
+      {
+        "sec": 28,
+        "inflight": 30012
+      },
+      {
+        "sec": 29,
+        "inflight": 28814
+      },
+      {
+        "sec": 30,
+        "inflight": 28839
+      },
+      {
+        "sec": 31,
+        "inflight": 28838
+      },
+      {
+        "sec": 32,
+        "inflight": 29366
+      },
+      {
+        "sec": 33,
+        "inflight": 28764
+      },
+      {
+        "sec": 34,
+        "inflight": 21155
+      },
+      {
+        "sec": 35,
+        "inflight": 17415
+      },
+      {
+        "sec": 36,
+        "inflight": 13926
+      },
+      {
+        "sec": 37,
+        "inflight": 11438
+      },
+      {
+        "sec": 38,
+        "inflight": 8199
+      },
+      {
+        "sec": 39,
+        "inflight": 5241
+      },
+      {
+        "sec": 40,
+        "inflight": 2067
+      },
+      {
+        "sec": 41,
+        "inflight": 1564
+      },
+      {
+        "sec": 42,
+        "inflight": 1435
+      },
+      {
+        "sec": 43,
+        "inflight": 1176
+      },
+      {
+        "sec": 44,
+        "inflight": 953
+      },
+      {
+        "sec": 45,
+        "inflight": 919
+      },
+      {
+        "sec": 46,
+        "inflight": 919
+      },
+      {
+        "sec": 47,
+        "inflight": 917
+      },
+      {
+        "sec": 48,
+        "inflight": 916
+      },
+      {
+        "sec": 49,
+        "inflight": 910
+      },
+      {
+        "sec": 50,
+        "inflight": 910
+      },
+      {
+        "sec": 51,
+        "inflight": 910
+      },
+      {
+        "sec": 52,
+        "inflight": 910
+      },
+      {
+        "sec": 53,
+        "inflight": 910
+      },
+      {
+        "sec": 54,
+        "inflight": 888
+      },
+      {
+        "sec": 55,
+        "inflight": 866
+      },
+      {
+        "sec": 56,
+        "inflight": 779
+      },
+      {
+        "sec": 57,
+        "inflight": 779
+      },
+      {
+        "sec": 58,
+        "inflight": 779
+      },
+      {
+        "sec": 59,
+        "inflight": 779
+      }
+    ],
+    "launched": 100000,
+    "peak_inflight": 30353,
+    "status": {
+      "200": 17064,
+      "502": 13532
+    },
+    "total_ms": {
+      "p50": 33868.467,
+      "p90": 39752.178,
+      "p99": 40134.174,
+      "p999": 41335.597,
+      "max": 56870.442
+    },
+    "ttfb_ms": {
+      "p50": 3479.923,
+      "p90": 32236.112,
+      "p99": 33636.178,
+      "p999": 35591.97,
+      "max": 54986.529
+    }
+  }
+}

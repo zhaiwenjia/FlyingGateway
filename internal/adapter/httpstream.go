@@ -117,11 +117,14 @@ func (it *sseIter) Frame() stream.Frame { return it.cur }
 // Err 返回终态错误（nil 表示正常结束）。
 func (it *sseIter) Err() error { return it.err }
 
-// close 关闭上游 body（停止时关闭 body，3.6）；幂等。
+// close 关闭上游 body（停止时关闭 body，3.6）并归还扫描缓冲；幂等。
+// Release 安全性：close 只在终态路径调用；bufio.Scanner 在 EOF/出错后再 Scan
+// 不会向缓冲读写（GOROOT bufio/scan.go：s.err != nil 直接短路），⛔ 不会串流数据。
 func (it *sseIter) close() {
 	if !it.closed {
 		it.closed = true
 		_ = it.body.Close()
+		it.sc.Release() // 缓冲归还池（可省略走 GC；此处调用以复用 64KB 初始缓冲）
 	}
 }
 
@@ -191,10 +194,11 @@ func (it *ndjsonIter) Frame() stream.Frame { return it.cur }
 // Err 返回终态错误（nil 表示正常结束）。
 func (it *ndjsonIter) Err() error { return it.err }
 
-// close 关闭上游 body；幂等。
+// close 关闭上游 body 并归还扫描缓冲；幂等（Release 安全性口径同 sseIter.close）。
 func (it *ndjsonIter) close() {
 	if !it.closed {
 		it.closed = true
 		_ = it.body.Close()
+		it.sc.Release() // 缓冲归还池（可省略走 GC；此处调用以复用 64KB 初始缓冲）
 	}
 }

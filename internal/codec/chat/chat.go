@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 16:08:29.768
+// 日期: 2026-11-14 19:39:55.257
 // 作者: Zhai Wenjia
 
 // Package chat 实现 OpenAI Chat Completions 形状的入站双模式编解码（统一 SDD 3.4）。
@@ -112,6 +112,11 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 	}
+	// 结构预分配：messages / tool_calls / tools 按入参条数预留，消掉 append
+	// 逐次扩容的重分配；仅条数 > 0 时预建（空入参保持 nil，序列化形态不变）。
+	if len(req.Messages) > 0 {
+		out.Messages = make([]core.Message, 0, len(req.Messages))
+	}
 	for _, m := range req.Messages {
 		content, err := decodeContent(m.Content)
 		if err != nil {
@@ -123,6 +128,9 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 			ReasoningContent: m.ReasoningContent,
 			ToolCallID:       m.ToolCallID,
 			Name:             m.Name,
+		}
+		if len(m.ToolCalls) > 0 {
+			msg.ToolCalls = make([]core.ToolCall, 0, len(m.ToolCalls))
 		}
 		for _, tc := range m.ToolCalls {
 			ct := core.ToolCall{ID: tc.ID, Type: tc.Type}
@@ -144,6 +152,9 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		out.MaxOutputTokens = *req.MaxCompletionTokens
 	} else if req.MaxTokens != nil {
 		out.MaxOutputTokens = *req.MaxTokens
+	}
+	if len(req.Tools) > 0 {
+		out.Tools = make([]core.Tool, 0, len(req.Tools))
 	}
 	for _, t := range req.Tools {
 		tool := core.Tool{Type: t.Type}
@@ -343,14 +354,19 @@ const (
 // Chat 出口承载不了这两者 ⇒ 必须产生标记，⛔ 不静默丢。
 // 同 (field, reason) 只记一次。
 func collectDegradations(resp *core.Response) []degradationOut {
-	seen := make(map[string]bool)
+	// seen 懒建：无降级（常见路径）零分配——读 nil map 合法，首条降级才建表去重。
+	var seen map[string]bool
 	var out []degradationOut
 	add := func(d degradationOut) {
 		key := d.Field + "|" + d.Reason
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, d)
+		if seen[key] {
+			return
 		}
+		if seen == nil {
+			seen = make(map[string]bool)
+		}
+		seen[key] = true
+		out = append(out, d)
 	}
 	for _, d := range resp.Degradations {
 		add(degradationOut{Field: d.Field, Reason: d.Reason, Detail: d.Detail})
@@ -574,17 +590,39 @@ type ChunkEncoder struct {
 	signatureLossNoted bool
 	callIndex          map[string]int
 	callSeq            int
+	// ---- 逐帧序列化复用暂存（Encode/Finish 持 e.mu 串行使用，⛔ 不并发）----
+	// 帧装配结构与序列化缓冲帧间复用（减分配）：输出字节是暂存的独立拷贝，
+	// 「返回值可跨帧持有」的既有契约不变。
+	chunk   chatChunkOut         // 帧装配结构（每帧整值替换，⛔ 无脏字段残留）
+	choices [1]chatChunkChoice   // choices[0] 槽位
+	fn      chatChunkFunction    // tool_calls 的 function 槽位
+	toolOne [1]chatChunkToolCall // tool_calls[0] 槽位
+	sink    byteSink             // JSON 直接追加的复用暂存
+	jenc    *json.Encoder        // 落点恒为 &sink（构造时定下）
 }
+
+// byteSink 把 json.Encoder 的写入直接追加进复用缓冲（⛔ 不经中间 []byte）。
+type byteSink struct{ b []byte }
+
+func (s *byteSink) Write(p []byte) (int, error) {
+	s.b = append(s.b, p...)
+	return len(p), nil
+}
+
+// reset 暂存复位并写入前缀。
+func (s *byteSink) reset(prefix string) { s.b = append(s.b[:0], prefix...) }
 
 // NewChunkEncoder 构造编码器；id / created 在此定下（单调生成）。
 func NewChunkEncoder(model string) *ChunkEncoder {
 	id, created := nextChunkID()
-	return &ChunkEncoder{
+	e := &ChunkEncoder{
 		model:     model,
 		id:        id,
 		created:   created,
 		callIndex: make(map[string]int),
 	}
+	e.jenc = json.NewEncoder(&e.sink)
+	return e
 }
 
 // AddDegradation 登记一条不可逆语义丢失标记，随终止帧 payload 输出
@@ -640,16 +678,17 @@ func (e *ChunkEncoder) Encode(f stream.Frame) ([]byte, error) {
 		return e.marshalChunk(chatChunkDelta{ReasoningContent: f.Reasoning}, nil)
 	case stream.FrameToolCallArgsDelta:
 		idx := e.callIndexFor(f.ToolCallID)
-		fn := &chatChunkFunction{Arguments: f.Arguments}
+		e.fn = chatChunkFunction{Arguments: f.Arguments}
 		if f.Text != "" {
-			fn.Name = f.Text
+			e.fn.Name = f.Text
 		}
-		tc := chatChunkToolCall{Index: idx, Function: fn}
+		e.toolOne[0] = chatChunkToolCall{Index: idx, Function: &e.fn}
+		tc := &e.toolOne[0]
 		if f.ToolCallID != "" {
 			tc.ID = f.ToolCallID
 			tc.Type = "function"
 		}
-		return e.marshalChunk(chatChunkDelta{ToolCalls: []chatChunkToolCall{tc}}, nil)
+		return e.marshalChunk(chatChunkDelta{ToolCalls: e.toolOne[:1]}, nil)
 	case stream.FrameUsage:
 		if f.Usage != nil {
 			e.usage = f.Usage
@@ -692,19 +731,35 @@ func (e *ChunkEncoder) callIndexFor(toolCallID string) int {
 }
 
 // marshalChunk 组一帧 chunk 并序列化成 SSE data 行。
+// 装配走编码器复用暂存（chunk/choices），序列化直写 sink（⛔ 不经中间 []byte）。
 func (e *ChunkEncoder) marshalChunk(delta chatChunkDelta, finish *string) ([]byte, error) {
-	chunk := chatChunkOut{
+	e.chunk = chatChunkOut{
 		ID:      e.id,
 		Object:  "chat.completion.chunk",
 		Created: e.created,
 		Model:   e.model,
-		Choices: []chatChunkChoice{{
-			Index:        0,
-			Delta:        delta,
-			FinishReason: finish,
-		}},
+		Choices: e.choices[:1],
 	}
-	return sseData(chunk)
+	e.chunk.Choices[0] = chatChunkChoice{
+		Index:        0,
+		Delta:        delta,
+		FinishReason: finish,
+	}
+	return e.marshalSSE(&e.chunk)
+}
+
+// marshalSSE 把 chunk 对象序列化成一条 SSE data 行（`data: ` + JSON + 结尾空行）。
+// Encode 的输出自带一个 \n，补一个即 SSE 事件空行；返回值是暂存的独立拷贝
+// （保留「调用方可持有返回值」的既有契约，⛔ 不返回 sink 别名）。
+func (e *ChunkEncoder) marshalSSE(v any) ([]byte, error) {
+	e.sink.reset("data: ")
+	if err := e.jenc.Encode(v); err != nil {
+		return nil, fmt.Errorf("chat: chunk 序列化失败: %w", err)
+	}
+	e.sink.b = append(e.sink.b, '\n')
+	out := make([]byte, len(e.sink.b))
+	copy(out, e.sink.b)
+	return out, nil
 }
 
 // Finish 收口：终止帧（finish_reason 非 null + x_gateway.degradations[]）
@@ -735,7 +790,7 @@ func (e *ChunkEncoder) Finish() ([]byte, error) {
 	if len(e.degradations) > 0 {
 		term.XGateway = &xGatewayOut{Degradations: e.degradations}
 	}
-	out, err := sseData(term)
+	out, err := e.marshalSSE(&term)
 	if err != nil {
 		return nil, err
 	}
@@ -748,26 +803,13 @@ func (e *ChunkEncoder) Finish() ([]byte, error) {
 			Choices: []chatChunkChoice{},
 			Usage:   usageOutFrom(e.usage),
 		}
-		b, err := sseData(usageChunk)
+		b, err := e.marshalSSE(&usageChunk)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, b...)
 	}
 	out = append(out, []byte("data: [DONE]\n\n")...)
-	return out, nil
-}
-
-// sseData 把对象序列化成一条 SSE data 行（含结尾空行）。
-func sseData(v any) ([]byte, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("chat: chunk 序列化失败: %w", err)
-	}
-	out := make([]byte, 0, len(b)+8)
-	out = append(out, "data: "...)
-	out = append(out, b...)
-	out = append(out, '\n', '\n')
 	return out, nil
 }
 

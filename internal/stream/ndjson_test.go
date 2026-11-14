@@ -81,3 +81,84 @@ func TestNDJSONScanner_EmptyStream(t *testing.T) {
 		t.Errorf("空流应零行，实得 %q", lines)
 	}
 }
+
+// ---- 微基准（流式转发热路径：NDJSON 扫描）----
+
+// benchNDJSONStream 构造 Ollama 形状 NDJSON 流：n 行 message 增量 + 末行 done:true。
+func benchNDJSONStream(n int) string {
+	const line = `{"model":"llama3.1","created_at":"2026-11-14T10:00:00.000Z","message":{"role":"assistant","content":"你好，世界"},"done":false}` + "\n"
+	var b strings.Builder
+	b.Grow(n * (len(line) + 8))
+	for i := 0; i < n; i++ {
+		b.WriteString(line)
+	}
+	b.WriteString(`{"model":"llama3.1","created_at":"2026-11-14T10:00:01.000Z","done":true,"done_reason":"stop"}` + "\n")
+	return b.String()
+}
+
+// benchNDJSONBigLineStream 构造大行流（工具参数 / 长文本单行 JSON，考验扫描器
+// 缓冲增长路径）：20 行、每行约 60KB。
+func benchNDJSONBigLineStream(n int) string {
+	var b strings.Builder
+	b.Grow(n * 61000)
+	for i := 0; i < n; i++ {
+		b.WriteString(`{"model":"llama3.1","message":{"role":"assistant","content":"`)
+		for j := 0; j < 1000; j++ {
+			b.WriteString("0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz")
+		}
+		b.WriteString(`"},"done":false}` + "\n")
+	}
+	return b.String()
+}
+
+// BenchmarkNDJSONScanner 扫描 NDJSON 大流（op = 构造扫描器 + 扫完整条流 + 归还缓冲（生产生命周期等价）。
+func BenchmarkNDJSONScanner(b *testing.B) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"lines_1000", benchNDJSONStream(1000)},
+		{"big_lines_20", benchNDJSONBigLineStream(20)},
+	}
+	var r benchReader
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.SetBytes(int64(len(c.payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r.Reset(c.payload)
+				s := NewNDJSONScanner(&r)
+				total := 0
+				for s.Scan() {
+					total += len(s.Line())
+				}
+				if err := s.Err(); err != nil {
+					b.Fatalf("扫描报错: %v", err)
+				}
+				s.Release() // 生产生命周期：流收口即归还（httpstream.go close 路径）
+				if total == 0 {
+					b.Fatal("空扫描（基准失真）")
+				}
+			}
+		})
+	}
+}
+
+// ---- 缓冲池化与 Release 失效口径钉子（W-optA 流式热路径优化）----
+
+// TestNDJSONScanner_ReleaseIdempotent 钉住 Release 幂等（⛔ 不双 Put）+
+// Release 后再 Scan 返回 false（EOF 惰性口径，Line 的失效约定见其 docstring）。
+func TestNDJSONScanner_ReleaseIdempotent(t *testing.T) {
+	n := NewNDJSONScanner(strings.NewReader("{\"a\":1}\n"))
+	for n.Scan() {
+	}
+	n.Release()
+	n.Release() // 幂等：第二次是 no-op
+	if n.Scan() {
+		t.Error("Release 后 Scan 应返回 false")
+	}
+	if err := n.Err(); err != nil {
+		t.Errorf("EOF 后 Err 应为 nil，实得 %v", err)
+	}
+}

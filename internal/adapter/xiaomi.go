@@ -321,8 +321,9 @@ func (d *xiaomiChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, boo
 		}
 		return nil, true, nil
 	}
-	var c openai.ChatCompletionChunk
-	if err := json.Unmarshal([]byte(data), &c); err != nil {
+	// 两段式按需解码（chatchunk.go：轻量严格解码 ⇒ 异型帧 typed 兜底，帧语义零变化）。
+	c, ok := decodeChatChunk(data)
+	if !ok {
 		return nil, false, nil // 非 JSON 帧（keep-alive 等）容忍跳过（3.7 流式容错）
 	}
 	var frames []stream.Frame
@@ -331,12 +332,8 @@ func (d *xiaomiChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, boo
 		if ch.Delta.Content != "" {
 			frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: ch.Delta.Content})
 		}
-		var dq struct {
-			ReasoningContent string `json:"reasoning_content"`
-		}
-		_ = json.Unmarshal([]byte(ch.Delta.RawJSON()), &dq) // 扩展字段从原始 delta JSON 取
-		if dq.ReasoningContent != "" {
-			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: dq.ReasoningContent})
+		if ch.Delta.ReasoningContent != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: ch.Delta.ReasoningContent})
 		}
 		for _, tc := range ch.Delta.ToolCalls {
 			frames = append(frames, stream.Frame{
@@ -367,7 +364,7 @@ func (d *xiaomiChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, boo
 
 // toolCallID 取工具调用 id：chunk 的 id 只在首块出现，后续块按 index 对齐（⛔ 不让参数帧断链）；
 // 全程无 id（畸形上游）⇒ 合成稳定的 per-index 占位 id。
-func (d *xiaomiChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoiceDeltaToolCall) string {
+func (d *xiaomiChatStreamDecoder) toolCallID(tc chatChunkToolCall) string {
 	if tc.ID != "" {
 		d.toolIDs[tc.Index] = tc.ID
 		return tc.ID
@@ -380,14 +377,14 @@ func (d *xiaomiChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoice
 	return id
 }
 
-// usageOf 取 chunk 的 usage 原文（MiMo 命中在二级的字段原样，⛔ 不经 SDK 类型重整）：
+// usageOf 取 chunk 的 usage 原文（MiMo 命中在二级的字段原样，⛔ 不经类型重整）：
 // usage 为 null 或缺键 ⇒ 不发 usage 帧。
-func (d *xiaomiChatStreamDecoder) usageOf(c openai.ChatCompletionChunk) *core.Usage {
-	raw := c.JSON.Usage.Raw()
-	if raw == "" || raw == "null" {
+func (d *xiaomiChatStreamDecoder) usageOf(c chatChunk) *core.Usage {
+	raw := chunkUsageRaw(c.Usage)
+	if raw == nil {
 		return nil
 	}
-	return d.usageFn(json.RawMessage(raw))
+	return d.usageFn(raw)
 }
 
 // StreamStart：强制 stream=true ⇒ 真实 HTTP ⇒ chat chunk SSE 解码。

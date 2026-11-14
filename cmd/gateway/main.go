@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"regexp"
@@ -54,6 +56,7 @@ type options struct {
 
 	adminListenAddr string
 	allowLoopback   bool
+	pprofListen     string
 
 	cancelGrace           time.Duration
 	cancelGraceByProvider map[string]time.Duration
@@ -133,6 +136,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.BoolVar(&opts.allowLoopback, "allow-loopback", false, "出网校验放行环回地址（本地 Ollama 等，统一 SDD 8.2）")
 	fs.BoolVar(&opts.allowLoopback, "L", false, "同 --allow-loopback")
 
+	fs.StringVar(&opts.pprofListen, "pprof-listen", "", "pprof 排障端点监听地址（默认关闭；只绑环回 IP，⛔ 不绑公网）")
+	fs.StringVar(&opts.pprofListen, "p", "", "同 --pprof-listen")
+
 	fs.DurationVar(&opts.cancelGrace, "cancel-grace", 0, "延迟取消窗口（默认 0 = 立即取消，统一 SDD 3.7）")
 	fs.DurationVar(&opts.cancelGrace, "g", 0, "同 --cancel-grace")
 	fs.Var((*providerGraceFlag)(&opts.cancelGraceByProvider), "cancel-grace-provider", "按 provider 覆盖延迟窗口（provider=时长，可重复）")
@@ -210,7 +216,14 @@ func run(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, version.Version)
 		return 0
 	}
-	logger := slog.Default()
+	// 日志批量异步落盘（PERF-PROFILE 建议 2：span 日志同步 write 占 CPU 16–18%）：
+	// 格式仍是默认 TextHandler（内容/字段语义不变），出口经 BatchHandler 有界队列 +
+	// 后台批量 flush（BatchWriter 合并写）；defer Shutdown 收口排空 + flush（覆盖所有返回
+	// 路径），溢出显式丢弃计数（⛔ 不静默丢，见 internal/telemetry/batch.go）。
+	logBuf := telemetry.NewBatchWriter(os.Stderr, 0)
+	logHandler := telemetry.NewBatchHandler(slog.NewTextHandler(logBuf, nil), logBuf, telemetry.BatchOptions{})
+	defer logHandler.Shutdown() // 收口 flush；错误经 stderr 已无处可报，进程退出语义
+	logger := slog.New(logHandler)
 
 	reg, err := registry.Load(opts.configPath)
 	if err != nil {
@@ -311,6 +324,24 @@ func run(args []string, stdout io.Writer) int {
 		}()
 	}
 
+	// pprof 排障端点（默认关闭；显式 -pprof-listen 才起，只绑环回，⛔ 不绑公网 ——
+	// pprof 无鉴权，暴露面必须由监听地址收死）。
+	var pprofSrv *http.Server
+	if opts.pprofListen != "" {
+		if err := validatePprofAddr(opts.pprofListen); err != nil {
+			logger.Error("pprof 端点拒绝启动", "err", err)
+			_ = dataSrv.Close()
+			return 1
+		}
+		var err error
+		pprofSrv, _, err = startPprof(opts.pprofListen, logger)
+		if err != nil {
+			logger.Error("pprof 端点启动失败", "addr", opts.pprofListen, "err", err)
+			_ = dataSrv.Close()
+			return 1
+		}
+	}
+
 	// 优雅关闭：shutdown ⇒ 在途执行以 shutdown 原因立即收口（统一 SDD 6.6 要求 4）。
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -325,6 +356,9 @@ func run(args []string, stdout io.Writer) int {
 	srv.Shutdown()
 	if adminSrv != nil {
 		_ = adminSrv.Close()
+	}
+	if pprofSrv != nil {
+		_ = pprofSrv.Close()
 	}
 	_ = dataSrv.Close()
 	return 0
@@ -347,6 +381,55 @@ func detectPollFromBound(bound time.Duration) time.Duration {
 		bound = server.DefaultDetectBound
 	}
 	return bound / 4
+}
+
+// validatePprofAddr 校验 pprof 监听地址只绑环回（127.0.0.0/8、::1）：
+// pprof 端点无鉴权且暴露运行时内部（堆、goroutine、trace）⇒ 比管理面更严，
+// ⛔ 不绑内网 / 公网、⛔ 不用主机名（解析漂移不可复现，与管理面同口径）。
+func validatePprofAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("pprof 监听地址 %q 非法（须 host:port）: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("pprof 监听地址 %q 必须是环回 IP 字面量（⛔ 不绑全接口 / 主机名）", addr)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("pprof 监听地址 %q 非环回（⛔ 不绑内网 / 公网，pprof 无鉴权）", addr)
+	}
+	return nil
+}
+
+// newPprofMux 构造 pprof 端点路由：只挂 net/http/pprof 标准库处理器，
+// ⛔ 不动 http.DefaultServeMux（避免 import 副作用把 pprof 挂到数据面上）。
+// 覆盖 cmdline / profile（CPU）/ symbol / trace 与 Index 兜底的具名 profile
+// （heap / allocs / goroutine / block / mutex 等）。
+func newPprofMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
+}
+
+// startPprof 启动 pprof 端点（独立端口的 http.Server，随进程收口）。
+// 调用前须过 validatePprofAddr；测试用 127.0.0.1:0 拿随机端口（返回 Listener 供取实际地址）。
+func startPprof(addr string, logger *slog.Logger) (*http.Server, net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	srv := &http.Server{Addr: addr, Handler: newPprofMux()}
+	go func() {
+		logger.Info("pprof 端点启动", "addr", ln.Addr().String())
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("pprof 端点监听失败", "err", err)
+		}
+	}()
+	return srv, ln, nil
 }
 
 // main 薄壳：进程退出码由 run 决定。

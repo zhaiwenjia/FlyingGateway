@@ -4,7 +4,9 @@
 package chat
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -740,4 +742,212 @@ func TestParseChunk_InvalidJSON(t *testing.T) {
 	if _, err := ParseChunk(core.ProviderOpenAI, []byte(`{"choices":`)); err == nil {
 		t.Fatal("非法 JSON 应报错")
 	}
+}
+
+// ---- 微基准（编解码热路径；先测后改，基线 vs 优化对照）----
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/codec/chat/ -bench=. -benchmem
+
+// benchChatReqSmall 是两轮短对话请求体（无 tools）。
+var benchChatReqSmall = []byte(`{"model":"deepseek-flash","messages":[{"role":"system","content":"你是助手"},{"role":"user","content":"你好，介绍一下北京"}],"temperature":0.7,"stream":false}`)
+
+// benchChatReqTools 是多轮 + 工具声明 + 工具调用回传的典型请求体。
+var benchChatReqTools = []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"system","content":"你是助手"},{"role":"user","content":"北京今天天气，顺带查上海"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}},{"id":"call_2","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"上海\"}"}}]},{"role":"tool","tool_call_id":"call_1","name":"get_weather","content":"晴 25°C"},{"role":"tool","tool_call_id":"call_2","name":"get_weather","content":"多云 22°C"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"查询城市天气","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":"auto","stream":true,"reasoning_effort":"medium"}`)
+
+// benchChatChunkDelta / benchChatChunkUsage 是上游 chunk 的两种典型形态。
+var (
+	benchChatChunkDelta = []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"deepseek-flash","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`)
+	benchChatChunkUsage = []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"deepseek-flash","choices":[],"usage":{"prompt_tokens":309,"completion_tokens":118,"total_tokens":427,"prompt_tokens_details":{"cached_tokens":53},"completion_tokens_details":{"reasoning_tokens":53}}}`)
+)
+
+// BenchmarkDecodeRequest 测入站请求解码（每请求必经一次）。
+func BenchmarkDecodeRequest(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		body []byte
+	}{
+		{"small", benchChatReqSmall},
+		{"tools", benchChatReqTools},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := DecodeRequest(c.body); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// benchChatResponse 是出站编码的典型响应（单条 message + 工具调用 + usage）。
+func benchChatResponse() *core.Response {
+	return &core.Response{
+		ID:           "chatcmpl-bench",
+		Model:        "deepseek-flash",
+		FinishReason: core.FinishToolCalls,
+		OutputItems: []core.OutputItem{
+			{Type: "message", Role: "assistant", Content: []core.ContentPart{{Type: "text", Text: "北京今天晴，25°C；上海多云，22°C。"}}},
+			{Type: "function_call", ID: "call_1", CallID: "call_1", Name: "get_weather", Arguments: `{"city":"北京"}`},
+		},
+		Usage: &core.Usage{
+			InputTokens: 309, CacheReadTokens: 53, InputTokensUncached: 256,
+			OutputTokens: 118, ReasoningTokens: 53, TotalTokens: 427,
+		},
+	}
+}
+
+// BenchmarkEncodeResponse 测出站响应体序列化。
+func BenchmarkEncodeResponse(b *testing.B) {
+	resp := benchChatResponse()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := EncodeResponse(resp); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkChunkEncoderEncode 测流式逐帧编码（一帧一次调用；N 帧共享一个编码器，
+// 编码器构造属每流一次、不计入逐帧成本）。
+func BenchmarkChunkEncoderEncode(b *testing.B) {
+	enc := NewChunkEncoder("deepseek-flash")
+	frame := stream.Frame{Kind: stream.FrameTextDelta, Text: "增量文本"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := enc.Encode(frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkParseChunk 测上游 chunk 解码（流式每帧必经）。
+func BenchmarkParseChunk(b *testing.B) {
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"delta", benchChatChunkDelta},
+		{"usage", benchChatChunkUsage},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := ParseChunk(core.ProviderDeepSeek, c.data); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// ---- 取舍数据：整体 Unmarshal vs json.Decoder.Token 流式按需读（L5 决策数据）----
+// 同一输入（benchChatReqTools）只摘 model / stream 两个字段，三种做法对照；
+// 本组基准只提供取舍数据，⛔ 不据此改生产代码（DecodeRequest 需要全字段）。
+
+// pickViaMiniStruct 整体 Unmarshal 进只含目标字段的结构体（未知字段跳过）。
+func pickViaMiniStruct(body []byte) (string, bool, error) {
+	var v struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return "", false, err
+	}
+	return v.Model, v.Stream, nil
+}
+
+// skipValue 用 Token 流跳过一个任意 JSON 值（不落任何目标字段的字节）。
+func skipValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	d, ok := tok.(json.Delim)
+	if !ok || (d != '{' && d != '[') {
+		return nil // 标量已消费
+	}
+	for dec.More() {
+		if d == '{' {
+			if _, err := dec.Token(); err != nil { // 对象 key
+				return err
+			}
+		}
+		if err := skipValue(dec); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token() // 闭合定界符
+	return err
+}
+
+// pickViaDecoderToken 用 json.Decoder.Token 流式扫描，只解码 model / stream。
+func pickViaDecoderToken(body []byte) (string, bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return "", false, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return "", false, fmt.Errorf("非对象")
+	}
+	var model string
+	var streamFlag bool
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return "", false, err
+		}
+		k, _ := key.(string)
+		switch k {
+		case "model":
+			if err := dec.Decode(&model); err != nil {
+				return "", false, err
+			}
+		case "stream":
+			if err := dec.Decode(&streamFlag); err != nil {
+				return "", false, err
+			}
+		default:
+			if err := skipValue(dec); err != nil {
+				return "", false, err
+			}
+		}
+	}
+	return model, streamFlag, nil
+}
+
+// BenchmarkPickFields 对照三种按需取字段做法（数据用途，见上）。
+func BenchmarkPickFields(b *testing.B) {
+	// 正确性自证（规则 22：断言观测量必须是会变的量）：三种做法结果一致才可比。
+	m1, s1, err := pickViaMiniStruct(benchChatReqTools)
+	m2, s2, err2 := pickViaDecoderToken(benchChatReqTools)
+	if err != nil || err2 != nil || m1 != "gpt-5.6-sol" || !s1 || m1 != m2 || s1 != s2 {
+		b.Fatalf("按需取字段对照实现不一致: (%q,%v,%v) vs (%q,%v,%v)", m1, s1, err, m2, s2, err2)
+	}
+	b.Run("unmarshal-full-struct", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := DecodeRequest(benchChatReqTools); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("unmarshal-mini-struct", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := pickViaMiniStruct(benchChatReqTools); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decoder-token", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, _, err := pickViaDecoderToken(benchChatReqTools); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
