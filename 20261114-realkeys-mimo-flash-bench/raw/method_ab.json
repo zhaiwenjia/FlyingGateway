@@ -1,0 +1,285 @@
+{
+ "ts": "2026-11-14 17:49:09",
+ "results": {
+  "Qwen": {
+   "model": "qwen3.8-flash",
+   "chat": {
+    "basic": {
+     "ok": "好的，说定了！🤝\n\n有什么需要我帮忙的，随时告诉我。",
+     "usage_ok": true,
+     "lat": 3.78
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 1.04
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_len": 98,
+     "lat": 1.98
+    },
+    "stream": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 6.35
+    }
+   },
+   "responses": {
+    "basic": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 4.78
+    },
+    "tools": {
+     "ok": false,
+     "name_ok": false,
+     "lat": 2.36
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_items": 1,
+     "lat": 2.42
+    },
+    "stream": {
+     "ok": false,
+     "usage_ok": true,
+     "lat": 3.1
+    }
+   },
+   "score_chat": {
+    "compat": 4,
+    "complete": 8
+   },
+   "score_responses": {
+    "compat": 2,
+    "complete": 5
+   },
+   "verdict": "chat"
+  },
+  "Zhipu": {
+   "model": "glm-5.3-flash",
+   "chat": {
+    "basic": {
+     "ok": "嗯，用户只发了两个字“说好”，这个表达很简短，可能需要结合具体场景理解。中文里“说好”可以指代多种含义：可能是确认约定的口语（比如“咱们说好了”），也可能是疑问句的开头（“说好的……呢？”），甚至带点吐槽或调侃的语气（比如“说好的福利呢”）。\n\n用户没有提供上下文，大概率是日常闲聊中的片段。考虑到中文社交场景里这类短句常出现在情绪表达中，或许ta想吐槽某件事没按约定执行？也可能是想开启某个话题但没说完。也有极小概率是输入错误，比如“说好话”漏字了。\n\n回复策略上，既要覆盖常见理解方向，又不能显得啰嗦。用开放式提问最稳妥——既给用户解释空间，又避免预设错误方向。第一句直接点明多义性，第二句用“比如”举例降低理解门槛，最后抛出",
+     "usage_ok": true,
+     "lat": 6.21
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 1.68
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_len": 485,
+     "lat": 3.97
+    },
+    "stream": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 6.77
+    }
+   },
+   "responses": {
+    "basic": {
+     "ok": false,
+     "usage_ok": false,
+     "lat": 0.1
+    },
+    "tools": {
+     "ok": false,
+     "name_ok": false,
+     "lat": 0.1
+    },
+    "reasoning": {
+     "ok": false,
+     "reasoning_items": 0,
+     "lat": 0.1
+    },
+    "stream": {
+     "ok": false,
+     "usage_ok": false,
+     "lat": 0.11
+    }
+   },
+   "score_chat": {
+    "compat": 4,
+    "complete": 8
+   },
+   "score_responses": {
+    "compat": 0,
+    "complete": 0
+   },
+   "verdict": "chat"
+  },
+  "DeepSeek": {
+   "model": "deepseek-flash",
+   "chat": {
+    "basic": {
+     "ok": "好。",
+     "usage_ok": true,
+     "lat": 2.1
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 1.12
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_len": 208,
+     "lat": 1.31
+    },
+    "stream": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 1.55
+    }
+   },
+   "responses": {
+    "basic": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 1.45
+    },
+    "tools": {
+     "ok": false,
+     "name_ok": false,
+     "lat": 2.3
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_items": 1,
+     "lat": 1.24
+    },
+    "stream": {
+     "ok": false,
+     "usage_ok": true,
+     "lat": 1.76
+    }
+   },
+   "score_chat": {
+    "compat": 4,
+    "complete": 8
+   },
+   "score_responses": {
+    "compat": 2,
+    "complete": 5
+   },
+   "verdict": "chat"
+  },
+  "Moonshot": {
+   "model": "kimi-k3.1-pro",
+   "chat": {
+    "basic": {
+     "ok": "用户发送了\"说好\"，这是一个非常简短的中文消息。让我思考一下这可能意味着什么：\n\n1. \"说好\"可能是\"说好\"两个字本身，意思是\"agreed\"或\"okay, it's a deal\"（说好了）\n2. 可能是打字不完整，用户想说什么但没说完，比如\"说好的...\"（你答应过的...）\n3. 可能是用户想让我\"说好\"——即说\"好\"这个字，或者想让我用好的方式说话\n4. 可能是对话的开始，用户随意发了个消息测试\n5. \"说好\"也可能是\"说好话\"的简写，或者是歌名《说好不哭》（周杰伦的歌）的一部分？用户可能想接歌词？\n6. 也可能用户想表达\"说好的呢\"——带点埋怨的语气\n\n由于这是对话的第一条消息，没有任何上下文，我无法确定用户的意图。最合理的做法是：\n- 友好地回应\n- 简短地询问用户想表达什么或需要什么帮助\n- ",
+     "usage_ok": true,
+     "lat": 5.45
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 2.93
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_len": 197,
+     "lat": 6.92
+    },
+    "stream": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 5.68
+    }
+   },
+   "responses": {
+    "basic": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 5.44
+    },
+    "tools": {
+     "ok": false,
+     "name_ok": false,
+     "lat": 0.24
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_items": 1,
+     "lat": 4.92
+    },
+    "stream": {
+     "ok": false,
+     "usage_ok": true,
+     "lat": 10.34
+    }
+   },
+   "score_chat": {
+    "compat": 4,
+    "complete": 8
+   },
+   "score_responses": {
+    "compat": 2,
+    "complete": 5
+   },
+   "verdict": "chat"
+  },
+  "MiMo": {
+   "model": "mimo-v2.6-flash",
+   "chat": {
+    "basic": {
+     "ok": "你好！请问有什么我可以帮你的吗？😊\n\n你的消息似乎不太完整——\"说好\"是想说什么呢？可以再详细告诉我吗？",
+     "usage_ok": true,
+     "lat": 3.8
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 2.42
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_len": 71,
+     "lat": 5.58
+    },
+    "stream": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 10.6
+    }
+   },
+   "responses": {
+    "basic": {
+     "ok": true,
+     "usage_ok": true,
+     "lat": 5.12
+    },
+    "tools": {
+     "ok": true,
+     "name_ok": true,
+     "lat": 3.55
+    },
+    "reasoning": {
+     "ok": true,
+     "reasoning_items": 1,
+     "lat": 4.93
+    },
+    "stream": {
+     "ok": false,
+     "usage_ok": true,
+     "lat": 6.7
+    }
+   },
+   "score_chat": {
+    "compat": 4,
+    "complete": 8
+   },
+   "score_responses": {
+    "compat": 3,
+    "complete": 7
+   },
+   "verdict": "chat"
+  }
+ }
+}

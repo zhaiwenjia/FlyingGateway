@@ -272,6 +272,8 @@ func (a *xiaomiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.
 type xiaomiChatStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
 	toolIDs map[int64]string // chunk tool_call.index → 调用 id（id 只在首块出现，后续块按 index 对齐）
+	// pendingDone 暂存 finish 状态（延后收口口径见 decodeOne 注释）。
+	pendingDone string
 }
 
 func (a *xiaomiAdapter) streamDecoder() *xiaomiChatStreamDecoder {
@@ -311,6 +313,12 @@ func (d *xiaomiChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, boo
 		return nil, false, nil
 	}
 	if data == "[DONE]" {
+		// [DONE] 处补收口：延后 Done 仍未发（无 usage 的流）⇒ 补发，⛔ 不丢终止帧。
+		if d.pendingDone != "" {
+			st := d.pendingDone
+			d.pendingDone = ""
+			return []stream.Frame{{Kind: stream.FrameDone, Status: st}}, true, nil
+		}
 		return nil, true, nil
 	}
 	var c openai.ChatCompletionChunk
@@ -337,17 +345,22 @@ func (d *xiaomiChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, boo
 			})
 		}
 		if ch.FinishReason != "" {
-			// 收口：末帧自动带完整 usage（无需 stream_options，4.3.10）⇒ usage 帧先于 done 帧；
-			// finish_reason 超集原值。
-			if u := d.usageOf(c); u != nil {
-				frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
-			}
-			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: ch.FinishReason})
-			return frames, true, nil
+			// ⚠️ 2026-11-14 真实样本实测修复：finish 帧不立即收口——
+			// 现象：MiMo 真实流的独立 usage 帧（choices:[] + usage）在 finish 帧之后、[DONE] 之前
+			//（mimo_stream_real.sse），finish 即收口会把它丢掉 ⇒ usage 缺失被置 Estimated 估算；
+			// 根因：文档说「末帧同帧带 usage」，真实 wire 是 finish(usage:null) ⇒ 独立 usage 帧两拍；
+			// 为什么不改回同帧假设：Kimi 又是同帧形态（kimi_stream_real.sse）⇒ 延后收口两形态通吃；
+			// 不修会怎样：usage 计量缺尾、成本审计对不上账。
+			d.pendingDone = ch.FinishReason
 		}
 	}
 	if u := d.usageOf(c); u != nil {
 		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
+		if d.pendingDone != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: d.pendingDone})
+			d.pendingDone = ""
+			return frames, true, nil
+		}
 	}
 	return frames, false, nil
 }

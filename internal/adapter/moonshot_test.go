@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -214,5 +215,49 @@ func TestMoonshotParseUsageRealSample(t *testing.T) {
 		u.InputTokensUncached != 9 || u.OutputTokens != 21 || u.TotalTokens != 40 {
 		t.Fatalf("归一 = In%d/Read%d/Write%d/Unc%d/Out%d/Total%d，期望 19/10/0/9/21/40（样本逐字）",
 			u.InputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
+	}
+}
+
+// TestMoonshotStreamRealCaptureChoiceLevelUsage 钉住 Moonshot 真实流 quirk（真捕获
+// testdata/real/kimi_stream_real.sse）：usage 放 choices[0].usage（⛔ 非顶层）且与 finish 同帧。
+// ⚠️ 2026-11-14 修复的 bug：只探顶层 usage ⇒ Kimi usage 恒丢。错误实现对照：删 usageOfP 兜底 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMoonshotStreamRealCapture -v
+func TestMoonshotStreamRealCaptureChoiceLevelUsage(t *testing.T) {
+	f, err := os.Open("testdata/real/kimi_stream_real.sse")
+	if err != nil {
+		t.Fatalf("打开真实样本失败: %v", err)
+	}
+	defer f.Close()
+	a := NewMoonshot(http.DefaultClient)
+	d := a.(*moonshotAdapter).streamDecoder()
+	sc := stream.NewSSEScanner(f)
+	var frames []stream.Frame
+	for sc.Scan() {
+		fs, done, err := d.decode(sc.Event())
+		if err != nil {
+			t.Fatalf("decode 出错: %v", err)
+		}
+		frames = append(frames, fs...)
+		if done {
+			break
+		}
+	}
+	ui, di := -1, -1
+	for i, fr := range frames {
+		if fr.Kind == stream.FrameUsage {
+			ui = i
+			if fr.Usage == nil || fr.Usage.InputTokens <= 0 {
+				t.Fatalf("usage 帧数值非法: %+v", fr.Usage)
+			}
+		}
+		if fr.Kind == stream.FrameDone {
+			di = i
+		}
+	}
+	if ui < 0 {
+		t.Fatal("真实样本未产出 usage 帧（choices[0].usage 兜底失效）")
+	}
+	if di < 0 || ui > di {
+		t.Fatalf("usage 帧(%d) 必须先于 Done 帧(%d)", ui, di)
 	}
 }

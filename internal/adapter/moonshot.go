@@ -285,6 +285,8 @@ func (a *moonshotAdapter) ParseResponse(res *core.Resolution, body []byte) (*cor
 type moonshotChatStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
 	toolIDs map[int64]string // chunk tool_call.index → 调用 id（id 只在首块出现，后续块按 index 对齐）
+	// pendingDone 暂存 finish 状态（延后收口口径见 decodeOne 注释）。
+	pendingDone string
 }
 
 func (a *moonshotAdapter) streamDecoder() *moonshotChatStreamDecoder {
@@ -324,6 +326,12 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 		return nil, false, nil
 	}
 	if data == "[DONE]" {
+		// [DONE] 处补收口：延后 Done 仍未发（无 usage 的流）⇒ 补发，⛔ 不丢终止帧。
+		if d.pendingDone != "" {
+			st := d.pendingDone
+			d.pendingDone = ""
+			return []stream.Frame{{Kind: stream.FrameDone, Status: st}}, true, nil
+		}
 		return nil, true, nil
 	}
 	var c openai.ChatCompletionChunk
@@ -350,16 +358,22 @@ func (d *moonshotChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, b
 			})
 		}
 		if ch.FinishReason != "" {
-			// 收口：usage（若有）先于 done 帧（末帧 usage 口径）；finish_reason 超集原值。
-			if u := d.usageOf(c); u != nil {
-				frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
-			}
-			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: ch.FinishReason})
-			return frames, true, nil
+			// ⚠️ 2026-11-14 真实样本实测修复：finish 帧不立即收口——
+			// 现象：MiMo 真实流的独立 usage 帧（choices:[] + usage）在 finish 帧之后、[DONE] 之前
+			//（mimo_stream_real.sse），finish 即收口会把它丢掉 ⇒ usage 缺失被置 Estimated 估算；
+			// 根因：文档说「末帧同帧带 usage」，真实 wire 是 finish(usage:null) ⇒ 独立 usage 帧两拍；
+			// 为什么不改回同帧假设：Kimi 又是同帧形态（kimi_stream_real.sse）⇒ 延后收口两形态通吃；
+			// 不修会怎样：usage 计量缺尾、成本审计对不上账。
+			d.pendingDone = ch.FinishReason
 		}
 	}
-	if u := d.usageOf(c); u != nil {
+	if u := d.usageOfP(payload, c); u != nil {
 		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
+		if d.pendingDone != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: d.pendingDone})
+			d.pendingDone = ""
+			return frames, true, nil
+		}
 	}
 	return frames, false, nil
 }
@@ -387,6 +401,27 @@ func (d *moonshotChatStreamDecoder) usageOf(c openai.ChatCompletionChunk) *core.
 		return nil
 	}
 	return d.usageFn(json.RawMessage(raw))
+}
+
+// usageOfP 取 usage 原文（Moonshot quirk 兜底）：顶层 usage 优先；⚠️ 2026-11-14 真实样本
+// （kimi_stream_real.sse）实测 usage 放 choices[0].usage（非顶层）⇒ 顶层缺键时从 choice
+// 原文兜底，⛔ 不经 SDK 类型重整（cache_write_tokens 等扩展字段逐字保留）。
+func (d *moonshotChatStreamDecoder) usageOfP(payload string, c openai.ChatCompletionChunk) *core.Usage {
+	if u := d.usageOf(c); u != nil {
+		return u
+	}
+	var probe struct {
+		Choices []struct {
+			Usage json.RawMessage `json:"usage"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &probe); err == nil && len(probe.Choices) > 0 {
+		raw := probe.Choices[0].Usage
+		if len(raw) > 0 && string(raw) != "null" {
+			return d.usageFn(raw)
+		}
+	}
+	return nil
 }
 
 // StreamStart：强制 stream=true ⇒ 真实 HTTP ⇒ chat chunk SSE 解码。

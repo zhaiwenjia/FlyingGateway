@@ -145,7 +145,9 @@ func ForShape(p core.Provider, s core.APIShape) (Adapter, error) {
 		}
 	case core.ProviderQwen:
 		switch s {
-		case core.APIShapeOpenAIResponses:
+		case core.APIShapeOpenAIChat, core.APIShapeOpenAIResponses:
+			// 兼容层出站 Chat Completions（A/B 实测裁定全部走 Chat）；登记键 OpenAIResponses 是
+			// 无端点路径信号的旧占位 ⇒ 映射到同一 chat 形适配器（⛔ 不静默换供应商，出站形状统一）。
 			return NewQwen(defaultClient), nil
 		case core.APIShapeQwenNative:
 			return NewQwenNative(defaultClient), nil
@@ -178,7 +180,8 @@ func ForShape(p core.Provider, s core.APIShape) (Adapter, error) {
 		fmt.Sprintf("供应商 %s 不支持出站形状 %s（形态清单见 adapter.ForShape）", p, s))}
 }
 
-// defaultShapeFor 返回 For() 的默认出站形状（各供应商的「实际出站形状」，统一 SDD 3.6 / 4.1）：
+// defaultShapeFor 返回 For() 的默认登记形状（统一 SDD 3.6 / 4.1；实际出站 wire 形状以各家
+// OutboundShape() 为准——OpenAI 兼容族登记键沿用 Responses，出站是 Chat Completions）：
 // OpenAI / Grok / DeepSeek / Kimi / 智谱 / Qwen 兼容层 / 小米 ⇒ Responses；
 // Claude ⇒ Messages；Gemini ⇒ 原生 generateContent；MiniMax ⇒ OpenAI 形（/v1/chat/completions，4.3.11）；
 // Ollama ⇒ 原生 /api/chat（⛔ 不走 Responses，4.3.6）。

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -272,5 +273,65 @@ func TestXiaomiParseUsageRealSample(t *testing.T) {
 	if u.InputTokens != 86 || u.CacheReadTokens != 0 || u.InputTokensUncached != 86 || u.OutputTokens != 98 || u.TotalTokens != 184 || u.ReasoningTokens != 66 {
 		t.Fatalf("音频归一 = In%d/Read%d/Unc%d/Out%d/Total%d/Reas%d，期望 86/0/86/98/184/66（样本逐字）",
 			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens, u.ReasoningTokens)
+	}
+}
+
+// TestXiaomiStreamRealCaptureUsageSplit 钉住真实流的 usage 两拍形态（真捕获
+// testdata/real/mimo_stream_real.sse）：finish 帧 usage:null ⇒ 独立 usage 帧 ⇒ [DONE]。
+// ⚠️ 2026-11-14 修复的 bug：finish 即收口会丢独立 usage 帧（真实样本实测根因）。
+// 错误实现对照：提前收口 ⇒ 无 Usage 帧或 Done 在 Usage 前 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestXiaomiStreamRealCapture -v
+func TestXiaomiStreamRealCaptureUsageSplit(t *testing.T) {
+	f, err := os.Open("testdata/real/mimo_stream_real.sse")
+	if err != nil {
+		t.Fatalf("打开真实样本失败: %v", err)
+	}
+	defer f.Close()
+	a := NewXiaomi(http.DefaultClient)
+	d := a.(*xiaomiAdapter).streamDecoder()
+	sc := stream.NewSSEScanner(f)
+	var frames []stream.Frame
+	for sc.Scan() {
+		fs, done, err := d.decode(sc.Event())
+		if err != nil {
+			t.Fatalf("decode 出错: %v", err)
+		}
+		frames = append(frames, fs...)
+		if done {
+			break
+		}
+	}
+	ui, di := -1, -1
+	for i, fr := range frames {
+		if fr.Kind == stream.FrameUsage {
+			ui = i
+			if fr.Usage == nil || fr.Usage.InputTokens <= 0 || fr.Usage.OutputTokens <= 0 {
+				t.Fatalf("usage 帧数值非法: %+v", fr.Usage)
+			}
+		}
+		if fr.Kind == stream.FrameDone {
+			di = i
+		}
+	}
+	if ui < 0 {
+		t.Fatal("真实样本未产出 usage 帧（独立 usage 帧被丢）")
+	}
+	if di < 0 || ui > di {
+		t.Fatalf("usage 帧(%d) 必须先于 Done 帧(%d)", ui, di)
+	}
+}
+
+// TestXiaomiDeferredDoneAtSentinel 钉住无 usage 流的 [DONE] 补收口（终止帧不丢）。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestXiaomiDeferredDoneAtSentinel -v
+func TestXiaomiDeferredDoneAtSentinel(t *testing.T) {
+	a := NewXiaomi(http.DefaultClient)
+	d := a.(*xiaomiAdapter).streamDecoder()
+	fs, done, _ := d.decode(stream.SSEEvent{Data: `{"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}`})
+	if done || len(fs) != 0 {
+		t.Fatalf("finish 帧不应终态（usage 可能在其后），实际 done=%v frames=%d", done, len(fs))
+	}
+	fs, done, _ = d.decode(stream.SSEEvent{Data: `[DONE]`})
+	if !done || len(fs) != 1 || fs[0].Kind != stream.FrameDone || fs[0].Status != "stop" {
+		t.Fatalf("[DONE] 补收口 = %+v done=%v，期望恰一帧 Done(stop)", fs, done)
 	}
 }

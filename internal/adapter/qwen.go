@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 14:29:38.485
+// 日期: 2026-11-14 17:55:21.719
 // 作者: Zhai Wenjia
 
 package adapter
@@ -6,16 +6,12 @@ package adapter
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
+	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/packages/ssestream"
-	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -26,11 +22,13 @@ import (
 
 // Qwen / DashScope 适配器（统一 SDD 4.3.7，两形态按 core.Resolution.Shape 选）：
 //
-// ① 兼容层（APIShapeOpenAIResponses）：POST {base}/responses；AuthScheme: Authorization + "Bearer "。
-//    请求构造 / 流式执行 / 响应解析经官方 SDK openai-go/v3（10.3：openai-go 服务 8 家
-//    OpenAI 兼容端点）；enable_thinking / enable_search 等 quirks 继续经 Extra 透传（4.3.7）。
-//    enable_thinking / enable_search 经 core.Request.Extra 透传（4.3.7 非标准参数）；
+// ① 兼容层（APIShapeOpenAIChat）：POST {base}/chat/completions；AuthScheme: Authorization + "Bearer "。
+//    出站走 Chat Completions（method_ab.json 五家 A/B 实测裁定全部走 Chat，Responses 法 Qwen 失分
+//    tools / stream）；请求构造 / 响应解析走 openai-go/v3 typed 结构（统一 SDD 3.6 / 10.3）。
+//    enable_thinking / enable_search 等 quirks 继续经 core.Request.Extra 透传（4.3.7 非标准参数）；
+//    流式带 stream_options.include_usage（Qwen chat 的 usage 在末帧）；
 //    usage 的 cache_creation_input_tokens 归 usage.Normalize（4.4.2 Qwen 兼容行）。
+//    previous_response_id：chat 形 wire 无此字段 ⇒ 按不支持处理（3.5：⛔ 不静默丢弃，显式报错）。
 //
 // ② 原生 text-generation（APIShapeQwenNative）：POST {base}/api/v1/services/aigc/text-generation/generation；
 //    ⚠️ 流式必须加头 X-DashScope-SSE: enable（3.6 坑 1）；帧格式 `data:{json}`（冒号后**无空格**）、
@@ -38,18 +36,17 @@ import (
 //    的 prompt_tokens / completion_tokens 不同，4.3.7）。
 //
 // ⚠️ API Key 与地域强绑定（北京 Key 调弗吉尼亚 endpoint 401）——base URL 由注册表决定，适配器只拼路径。
-// previous_response_id 支持 = true（3.5 表）。
 
 type qwenAdapter struct {
 	hc *http.Client
 }
 
-// NewQwen 构造 Qwen 兼容层适配器（Responses 形状）。
+// NewQwen 构造 Qwen 兼容层适配器（Chat Completions 形状）。
 func NewQwen(hc *http.Client) Adapter { return &qwenAdapter{hc: hc} }
 
 func (a *qwenAdapter) Provider() core.Provider          { return core.ProviderQwen }
-func (a *qwenAdapter) OutboundShape() OutboundShape     { return ShapeResponses }
-func (a *qwenAdapter) SupportsPreviousResponseID() bool { return true }
+func (a *qwenAdapter) OutboundShape() OutboundShape     { return ShapeChatCompletions }
+func (a *qwenAdapter) SupportsPreviousResponseID() bool { return false }
 
 // AuthScheme 按 4.1.1：Authorization: Bearer。
 func (a *qwenAdapter) AuthScheme() AuthScheme {
@@ -61,283 +58,174 @@ func (a *qwenAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderQwen, usageTreeShape(raw), raw)
 }
 
-// ---- 兼容层请求体（Responses 形状 + enable_thinking / enable_search，官方 SDK 构造）----
+// ---- 兼容层请求体（Chat 形状 + enable_thinking / enable_search，openai-go typed 构造）----
 
-// qwenCompatSDKClient 构造 openai-go 客户端（Tier 1：流式执行经 SDK 客户端；10.3：openai-go
-// 服务 Qwen 兼容端点，改 base_url 即可）。SDK 内部路径是 responses（出站 {base}/responses）；
-// 注入既有 *http.Client（凭据由 authTransport 在 RoundTrip 注入）、⛔ 不读环境变量密钥、
-// ⛔ SDK 自带重试不许生效（重试/降级由网关统一管，24）。
-func qwenCompatSDKClient(hc *http.Client, baseURL string) openai.Client {
-	return openai.NewClient(
-		option.WithBaseURL(baseURL),
-		option.WithHTTPClient(hc),
-		option.WithAPIKey(""),
-		option.WithMaxRetries(0),
-	)
-}
-
-// qwenCompatSDKMapErr 把 SDK 错误映射回 DetailError（与 streamRequest 的错误口径逐项对齐，7.1）。
-func qwenCompatSDKMapErr(err error) error {
-	var ae *openai.Error
-	if errors.As(err, &ae) {
-		var body []byte
-		var rid string
-		if ae.Response != nil {
-			if ae.Response.Body != nil {
-				body, _ = io.ReadAll(ae.Response.Body)
-			}
-			rid = ae.Response.Header.Get("X-Request-Id")
-		}
-		return &DetailError{Detail: gwerrors.FromUpstream(core.ProviderQwen, ae.StatusCode, body, rid)}
+// qwenChatMessages 映射 chat 形消息序列（角色分派与 reasoning_content 回放口径同 moonshot）。
+func qwenChatMessages(r *core.Request) []openai.ChatCompletionMessageParamUnion {
+	var out []openai.ChatCompletionMessageParamUnion
+	if r.Instructions != "" {
+		out = append(out, openai.ChatCompletionMessageParamUnion{
+			OfSystem: &openai.ChatCompletionSystemMessageParam{
+				Content: openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(r.Instructions)},
+			},
+		})
 	}
-	return &DetailError{Detail: gwerrors.FromTransportError(core.ProviderQwen, err, "")}
+	for _, m := range r.Messages {
+		out = append(out, qwenChatMessage(m))
+	}
+	return out
 }
 
-// qwenCompatSDKInput 把规范消息拆成 Responses input items（4.2.3，wire 与既有 qwenInputItems
-// 逐字段一致）；system 消息并入 instructions（既有口径）。
-// SDK typed 表达不了的两处既有 wire 用 SetExtraFields 补：① reasoning item 的 id 空时省略
-// （SDK 必发）；② assistant 消息带 input_image 部件时 content 整体补回（SDK 的 output message
-// content union 无图片部件）。
-func qwenCompatSDKInput(r *core.Request) (items responses.ResponseInputParam, instructions string) {
-	for _, m := range r.Messages {
-		if m.Role == "system" {
-			sys := contentText(m.Content)
-			if instructions == "" {
-				instructions = sys
-			} else {
-				instructions += "\n" + sys
-			}
-			continue
+// qwenChatMessage 映射单条规范消息（EncryptedContent 是 OpenAI 加密推理链（Responses 专属载体）
+// ⇒ chat 形无对应物，不发）。
+func qwenChatMessage(m core.Message) openai.ChatCompletionMessageParamUnion {
+	switch m.Role {
+	case "tool":
+		return openai.ChatCompletionMessageParamUnion{
+			OfTool: &openai.ChatCompletionToolMessageParam{
+				ToolCallID: m.ToolCallID,
+				Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
+			},
 		}
-		if m.Role == "tool" {
-			out := &responses.ResponseInputItemFunctionCallOutputParam{}
-			text := contentText(m.Content)
-			out.Output.OfString = param.NewOpt(text)
-			extras := map[string]any{}
-			if text == "" {
-				// 既有 wire 的 output 是 omitempty（空不发）；SDK 必发 ⇒ param.Omit 剔除。
-				extras["output"] = param.Omit
-			}
-			if m.ToolCallID != "" {
-				out.CallID = param.NewOpt(m.ToolCallID)
-			}
-			if len(extras) > 0 {
-				out.SetExtraFields(extras)
-			}
-			items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: out})
-			continue
-		}
-		if m.EncryptedContent != "" || m.ReasoningContent != "" {
-			it := &responses.ResponseReasoningItemParam{}
-			if m.EncryptedContent != "" {
-				it.EncryptedContent = param.NewOpt(m.EncryptedContent)
-			}
-			if m.ReasoningContent != "" {
-				it.Content = []responses.ResponseReasoningItemContentParam{{Text: m.ReasoningContent}}
-			}
-			// 既有 wire 的 id 是 omitempty（空不发）；SDK 的 id 必发 ⇒ param.Omit 剔除。
-			it.SetExtraFields(map[string]any{"id": param.Omit})
-			items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: it})
-		}
-		partType := "input_text"
-		if m.Role == "assistant" {
-			partType = "output_text"
-		}
-		var parts []qwenInputPart
-		for _, p := range m.Content {
-			switch {
-			case p.ImageURL != "":
-				parts = append(parts, qwenInputPart{Type: "input_image", ImageURL: p.ImageURL})
-			case p.Text != "":
-				parts = append(parts, qwenInputPart{Type: partType, Text: p.Text})
+	case "system", "developer":
+		if m.Role == "developer" {
+			return openai.ChatCompletionMessageParamUnion{
+				OfDeveloper: &openai.ChatCompletionDeveloperMessageParam{
+					Content: openai.ChatCompletionDeveloperMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
+				},
 			}
 		}
-		if len(parts) > 0 {
-			if m.Role == "assistant" {
-				om := &responses.ResponseOutputMessageParam{}
-				if hasImagePart(parts) {
-					// SDK 的 output message content union（output_text / refusal）无图片部件
-					// ⇒ content 整体按既有 wire 形补回（quirks 不许丢）。
-					om.SetExtraFields(map[string]any{"content": parts})
-				} else {
-					for _, p := range parts {
-						om.Content = append(om.Content, responses.ResponseOutputMessageContentUnionParam{
-							OfOutputText: &responses.ResponseOutputTextParam{Text: p.Text},
-						})
-					}
-				}
-				items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: om})
-			} else {
-				im := &responses.ResponseInputItemMessageParam{Type: "message", Role: m.Role}
-				for _, p := range parts {
-					switch p.Type {
-					case "input_image":
-						im.Content = append(im.Content, responses.ResponseInputContentUnionParam{
-							OfInputImage: &responses.ResponseInputImageParam{ImageURL: param.NewOpt(p.ImageURL)},
-						})
-					default:
-						im.Content = append(im.Content, responses.ResponseInputContentUnionParam{
-							OfInputText: &responses.ResponseInputTextParam{Text: p.Text},
-						})
-					}
-				}
-				items = append(items, responses.ResponseInputItemUnionParam{OfInputMessage: im})
-			}
+		return openai.ChatCompletionMessageParamUnion{
+			OfSystem: &openai.ChatCompletionSystemMessageParam{
+				Content: openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
+			},
+		}
+	case "assistant":
+		am := openai.ChatCompletionAssistantMessageParam{}
+		if text := contentText(m.Content); text != "" {
+			am.Content.OfString = param.NewOpt(text)
+		}
+		if m.ReasoningContent != "" {
+			// reasoning_content 是 Qwen 思考承载扩展名（逐字）⇒ SDK 类型无此字段，走 extras。
+			am.SetExtraFields(map[string]any{"reasoning_content": m.ReasoningContent})
 		}
 		for _, tc := range m.ToolCalls {
-			fc := &responses.ResponseFunctionToolCallParam{Arguments: tc.Arguments, Name: tc.Name}
 			id := tc.CallID
 			if id == "" {
 				id = tc.ID
 			}
-			fc.CallID = id
-			// 既有 wire 的 id / name / arguments 是 omitempty（空不发）；SDK 三者必发
-			// ⇒ 空值用 param.Omit 剔除。
-			extras := map[string]any{}
-			if tc.ID != "" {
-				fc.ID = param.NewOpt(tc.ID)
-			} else {
-				extras["id"] = param.Omit
-			}
-			if tc.Name == "" {
-				extras["name"] = param.Omit
-			}
-			if tc.Arguments == "" {
-				extras["arguments"] = param.Omit
-			}
-			if id == "" {
-				extras["call_id"] = param.Omit
-			}
-			if len(extras) > 0 {
-				fc.SetExtraFields(extras)
-			}
-			items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: fc})
+			am.ToolCalls = append(am.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: id,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name: tc.Name, Arguments: tc.Arguments,
+					},
+				},
+			})
 		}
+		return openai.ChatCompletionMessageParamUnion{OfAssistant: &am}
+	default:
+		um := openai.ChatCompletionUserMessageParam{}
+		var parts []openai.ChatCompletionContentPartUnionParam
+		for _, p := range m.Content {
+			switch {
+			case p.ImageURL != "":
+				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+					OfImageURL: &openai.ChatCompletionContentPartImageParam{
+						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{URL: p.ImageURL},
+					},
+				})
+			case p.Text != "":
+				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{Text: p.Text},
+				})
+			}
+		}
+		if len(parts) == 0 {
+			um.Content.OfString = param.NewOpt("")
+		} else if len(parts) == 1 && parts[0].OfText != nil {
+			um.Content.OfString = param.NewOpt(parts[0].OfText.Text)
+		} else {
+			um.Content.OfArrayOfContentParts = parts
+		}
+		return openai.ChatCompletionMessageParamUnion{OfUser: &um}
 	}
-	return items, instructions
 }
 
-// hasImagePart 判断部件序列是否含图片部件。
-func hasImagePart(parts []qwenInputPart) bool {
-	for _, p := range parts {
-		if p.Type == "input_image" {
-			return true
-		}
-	}
-	return false
-}
-
-// qwenInputPart 是 Responses input content part（消息拆解中间形，wire 逐字）。
-type qwenInputPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-}
-
-// qwenCompatSDKTools 映射工具声明（Responses 形是平铺 function tool：
-// {"type":"function","name","description","parameters"}，⛔ 非 Chat 形的 function 嵌套）。
-func qwenCompatSDKTools(r *core.Request) ([]responses.ToolUnionParam, error) {
-	var out []responses.ToolUnionParam
-	for _, t := range r.Tools {
-		fn := responses.FunctionToolParam{Name: t.Name}
-		if t.Description != "" {
-			fn.Description = param.NewOpt(t.Description)
-		}
-		if len(t.Parameters) > 0 {
-			var schema map[string]any
-			if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-				return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed",
-					"工具 "+t.Name+" 的 parameters 不是合法 JSON: "+err.Error())}
-			}
-			fn.Parameters = schema
-		}
-		out = append(out, responses.ToolUnionParam{OfFunction: &fn})
-	}
-	return out, nil
-}
-
-// qwenCompatSDKToolChoice 映射 tool_choice（语义同 toolChoiceResponses：auto / none / required /
-// 指定函数名；未知模式按 auto）。
-func qwenCompatSDKToolChoice(tc *core.ToolChoice) responses.ResponseNewParamsToolChoiceUnion {
+// qwenChatToolChoice 映射 tool_choice 的 chat 形态（auto / none / required / 指定函数名；
+// 语义与既有 Responses 形逐项一致，Qwen chat 支持 tool_choice=auto——与现状对齐）。
+func qwenChatToolChoice(tc *core.ToolChoice) openai.ChatCompletionToolChoiceOptionUnionParam {
+	var u openai.ChatCompletionToolChoiceOptionUnionParam
 	switch tc.Mode {
 	case "function":
 		if tc.Name != "" {
-			return responses.ResponseNewParamsToolChoiceUnion{
-				OfFunctionTool: &responses.ToolChoiceFunctionParam{Name: tc.Name},
+			u.OfFunctionToolChoice = &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Name},
 			}
+			return u
 		}
-	case "none", "required", "auto":
-		return responses.ResponseNewParamsToolChoiceUnion{
-			OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptions(tc.Mode)),
-		}
+		u.OfAuto = param.NewOpt("auto")
+	case "none":
+		u.OfAuto = param.NewOpt("none")
+	case "required":
+		u.OfAuto = param.NewOpt("required")
+	default:
+		u.OfAuto = param.NewOpt("auto")
 	}
-	return responses.ResponseNewParamsToolChoiceUnion{
-		OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptions("auto")),
-	}
+	return u
 }
 
-// qwenCompatParams 用 SDK typed 参数构造兼容层 /responses 请求（4.3.7）。
-// enable_thinking / enable_search 等非标准参数经 Extra 走 mergeExtraBody（quirks 不许丢），
-// ⛔ 不进 typed 参数。
-func qwenCompatParams(r *core.Request, res *core.Resolution) (responses.ResponseNewParams, error) {
-	var body responses.ResponseNewParams
-	if err := checkPreviousResponseID(true, r); err != nil {
-		return body, err
-	}
-	body.Model = shared.ResponsesModel(res.Model)
-	items, instructions := qwenCompatSDKInput(r)
-	body.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
-	merged := r.Instructions
-	if instructions != "" {
-		if merged == "" {
-			merged = instructions
-		} else {
-			merged += "\n" + instructions
+// qwenChatTools 映射工具声明（chat 形 function 对象；parameters 原文透传）。
+func qwenChatTools(r *core.Request) []openai.ChatCompletionToolUnionParam {
+	var out []openai.ChatCompletionToolUnionParam
+	for _, t := range r.Tools {
+		fd := shared.FunctionDefinitionParam{Name: t.Name}
+		if t.Description != "" {
+			fd.Description = param.NewOpt(t.Description)
 		}
+		if len(t.Parameters) > 0 {
+			fd.SetExtraFields(map[string]any{"parameters": json.RawMessage(t.Parameters)})
+		}
+		out = append(out, openai.ChatCompletionToolUnionParam{
+			OfFunction: &openai.ChatCompletionFunctionToolParam{Function: fd},
+		})
 	}
-	if merged != "" {
-		body.Instructions = param.NewOpt(merged)
-	}
-	if r.MaxOutputTokens > 0 {
-		body.MaxOutputTokens = param.NewOpt(int64(r.MaxOutputTokens))
-	}
-	if r.PromptCacheKey != "" {
-		body.PromptCacheKey = param.NewOpt(r.PromptCacheKey)
-	}
-	if r.PreviousResponseID != "" {
-		body.PreviousResponseID = param.NewOpt(r.PreviousResponseID)
-	}
-	tools, err := qwenCompatSDKTools(r)
-	if err != nil {
-		return body, err
-	}
-	body.Tools = tools
-	if r.ToolChoice != nil {
-		body.ToolChoice = qwenCompatSDKToolChoice(r.ToolChoice)
-	}
-	extras := map[string]any{}
-	if r.Stream {
-		extras["stream"] = true
-	}
-	if len(items) == 0 {
-		// 既有 wire：input 无 omitempty ⇒ 空输入发 `"input":null`（SDK omitzero 会整键省略）。
-		extras["input"] = nil
-	}
-	if len(extras) > 0 {
-		body.SetExtraFields(extras)
-	}
-	return body, nil
+	return out
 }
 
-// BuildRequest 构造兼容层 /responses 请求（SDK typed 参数构造序列化 Outbound.Body）。
+// BuildRequest 构造兼容层 /chat/completions 请求（chat 形普通字段：messages[] / max_tokens /
+// stream / stream_options.include_usage / tools / tool_choice；prompt_cache_key 若请求携带则
+// 带在 body，兼容层忽略无害（3.5））。
 func (a *qwenAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
-	body, err := qwenCompatParams(r, res)
-	if err != nil {
+	if err := checkPreviousResponseID(false, r); err != nil {
 		return nil, err
 	}
-	raw, err := body.MarshalJSON()
+	p := openai.ChatCompletionNewParams{
+		Model:    shared.ChatModel(res.Model),
+		Messages: qwenChatMessages(r),
+	}
+	if r.MaxOutputTokens > 0 {
+		p.MaxTokens = param.NewOpt(int64(r.MaxOutputTokens))
+	}
+	if r.PromptCacheKey != "" {
+		p.PromptCacheKey = param.NewOpt(r.PromptCacheKey)
+	}
+	if r.ToolChoice != nil {
+		p.ToolChoice = qwenChatToolChoice(r.ToolChoice)
+	}
+	p.Tools = qwenChatTools(r)
+	ex := map[string]any{}
+	if r.Stream {
+		// Qwen chat 的 usage 在末帧，需 stream_options.include_usage 打开（实测）。
+		ex["stream"] = true
+		ex["stream_options"] = map[string]any{"include_usage": true}
+	}
+	if len(ex) > 0 {
+		p.SetExtraFields(ex)
+	}
+	raw, err := marshalBody(p)
 	if err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed", err.Error())}
+		return nil, err
 	}
 	// enable_thinking / enable_search 经 Extra 透传（4.3.7）。
 	raw, err = mergeExtraBody(raw, r.Extra)
@@ -346,231 +234,196 @@ func (a *qwenAdapter) BuildRequest(ctx context.Context, r *core.Request, res *co
 	}
 	return &Outbound{
 		Method:  "POST",
-		URL:     joinURL(res.BaseURL, "/responses"),
+		URL:     joinURL(res.BaseURL, "/chat/completions"),
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    raw,
 	}, nil
 }
 
-// ---- 兼容层响应体（Responses 对象，SDK typed 解析）----
+// ---- 兼容层响应体（chat.completion；reasoning_content ⇒ 推理正文位）----
 
-// qwenCompatProbe 是 SDK typed 解析之外的 quirk 原始探测（responses.Response 不承载）：
-// status / output_text / finish_reason（兼容端点回落字段）/ output[].reasoning_content /
-// 原始 usage（vendor 字段须逐字进 usage.Normalize，⛔ 不经 SDK 类型往返丢字段）。
-type qwenCompatProbe struct {
-	Status       string          `json:"status"`
-	OutputText   string          `json:"output_text"`
-	FinishReason string          `json:"finish_reason"`
-	Usage        json.RawMessage `json:"usage"`
-	Output       []struct {
-		ReasoningContent string `json:"reasoning_content"`
-	} `json:"output"`
-}
-
-// ParseResponse 解析兼容层响应（Tier 1：SDK 响应类型解析 + quirk 原始探测，
-// usage 走既有归一）。解析口径与既有实现逐项一致。
+// ParseResponse 解析 chat.completion 响应：SDK typed 解析（openai.ChatCompletion，3.6）；
+// reasoning_content 是 Qwen 思考承载字段（4.3.7）⇒ 从 message 原始 JSON 取进推理正文位；
+// tool_calls 的函数名必须进 core.OutputItem.Name；finish_reason 超集原值。
 func (a *qwenAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var probe qwenCompatProbe
-	if err := json.Unmarshal(body, &probe); err != nil {
+	var c openai.ChatCompletion
+	if err := json.Unmarshal(body, &c); err != nil {
 		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
 	}
-	var resp responses.Response
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
-	}
-	out := &core.Response{ID: resp.ID, Model: string(resp.Model), Status: probe.Status, Text: probe.OutputText}
-	hasToolCall := false
-	var text string
-	for i, it := range resp.Output {
-		oi := core.OutputItem{Type: it.Type, ID: it.ID, Role: it.Role, EncryptedContent: it.EncryptedContent,
-			CallID: it.CallID, Name: it.Name, Arguments: it.Arguments.OfString}
-		if i < len(probe.Output) {
-			oi.ReasoningText = probe.Output[i].ReasoningContent
+	out := &core.Response{ID: c.ID, Model: c.Model, Status: core.StatusCompleted}
+	if len(c.Choices) > 0 {
+		ch := c.Choices[0]
+		out.FinishReason = ch.FinishReason
+		if out.FinishReason == "" {
+			out.FinishReason = core.FinishUnknown
 		}
-		for _, p := range it.Content {
-			if p.Text != "" {
-				oi.Content = append(oi.Content, core.ContentPart{Type: "text", Text: p.Text})
-				if it.Type == "message" {
-					text += p.Text
-				}
-			}
+		if out.FinishReason == core.FinishLength {
+			out.Status = core.StatusIncomplete
 		}
-		for _, s := range it.Summary {
-			oi.Summary = append(oi.Summary, core.SummaryPart{Type: string(s.Type), Text: s.Text})
+		var mq struct {
+			ReasoningContent string `json:"reasoning_content"`
 		}
-		if it.Type == "function_call" {
-			hasToolCall = true
+		_ = json.Unmarshal([]byte(ch.Message.RawJSON()), &mq) // RawJSON 是已解析过的 JSON，仅取扩展字段
+		oi := core.OutputItem{Type: "message", Role: "assistant", ReasoningText: mq.ReasoningContent}
+		if ch.Message.Content != "" {
+			oi.Content = []core.ContentPart{{Type: "text", Text: ch.Message.Content}}
 		}
 		out.OutputItems = append(out.OutputItems, oi)
+		out.Text = ch.Message.Content
+		for _, tc := range ch.Message.ToolCalls {
+			out.OutputItems = append(out.OutputItems, core.OutputItem{
+				Type: "function_call", ID: tc.ID, CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
+		}
+	} else {
+		out.FinishReason = core.FinishUnknown
 	}
-	if out.Text == "" {
-		out.Text = text
-	}
-	out.FinishReason = deriveResponsesFinish(probe.FinishReason, probe.Status, resp.IncompleteDetails.Reason, hasToolCall)
-	if len(probe.Usage) > 0 {
-		out.Usage = a.ParseUsage(probe.Usage)
+	if raw := c.JSON.Usage.Raw(); raw != "" && raw != "null" {
+		out.Usage = a.ParseUsage(json.RawMessage(raw))
 	}
 	return out, nil
 }
 
-// ---- 兼容层流式（Tier 1：SDK 客户端流式执行 + SDK 流事件 ⇒ stream.Frame）----
+// ---- 兼容层流式（chat.completion.chunk；usage 在末帧）----
 
-// qwenCompatEventProbe 是流式事件的 quirk 原始探测（SDK 流事件类型不承载）：
-// function_call_arguments.delta 的参数增量在 wire 上是 `partial_json`（SDK 类型按新口径
-// 只有 `delta` 字段，⛔ 取不到该值）；response.completed / incomplete 事件里 response.usage
-// 的原始 JSON（vendor 字段逐字进 usage.Normalize）。
-type qwenCompatEventProbe struct {
-	PartialJSON string `json:"partial_json"`
-	Response    struct {
-		Usage json.RawMessage `json:"usage"`
-	} `json:"response"`
-}
-
-// qwenCompatStreamDecoder 把 SDK 流事件（responses.ResponseStreamEventUnion）映射为内部帧。
-// 帧序列口径（⛔ 不变）：生命周期帧 / 工具补名帧 / 文本·推理·参数增量 / usage 前置 + done 收口。
-// ⚠️ 既有解码器在 data 无 type 时回落 SSE `event:` 行事件名；SDK 流事件只解 data
-// ⇒ 该回落不保留（见交付报告差异清单）。
-type qwenCompatStreamDecoder struct {
+// qwenChatStreamDecoder 是 Qwen 的 chat chunk 帧解码器（3.7：每家一个帧解码器）：
+// delta.content ⇒ 文本增量；delta.reasoning_content（Qwen 扩展名逐字）⇒ 推理增量；
+// delta.tool_calls ⇒ 工具帧（帧承载约定：Text 载函数名、ToolCallID 载调用 id、Arguments 载参数增量）；
+// finish_reason 超集原值收口（usage 若与 finish 同块，usage 帧先于 done 帧）。
+type qwenChatStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
-	toolIDs map[string]string
+	toolIDs map[int64]string // chunk tool_call.index → 调用 id（id 只在首块出现，后续块按 index 对齐）
+	// pendingDone 暂存 finish 状态（延后收口口径见 decodeOne 注释）。
+	pendingDone string
 }
 
-func (a *qwenAdapter) streamDecoder() *qwenCompatStreamDecoder {
-	return &qwenCompatStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[string]string{}}
+func (a *qwenAdapter) streamDecoder() *qwenChatStreamDecoder {
+	return &qwenChatStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[int64]string{}}
 }
 
-func (d *qwenCompatStreamDecoder) decode(e responses.ResponseStreamEventUnion) ([]stream.Frame, bool) {
-	var probe qwenCompatEventProbe
-	_ = json.Unmarshal([]byte(e.RawJSON()), &probe)
-	switch e.Type {
-	case "response.created", "response.in_progress", "response.queued":
-		return []stream.Frame{{Kind: stream.FrameLifecycle, Status: e.Type, Seq: e.SequenceNumber}}, false
-	case "response.output_item.added":
-		if e.Item.Type == "function_call" && e.ItemID != "" {
-			id := e.Item.CallID
-			if id == "" {
-				id = e.ItemID
-			}
-			d.toolIDs[e.ItemID] = id
-			// 补名帧：item.name 载工具函数名（arguments.delta 不再带名）⇒ 名字必须在此进帧；
-			// 帧承载约定：FrameToolCallArgsDelta 的 Text 载函数名。name 为空不发帧，保持原行为。
-			if e.Item.Name != "" {
-				return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Text: e.Item.Name, Seq: e.SequenceNumber}}, false
-			}
-		}
-		return nil, false
-	case "response.output_text.delta":
-		return []stream.Frame{{Kind: stream.FrameTextDelta, Text: e.Delta, Seq: e.SequenceNumber}}, false
-	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-		return []stream.Frame{{Kind: stream.FrameReasoningDelta, Reasoning: e.Delta, Seq: e.SequenceNumber}}, false
-	case "response.function_call_arguments.delta":
-		id := d.toolIDs[e.ItemID]
-		if id == "" {
-			id = e.ItemID
-		}
-		return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Arguments: probe.PartialJSON, Seq: e.SequenceNumber}}, false
-	case "response.completed", "response.incomplete":
-		status := core.StatusCompleted
-		if e.Type == "response.incomplete" {
-			status = core.StatusIncomplete
-		}
-		frames := []stream.Frame{{Kind: stream.FrameDone, Status: status, Seq: e.SequenceNumber}}
-		if len(probe.Response.Usage) > 0 {
-			frames = append([]stream.Frame{{Kind: stream.FrameUsage, Usage: d.usageFn(probe.Response.Usage), Seq: e.SequenceNumber}}, frames...)
-		}
-		return frames, true
-	case "response.failed":
-		return []stream.Frame{{Kind: stream.FrameError, Status: "response_failed", Text: "上游流式响应失败", Seq: e.SequenceNumber}}, true
-	default:
-		return nil, false
+func (d *qwenChatStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
+	data := strings.TrimSpace(ev.Data)
+	if data == "" {
+		return nil, false, nil
 	}
-}
-
-// qwenCompatStreamIter 是 SDK 流式帧迭代器（语义对齐 sseIter）。
-type qwenCompatStreamIter struct {
-	ctx     context.Context
-	st      *ssestream.Stream[responses.ResponseStreamEventUnion]
-	dec     *qwenCompatStreamDecoder
-	queue   []stream.Frame
-	cur     stream.Frame
-	err     error
-	stop    bool
-	closed  bool
-	seqAuto int64
-}
-
-func (it *qwenCompatStreamIter) Next() bool {
-	for len(it.queue) == 0 {
-		if it.stop {
-			it.close()
-			return false
-		}
-		if err := it.ctx.Err(); err != nil {
-			// ctx 取消 ⇒ 立即中断并关闭上游连接（3.7 取消语义；cancel_grace_period 默认 0）。
-			it.err = err
-			it.close()
-			return false
-		}
-		if !it.st.Next() {
-			if e := it.st.Err(); e != nil {
-				it.err = e
+	if !json.Valid([]byte(data)) && strings.Contains(data, "\n") {
+		// 紧凑样本分流：厂商文档流示例常是「一行一个 chunk、行间无空行」形，SSE 规范会把
+		// 多行 data 拼成一个负载 ⇒ 整负载非 JSON 时按行拆分逐行解，真实样本可直喂。
+		var frames []stream.Frame
+		for _, line := range strings.Split(data, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
 			}
-			it.close()
-			return false
-		}
-		frames, done := it.dec.decode(it.st.Current())
-		for i := range frames {
-			it.seqAuto++
-			if frames[i].Seq == 0 {
-				frames[i].Seq = it.seqAuto
+			fs, done, err := d.decodeOne(line)
+			frames = append(frames, fs...)
+			if err != nil || done {
+				return frames, done, err
 			}
 		}
-		it.queue = frames
-		it.stop = done
+		return frames, false, nil
 	}
-	it.cur = it.queue[0]
-	it.queue = it.queue[1:]
-	return true
+	return d.decodeOne(data)
 }
 
-// Frame 返回当前帧。
-func (it *qwenCompatStreamIter) Frame() stream.Frame { return it.cur }
-
-// Err 返回终态错误（nil 表示正常结束）。
-func (it *qwenCompatStreamIter) Err() error { return it.err }
-
-// close 关闭 SDK 流（连带关闭上游 body）；幂等。
-func (it *qwenCompatStreamIter) close() {
-	if !it.closed {
-		it.closed = true
-		_ = it.st.Close()
+// decodeOne 解码单个 chunk 负载（[DONE] 哨兵 / 非 JSON 帧容忍）。
+func (d *qwenChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, bool, error) {
+	data := strings.TrimSpace(payload)
+	if data == "" {
+		return nil, false, nil
 	}
+	if data == "[DONE]" {
+		// [DONE] 处补收口：延后 Done 仍未发（无 usage 的流）⇒ 补发，⛔ 不丢终止帧。
+		if d.pendingDone != "" {
+			st := d.pendingDone
+			d.pendingDone = ""
+			return []stream.Frame{{Kind: stream.FrameDone, Status: st}}, true, nil
+		}
+		return nil, true, nil
+	}
+	var c openai.ChatCompletionChunk
+	if err := json.Unmarshal([]byte(data), &c); err != nil {
+		return nil, false, nil // 非 JSON 帧（keep-alive / 文档省略标记等）容忍跳过（3.7 流式容错）
+	}
+	var frames []stream.Frame
+	if len(c.Choices) > 0 {
+		ch := c.Choices[0]
+		if ch.Delta.Content != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: ch.Delta.Content})
+		}
+		var dq struct {
+			ReasoningContent string `json:"reasoning_content"`
+		}
+		_ = json.Unmarshal([]byte(ch.Delta.RawJSON()), &dq) // 扩展字段从原始 delta JSON 取
+		if dq.ReasoningContent != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameReasoningDelta, Reasoning: dq.ReasoningContent})
+		}
+		for _, tc := range ch.Delta.ToolCalls {
+			frames = append(frames, stream.Frame{
+				Kind: stream.FrameToolCallArgsDelta, ToolCallID: d.toolCallID(tc),
+				Text: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
+		}
+		if ch.FinishReason != "" {
+			// ⚠️ 延后收口（与 moonshot / xiaomi 同口径）：finish 帧不立即收口——
+			// 现象：Qwen chat 真实样本的 usage 在末帧，finish(usage:null) ⇒ 独立 usage 帧 ⇒ [DONE]
+			// 两拍形态，finish 即收口会把独立 usage 帧丢掉 ⇒ usage 缺失被置 Estimated 估算；
+			// 根因：同帧带 usage 只是一种形态，真实 wire 是 finish(usage:null) ⇒ 独立 usage 帧；
+			// 为什么不按同帧假设收口：Kimi 又是同帧形态 ⇒ 延后收口两形态通吃；
+			// 不修会怎样：usage 计量缺尾、成本审计对不上账。
+			d.pendingDone = ch.FinishReason
+		}
+	}
+	if u := d.usageOf(c); u != nil {
+		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: u})
+		if d.pendingDone != "" {
+			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: d.pendingDone})
+			d.pendingDone = ""
+			return frames, true, nil
+		}
+	}
+	return frames, false, nil
 }
 
-// StreamStart（兼容层，Tier 1）：强制 stream=true ⇒ SDK 客户端流式执行 ⇒ SDK 流事件映射帧。
-// 请求体与 BuildRequest 的 Outbound.Body 同源（含 Extra quirks，经 SetJSON 原样发）。
+// toolCallID 取工具调用 id：chunk 的 id 只在首块出现，后续块按 index 对齐（⛔ 不让参数帧断链）；
+// 全程无 id（畸形上游）⇒ 合成稳定的 per-index 占位 id。
+func (d *qwenChatStreamDecoder) toolCallID(tc openai.ChatCompletionChunkChoiceDeltaToolCall) string {
+	if tc.ID != "" {
+		d.toolIDs[tc.Index] = tc.ID
+		return tc.ID
+	}
+	if id := d.toolIDs[tc.Index]; id != "" {
+		return id
+	}
+	id := "call_idx_" + strconv.FormatInt(tc.Index, 10)
+	d.toolIDs[tc.Index] = id
+	return id
+}
+
+// usageOf 取 chunk 的 usage 原文（Qwen 二级缓存字段原样，⛔ 不经 SDK 类型重整）：
+// usage 为 null 或缺键 ⇒ 不发 usage 帧。
+func (d *qwenChatStreamDecoder) usageOf(c openai.ChatCompletionChunk) *core.Usage {
+	raw := c.JSON.Usage.Raw()
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	return d.usageFn(json.RawMessage(raw))
+}
+
+// StreamStart（兼容层）：强制 stream=true ⇒ 真实 HTTP ⇒ chat chunk SSE 解码。
+// 请求体与 BuildRequest 的 Outbound.Body 同源（含 Extra quirks，经 mergeExtraBody 并入）。
 func (a *qwenAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
 	rc := *r
 	rc.Stream = true
-	params, err := qwenCompatParams(&rc, res)
+	out, err := a.BuildRequest(ctx, &rc, res)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := params.MarshalJSON()
-	if err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed", err.Error())}
-	}
-	raw, err = mergeExtraBody(raw, rc.Extra)
+	resp, err := streamRequest(ctx, a.hc, a.Provider(), out)
 	if err != nil {
 		return nil, err
 	}
-	param.SetJSON(raw, &params)
-	cl := qwenCompatSDKClient(a.hc, res.BaseURL)
-	st := cl.Responses.NewStreaming(ctx, params)
-	if err := st.Err(); err != nil {
-		return nil, qwenCompatSDKMapErr(err)
-	}
-	return &qwenCompatStreamIter{ctx: ctx, st: st, dec: a.streamDecoder()}, nil
+	return newSSEIter(ctx, resp.Body, a.streamDecoder().decode, nil), nil
 }
 
 // =====================================================================

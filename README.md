@@ -79,7 +79,40 @@ go test -race ./...              # 全量测试（含竞态检测）
 go run ./cmd/gateway             # 运行入口（待建）
 ```
 
-## 四、文档索引
+## 四、真实 API 实测与性能对比（2026-11-14）
+
+> 8 个真实 key 实测定性 → 5 家有效 key 过全功能矩阵（**50/50 PASS**）→ Chat vs Responses 方法 A/B（**五家全部 Chat 胜出，出站已统一 Chat Completions**）→ mimo-v2.6-flash 高并发压测对比 LiteLLM。逐项数据/脚本/复现见 [`20261114-realkeys-mimo-flash-bench/`](20261114-realkeys-mimo-flash-bench/README.md)。
+
+**key 状态**（8 个）：✅ 有效 5（Qwen / 智谱 / DeepSeek / Kimi / MiMo，各家费率最低模型实调 200）；❌ OpenAI（403 区域封锁）、MiniMax（鉴权拒绝）、火山（鉴权有效但未开通任何模型）。有效 key 存 `.env`（⛔ 不入库）。
+
+**方法 A/B（同电池 4 项：基础/工具/reasoning/流式）**：
+
+| 供应商 | Chat 法 | Responses 法 | 裁定 |
+|---|---|---|---|
+| Qwen | 4/4 | 2/4（tools、stream 丢） | **Chat** |
+| 智谱 | 4/4 | 0/4（无 /responses 端点） | **Chat** |
+| DeepSeek | 4/4 | 2/4 | **Chat** |
+| Kimi | 4/4 | 2/4 | **Chat** |
+| MiMo | 4/4 | 3/4（stream 丢） | **Chat** |
+
+**mimo-v2.6-flash 压测**（同负载，每档 2 轮取中位）：
+
+![压测总览](docs/images/20261114-bench-overview.png)
+
+![延迟分位对比](docs/images/20261114-bench-latency.png)
+
+| 指标 | 并发 1 | 并发 8 | 并发 32 |
+|---|---|---|---|
+| FlyingGateway P50/P99 (ms) | 1449 / 6296 | 2147 / 4700 | 2179 / 4403 |
+| LiteLLM P50/P99 (ms) | 1356 / 8805 | 1971 / 3224 | 2263 / 6696 |
+| FlyingGateway 吞吐 (req/s) | 0.52 | 3.03 | 6.03 |
+| LiteLLM 吞吐 (req/s) | 0.53 | 3.68 | 8.02 |
+
+**解读**：P50 双方 ±7% 内；P99 网关 2/3 档更优（尾部更稳）；吞吐中位 LiteLLM 高但**轮间方差大、主导因素是上游尾部/限流**（r3 交叉轮 c=32 网关 11.06 rps 反超 LiteLLM 5.64）。双方成功率持平（98–100%）。网关的差异化在**治理语义**（取消即停/重试与降级分账/token 级限流/usage 归一与费用计量），不在峰值吞吐。
+
+**实测驱动的修复**（真捕获样本钉死）：MiMo 流式 usage 两拍收口、Kimi `choices[0].usage` 非顶层探测、Grok/Qwen/MiMo 三处 usage 口径——详见测试报告第五节。
+
+## 五、文档索引
 
 | 文档 | 内容 |
 |---|---|
@@ -90,7 +123,7 @@ go run ./cmd/gateway             # 运行入口（待建）
 | [`docs/20261112-多供应商网关-Go实现设计.md`](docs/20261112-多供应商网关-Go实现设计.md) | Go 实现设计（统一格式、出站优先级链、取消语义、费用计量；结论已吸收进统一 SDD） |
 | [`docs/20261113-供应商模型费率表.md`](docs/20261113-供应商模型费率表.md) | 供应商模型费率表（2026-11-13 快照留档；**费用数据的唯一真源是统一 SDD 6.4 费率总表**） |
 
-## 五、协作
+## 六、协作
 
 本仓的协作规则（禁止 mock / 占位、证据与复核、git tag 版本机制、CI 口径、
 调研纪律、代码规模两档等）全在 [`AGENTS.md`](AGENTS.md) —— **那是唯一来源**。

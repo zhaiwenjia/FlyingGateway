@@ -49,3 +49,10 @@
   （文档流式示例为片段或未给逐帧）。已取得：Anthropic（真实捕获）、DeepSeek（官方完整示例）、
   Kimi/智谱（官方示例块，含省略标记）。
 - **Ollama `/v1` 兼容层 usage**：排障贴实测过 `/v1` 但未贴原始 usage JSON ⇒ 留空。
+
+## 追加（2026-11-14 第二批：真实流完整捕获，经网关测试轮补齐）
+
+| 文件 | 来源 | 真实性依据 | 关键事实 |
+|---|---|---|---|
+| `mimo_stream_real.sse` | MiMo 开放平台 API 实调录制（MIMO_API_KEY，mimo-v2.6-flash，stream=true） | 真机逐帧录制 | **finish 帧 `usage:null` ⇒ 独立 usage 帧 ⇒ [DONE]**（usage 两拍，文档「同帧」口径与真实 wire 不符） |
+| `kimi_stream_real.sse` | Moonshot 开放平台 API 实调录制（MOONSHOT_API_KEY，kimi-k3.1-pro，stream=true） | 真机逐帧录制 | **usage 在 `choices[0].usage`（非顶层）**且与 finish 同帧 |
