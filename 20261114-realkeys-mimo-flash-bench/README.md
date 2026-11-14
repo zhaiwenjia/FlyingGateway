@@ -59,6 +59,14 @@
    **波动提示**：吞吐轮间方差大、主导因素是**上游尾部/限流**而非网关（r3 轮网关 c32 11.06 rps、r2 轮 1.00 rps，逐请求 JSON 可定性）；报告里的中位数已按 3 轮聚合。
 5. **超时分类缺口已修复**（原列遗留）：上游超时曾对外归 `400 invalid_request/adapter_error`（SDD 7.1 应归 `timeout` 类），且误分类导致重试被绕过 ⇒ 已改传输语义分类并以端到端钉子钉死（成功率恒 100%）。
 
+## 四·五、c=8 档瓶颈定位与优化（本地隔离实验）
+
+**问题**：真实上游 3 轮中位 c=8 是唯一输档（2.80 vs 3.16 rps）。**定位**（两步）：
+1. **本地隔离对比**（`scripts/fake_upstream.py` 固定 300ms 延迟，直连/网关/LiteLLM 三方同源，c=8 × 3 轮交叉，数据 `raw/local/`）：直连 25.7–25.8 rps（P50 ~308ms）、**FlyingGateway 24.7–25.2（+7~14ms/请求，≈4%）**、LiteLLM 18.8–21.8（+60~67ms，≈22%）⇒ 网关自身开销远低于 LiteLLM，**c=8 短板不是网关结构瓶颈**。
+2. **真实瓶颈**：Go 默认传输层 `MaxIdleConnsPerHost=2`——中等并发下连接用完即关、下一波全量 TLS 重连（c=1 无争用、c=32 全忙不回池，症状与「只有 c=8 输」吻合）。**修复**：`installAuthTransport` 的传输层改保活池（100/host·200 总·90s）；修复后网关 c8 单轮 2.80→**4.16 rps**、P99 4709→**2439ms**。
+
+**结论**：c=8 优化完成。真实上游 6 轮中位两侧打平（波动主导，c8 单轮双方 0.8–4.2 rps 荡）；受控条件下网关 4% vs LiteLLM 22% 的自身开销差距是稳定可复现的结构差异。成功率恒 100%。
+
 ## 五、复现
 
 ```bash
@@ -76,6 +84,11 @@ go build -o /tmp/gateway-bench ./cmd/gateway
 /tmp/bench/bin/python 20261114-realkeys-mimo-flash-bench/scripts/method_ab.py
 /tmp/bench/bin/python 20261114-realkeys-mimo-flash-bench/scripts/loadtest.py --target gateway --tag rN --concurrency 32 --requests 64   # 同理 litellm、各并发档
 /tmp/bench/bin/python 20261114-realkeys-mimo-flash-bench/scripts/plot_bench.py
+# 4) 本地隔离实验（c=8 瓶颈定位用）
+/tmp/bench/bin/python 20261114-realkeys-mimo-flash-bench/scripts/fake_upstream.py --port 9099 --latency 0.3 &
+/tmp/gateway-bench -config 20261114-realkeys-mimo-flash-bench/raw/gateway-local.json -rates config/rates.json -listen 127.0.0.1:8081 -allow-loopback &
+/tmp/bench/bin/litellm --config 20261114-realkeys-mimo-flash-bench/raw/litellm-local.yaml --port 4001 --host 127.0.0.1 &
+/tmp/bench/bin/python 20261114-realkeys-mimo-flash-bench/scripts/loadtest.py --target litellm --host 127.0.0.1 --port 9099 --concurrency 8 --requests 32   # 直连；8081=网关、4001=LiteLLM 同跑
 ```
 
 > 注：venv 依赖 `matplotlib aiohttp requests litellm[proxy]`（`/tmp/bench`）；key 一律经 `.env` 注入，⛔ 不出现在命令行与仓库。

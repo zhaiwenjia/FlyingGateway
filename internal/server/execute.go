@@ -316,7 +316,20 @@ func installAuthTransport() {
 	installOnce.Do(func() {
 		base := http.DefaultClient.Transport
 		if base == nil {
-			base = http.DefaultTransport
+			// ⚠️ 2026-11-14 压测 c=8 档瓶颈修复：http.DefaultTransport 的
+			// MaxIdleConnsPerHost=2（Go 默认）——现象：c=8 档吞吐/延迟差于对照组
+			//（3 轮中位 2.80 vs 3.16 rps、P50 2017 vs 1683ms），c=1/c=32 反而正常；
+			// 根因：中等并发下连接用完即关（空闲池每 host 只留 2 条），下一波请求
+			// 全量 TLS 重连，握手开销专打中等并发（c=1 无争用、c=32 全忙不回池）；
+			// 为什么不改别处：池参数是传输层单点，改一处全体出站受益（SDK 客户端
+			// 注入的是同一个 *http.Client）；不修会怎样：并发吞吐随空闲池上限折损，
+			// 表现为「网关中并发不如直连」，且随上游 RTT 放大。
+			// 保活池按最大并发档（32）留足：每 host 空闲 100、总 200、超时 90s。
+			tr := http.DefaultTransport.(*http.Transport).Clone()
+			tr.MaxIdleConns = 200
+			tr.MaxIdleConnsPerHost = 100
+			tr.IdleConnTimeout = 90 * time.Second
+			base = tr
 		}
 		http.DefaultClient.Transport = &authTransport{base: base}
 	})
