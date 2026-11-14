@@ -235,12 +235,20 @@ func adapterFor(res core.Resolution) (adapter.Adapter, error) {
 }
 
 // adapterDetail 把适配器错误转成 ErrorDetail（含非 DetailError 的兜底）。
+// ⚠️ 2026-11-14 真实压测实测修复：兜底原先一律归 `invalid_request`（400 adapter_error）——
+// 现象：上游单请求卡满 60s（context deadline exceeded）对外吐 400，且因
+// `invalid_request` 不在可重试集（rate_limit/timeout/upstream_error）里，**重试被静默绕过**，
+// 该档成功率掉到 63/64；根因：传输类错误走了「请求不合法」的分类，可重试判定跟着错；
+// 为什么不这么修：可重试集/降级链都按分类分流（7.4），在重试处打补丁会掩盖分类错误；
+// 不修会怎样：任何上游尾部卡顿都直接穿透成客户端失败，成功率无法保证 100%。
+// 现按传输语义分类（7.1）：超时 ⇒ timeout（可重试）、取消 ⇒ cancelled（⛔ 不重试，7.5）、
+// 其余非 DetailError（连接失败 / 上游坏 JSON 等）⇒ upstream_error（可重试）。
 func adapterDetail(err error) *core.ErrorDetail {
 	var de *adapter.DetailError
 	if errors.As(err, &de) && de.Detail != nil {
 		return de.Detail
 	}
-	return gwerrors.New(core.ErrInvalidRequest, http.StatusBadRequest, "adapter_error", security.Redact(err.Error()))
+	return gwerrors.FromTransportError(core.ProviderUnknown, err, "")
 }
 
 // ---- 凭据注入（统一 SDD 8.1 / 8.4）----

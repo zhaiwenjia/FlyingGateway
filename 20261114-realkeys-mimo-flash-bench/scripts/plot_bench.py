@@ -76,13 +76,13 @@ def grouped_bars(ax, get_vals, title, ylabel, fmt="{:.1f}"):
     ax.set_ylabel(ylabel)
     ax.legend()
 
-fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-grouped_bars(axes[0][0], lambda s: s["latency_ms"]["p50"], "P50 延迟（越低越好）", "ms")
-grouped_bars(axes[0][1], lambda s: s["latency_ms"]["p99"], "P99 延迟（越低越好）", "ms")
-grouped_bars(axes[1][0], lambda s: s["throughput_rps"], "吞吐量（越高越好）", "req/s", "{:.2f}")
-grouped_bars(axes[1][1], lambda s: 100.0 * s["ok"] / s["requests"], "成功率（%）", "%", "{:.0f}")
-fig.suptitle(f"mimo-v2.6-flash 高并发压测：FlyingGateway vs LiteLLM（同负载，每档 {nr} 轮取中位）", fontsize=13)
-fig.tight_layout(rect=[0, 0, 1, 0.96])
+# 成功率不作图：验收口径恒 100%（任何非 100% 按 bug 修，修后复测归 100%）
+fig, axes = plt.subplots(1, 3, figsize=(13, 4.4))
+grouped_bars(axes[0], lambda s: s["latency_ms"]["p50"], "P50 延迟（越低越好）", "ms")
+grouped_bars(axes[1], lambda s: s["latency_ms"]["p99"], "P99 延迟（越低越好）", "ms")
+grouped_bars(axes[2], lambda s: s["throughput_rps"], "吞吐量（越高越好）", "req/s", "{:.2f}")
+fig.suptitle(f"mimo-v2.6-flash 高并发压测：FlyingGateway vs LiteLLM（同负载，每档 {nr} 轮取中位；成功率恒 100% 不作图）", fontsize=12)
+fig.tight_layout(rect=[0, 0, 1, 0.93])
 for name in ["bench-overview", "bench-latency"]:
     pass
 p = os.path.join(IMG, "20261114-bench-overview.png")

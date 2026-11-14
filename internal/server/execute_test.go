@@ -4,12 +4,20 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/zhaiwenjia/FlyingGateway/internal/core"
+	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 )
@@ -543,4 +551,74 @@ func splitBlocks(raw string) []string {
 		}
 	}
 	return out
+}
+
+// TestAdapterDetailTimeoutRetryable 钉住超时误分类修复（2026-11-14 真实压测实测）：
+// context deadline exceeded 必须归 timeout 类（可重试），⛔ 不得归 invalid_request
+// （否则可重试判定把它排除、重试被静默绕过，成功率掉 63/64）。
+// 错误实现对照：兜底一律 invalid_request ⇒ 本测试必红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/server/ -run TestAdapterDetailTimeoutRetryable -v
+func TestAdapterDetailTimeoutRetryable(t *testing.T) {
+	if d := adapterDetail(context.DeadlineExceeded); d.Category != core.ErrTimeout {
+		t.Fatalf("context.DeadlineExceeded 归类 = %s，期望 timeout（可重试）", d.Category)
+	}
+	if d := adapterDetail(fmt.Errorf("do request: %w", context.DeadlineExceeded)); d.Category != core.ErrTimeout {
+		t.Fatalf("包装后的超时归类 = %s，期望 timeout", d.Category)
+	}
+	if d := adapterDetail(context.Canceled); d.Category != core.ErrCancelled {
+		t.Fatalf("context.Canceled 归类 = %s，期望 cancelled（⛔ 不重试）", d.Category)
+	}
+}
+
+// TestTimeoutRetriedThenSucceeds 端到端钉住「成功率恒 100%」口径：上游首请求卡满超时、
+// 同端点重试成功 ⇒ 客户端拿到 200、上游恰好被打 2 次、RetryCount 计数分离。
+// 错误实现对照：超时不重试（误分类回归）⇒ 首试即失败、上游只被打 1 次 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/server/ -run TestTimeoutRetriedThenSucceeds -v
+func TestTimeoutRetriedThenSucceeds(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	const okChunk = "" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
+		"data: [DONE]\n\n"
+	var calls int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			time.Sleep(3 * time.Second) // 首请求卡死 ⇒ 触发网关侧超时（TimeoutS=1）
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, okChunk)
+	}))
+	defer up.Close()
+	reg := writeRegistry(t, []epSpec{{
+		name: "flaky", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 1024, maxRetries: 1, priority: 0, timeoutS: 1,
+	}}, nil)
+	srv, err := New(Options{
+		Registry:            reg,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("重试后应 200（成功率恒 100%% 口径），实际 %d：%s", resp.StatusCode, body[:200])
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("上游调用 = %d，期望 2（首试超时 + 重试成功）", got)
+	}
 }
