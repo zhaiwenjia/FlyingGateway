@@ -125,7 +125,7 @@ OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "gpt-luna", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
+  -d '{"model": "gpt-6-luna", "messages": [{"role": "user", "content": "你好"}], "stream": false}'
 ```
 
 **流式调用**（`"stream": true`，收 SSE 帧；末帧带 usage 归一后计量）：
@@ -134,7 +134,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $GATEWAY_CALLER_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "gpt-luna", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
+  -d '{"model": "gpt-6-luna", "messages": [{"role": "user", "content": "你好"}], "stream": true}'
 ```
 
 **请求标识与取消**：可选请求头 `X-Client-Request-Id` 携带本轮唯一标识（不传则网关生成），
@@ -213,7 +213,7 @@ rate_limited、timeout、cancelled、upstream_error 等）；凭据类信息一�
 | `--guardrail-webhook` | `-W` | 护栏 Webhook URL（空 = 只做正则） | — |
 | `--version` | — | 打印版本号后退出 | — |
 
-## 六、性能对比（与 LiteLLM，简要）
+## 六、与 LiteLLM 的性能对比
 
 受控基准（固定 300ms 上游延迟，闭合式 1→16384 并发指数阶梯，2 轮取中位；两侧同假上游同压测器；
 生产形配置 = 契约桶开 + 并发闸 16000 + 过载闸 16500）：
@@ -241,5 +241,5 @@ go vet ./...          # 静态检查
 go test -race ./...   # 全量测试（含竞态检测）
 ```
 
-版本 = **git tag**（`v主.大.小`），⛔ 不在源码硬编码版本常量；需要运行时版本的构建用
+当前版本 **0.1**（git tag `v0.1.0`）。版本 = **git tag**（`v主.大.小`），⛔ 不在源码硬编码版本常量；需要运行时版本的构建用
 `-ldflags` 注入 `internal/version` 的 `Version` 变量。协作规则见 [`AGENTS.md`](AGENTS.md)。

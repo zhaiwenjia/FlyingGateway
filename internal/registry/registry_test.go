@@ -373,12 +373,12 @@ func TestLoadExampleConfig(t *testing.T) {
 	if !strings.Contains(local.BaseURL, "127.0.0.1") {
 		t.Errorf("本地端点 base_url = %q, want 含 127.0.0.1（环回地址，统一 SDD 9.2 出网一致性）", local.BaseURL)
 	}
-	ep, err := r.Lookup("gpt-luna")
+	ep, err := r.Lookup("gpt-6-luna")
 	if err != nil {
-		t.Fatalf("Lookup(gpt-luna) 报错: %v", err)
+		t.Fatalf("Lookup(gpt-6-luna) 报错: %v", err)
 	}
 	if ep.Name != "primary" {
-		t.Errorf("Lookup(gpt-luna) = %q, want primary（priority 最小）", ep.Name)
+		t.Errorf("Lookup(gpt-6-luna) = %q, want primary（priority 最小）", ep.Name)
 	}
 	if got := r.FallbackChains[routing.FailContextWindow]; !reflect.DeepEqual(got, []string{"large-context"}) {
 		t.Errorf("FallbackChains[context_window] = %v, want [large-context]", got)
@@ -400,7 +400,7 @@ func epJSON(name, extra string) string {
       "name": "` + name + `",
       "base_url": "https://api.openai.com/v1",
       "model": "m-` + name + `",
-      "upstream_model": "gpt-luna",
+      "upstream_model": "gpt-6-luna",
       "provider_name": "openai",
       "context_window": 128000,
       "max_output_tokens": 4096,
