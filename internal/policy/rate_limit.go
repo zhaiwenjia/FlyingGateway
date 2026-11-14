@@ -50,6 +50,32 @@ func NewRateLimitBuckets(tpm, rpm, burstS float64) *RateLimitBuckets {
 	return b
 }
 
+// Has 非扣减探查：一次调用（est 个 token + 1 个请求）现在能否支付（含补足等待）。
+// 供「共享桶 + 每 key 桶」两级组合做预查 —— 两级同时可付才各自 Allow（⛔ 不半扣）。
+func (b *RateLimitBuckets) Has(est int64) (ok bool, retryAfter time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var waitTok, waitReq time.Duration
+	if b.tokens != nil {
+		if okT, w := b.tokens.hasLocked(est); !okT {
+			waitTok = w
+		}
+	}
+	if b.requests != nil {
+		if okR, w := b.requests.hasLocked(1); !okR {
+			waitReq = w
+		}
+	}
+	if waitTok > 0 || waitReq > 0 {
+		wait := waitTok
+		if waitReq > wait {
+			wait = waitReq
+		}
+		return false, wait
+	}
+	return true, 0
+}
+
 // Allow 尝试支付一次调用（est 个归一化 token + 1 个请求）。
 // 双维**同时可付才扣减**（⛔ 不半扣 —— 半扣会在拒绝路径上白白吃掉配额）。
 // 放行 ⇒ ok=true；拒绝 ⇒ ok=false 且 retryAfter 是两维补足等待的较大者（供 429 + Retry-After）。

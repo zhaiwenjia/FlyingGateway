@@ -65,6 +65,14 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	return true, 0
 }
 
+// Has 非扣减探查：tokens 个 token 现在能否放行（含补足等待时长）。
+// 供复合多级限流（RateLimitBuckets 与「共享桶 + 每 key 桶」组合）做「同时可付才扣」的预查。
+func (b *TokenBucket) Has(tokens int64) (ok bool, retryAfter time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hasLocked(tokens)
+}
+
 // hasLocked 非扣减探查（须持 b.mu）：先按经过时间补充（封顶 capacity），
 // 再判 want 是否可付；不足时给出补足等待（向上取整到毫秒，保证拒绝时 > 0）。
 // 供 Allow 与复合桶（RateLimitBuckets「同时可付才扣」）共用同一套补充/判定口径。

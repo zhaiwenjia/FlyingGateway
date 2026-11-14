@@ -173,6 +173,12 @@ rate_limited、timeout、cancelled、upstream_error 等）；凭据类信息一�
   按 key 登记，`key_ref` = 环境变量名），过载保护锚定实测容量（`--max-in-flight`）；
   两道闸并联判定，超限一律 `429` + `Retry-After`。多供应商混合流量下，每次上游尝试
   占它命中端点（或其共享组）的并发位与配额 —— 降级换供应商即换计数主体。
+- **上游多 key（`credential_rate_limits`）**：同一供应商多个 key（`credential_ref` 环境变量值
+  逗号/换行分隔）可按三层登记套餐配额 —— `per_key` 每 key 一份桶（N key = N 份容量）、
+  `shared` 全池共享（org/项目级配额池）、`key_limits` 逐 key 覆盖（不同订阅档混池）；
+  未登记不限流。选键先探后扣、桶空溢出下一槽，429 只冷却命中的 key。
+  ⚠️ **两域解耦**：调用方令牌（外部项目签发，只管理本系统的消费额度）与上游自有令牌
+  互不相通，⛔ 调用方凭据永不发给供应商。
 - **出站协议**：统一 Chat Completions 形（实测裁定），流式经 SSE 逐帧转发；
   usage 逐家归一后计量费用（费率表）。
 - **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
