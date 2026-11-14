@@ -62,10 +62,6 @@ FlyingGateway/                  ← 仓库根
 ├── config/
 │   ├── gateway.example.json    端点注册表样例
 │   └── rates.json              费率表（费用计量数据源）
-├── progress/                   事件流日文件（YYYY-MM-DD.md）
-├── specs/                      需求规格
-├── reference/                  外部参考代码（只读，不参与构建/测试/CI）
-└── 20261114-*/                 实验与基准目录（一实验一目录：README + 原始产物 + 可复现脚本）
 ```
 
 ## 三、快速开始
