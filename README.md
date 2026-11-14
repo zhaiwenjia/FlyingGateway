@@ -109,6 +109,11 @@ curl http://127.0.0.1:8080/health
 OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 `Authorization: Bearer <key>`（缺失 / 无效 ⇒ 401）。
 
+**入口协议与模型族绑定（强制）**：Claude 模型（`provider_name: "anthropic"`）**只走**
+`/v1/messages`（Anthropic 形，由始至终 Anthropic SDK）；其它供应商模型**只走**
+`/v1/chat/completions` / `/v1/responses`（OpenAI 形）。违配 ⇒ `400 ingress_protocol_mismatch`，
+⛔ 不静默跨形状翻译 —— 同族全程协议零翻译（thinking / 签名 / 缓存控制保真）。
+
 | 方法与路径                    | 说明                                                                      |
 | ----------------------------- | ------------------------------------------------------------------------- |
 | `POST /v1/chat/completions` | Chat Completions 兼容（流式 / 非流式）。`model` 填注册表的模型别名      |
@@ -312,6 +317,7 @@ usage）→ `message_stop`。
 | 400 | `context_exceeded` | 估算输入 + 输出上限超出 `context_window` |
 | 400 | `unsupported_capability` | 请求能力超出端点能力（如不支持的 `previous_response_id`） |
 | 400 | `detect_failed` | 端点供应商识别失败（`base_url` / `upstream_model` 推断不出供应商） |
+| 400 | `ingress_protocol_mismatch` | 入口协议与模型族错配（Claude 模型须走 `/v1/messages`，其它供应商须走 OpenAI 形入口） |
 | 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
 | 401 | `unauthorized` | 调用方 API key 缺失或无效（`GATEWAY_CALLER_KEYS` 非空时） |
 | 403 | `content_policy` | 护栏命中 |

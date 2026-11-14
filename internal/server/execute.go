@@ -137,6 +137,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 		return
 	}
 
+	// 入口协议与模型族绑定（Claude 模型全程走 Anthropic Messages，其它供应商走 OpenAI 形）：
+	// 调用面（自研 agent runtime）按模型族选择 SDK，协议错配是调用方 bug ⇒ 显式 400，
+	// ⛔ 不静默跨形状翻译（跨形状的语义损失本可避免 —— 让调用方先纠正用法）。
+	// 判定取主端点（Lookup 结果）的 provider_name；降级链内部换供应商不受此限。
+	if isMsg := mode == modeMessages; isMsg != (ep.ProviderName == "anthropic") {
+		msg := fmt.Sprintf("Claude 模型 %q 只接受 /v1/messages 入口（Anthropic 形）", req.Model)
+		if isMsg {
+			msg = fmt.Sprintf("模型 %q（provider %s）须走 OpenAI 形入口（/v1/chat/completions 或 /v1/responses）；/v1/messages 仅接受 anthropic 模型",
+				req.Model, ep.ProviderName)
+		}
+		s.writeDetail(w, gwerrors.New(core.ErrInvalidRequest, http.StatusBadRequest, "ingress_protocol_mismatch", msg))
+		return
+	}
+
 	// 5. 识别（注册表的 base_url + upstream_model；⛔ 调用方不带 base_url / 不指定 provider）。
 	res, err := detect.Detect(ep.BaseURL, ep.UpstreamModel)
 	if err != nil {
