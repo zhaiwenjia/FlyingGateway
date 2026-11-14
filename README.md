@@ -33,6 +33,11 @@
 
 ## 二、目录结构
 
+> 布局是 **Go 官方惯例**（`cmd/` + `internal/`），不改名 `src/`：`internal/` 不只是目录名，
+> 是**语言级可见性边界** —— `internal/` 下的包只允许本仓代码 import，外部模块引用会被
+> go 工具链直接拒绝；改名 `src/`（Java/JS 习惯）会丢掉这层编译器强制保护，且与 Go 生态
+> （标准库、Kubernetes、Docker 等）的肌肉记忆相悖。
+
 ```
 FlyingGateway/                  ← 仓库根
 ├── go.mod / go.sum             module github.com/zhaiwenjia/FlyingGateway（go 1.27）
