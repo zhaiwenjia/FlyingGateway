@@ -14,7 +14,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
@@ -49,10 +51,17 @@ type Options struct {
 	// CallerKeys 是调用方 API key 白名单（Authorization: Bearer <key>）。
 	// 空 = 开放模式（不校验）；非空 ⇒ /v1/* 强制鉴权，缺失 / 无效 401（统一 SDD 8.1）。
 	CallerKeys []string
-	// CallerBucketCapacity / CallerBucketRefill 是每调用方令牌桶（token 级限流，8.3）；
-	// ≤ 0 = 不启用每调用方限流。
+	// CallerBucketCapacity / CallerBucketRefill 是每调用方令牌桶的**全局兜底**参数（token 维，
+	// ≤ 0 = 不启用）。契约级配额走注册表 caller_rate_limits（key_ref 按 key 逐个登记，
+	// 未登记不限流，统一 SDD 7.2 锚点分离）——⛔ 本字段不再有默认值（旧默认
+	// 60000/10000 实测在小请求形态下造出 ≈454 rps 隐藏天花板）。
 	CallerBucketCapacity int64
 	CallerBucketRefill   float64
+
+	// MaxInFlight 是过载保护的在途请求数上限（load shedding，锚定实测容量，统一 SDD 7.2
+	// 锚点分离：限流护套餐配额、过载闸护网关自身容量）；≤ 0 = 不启用。
+	// 超限 ⇒ 429 + Retry-After（⛔ 不排队无界、⛔ 不静默丢弃）。
+	MaxInFlight int64
 
 	// ---- 上游自有令牌池与限流轮换 ----
 
@@ -95,10 +104,56 @@ type Server struct {
 	pools        *poolManager
 	maxTokenWait time.Duration
 
+	// limitGroups 是配额共享组（键 = limits_group，缺省 = 端点名）：同组共享一份契约桶 +
+	// 一个在途并发计数（调研结论：并发按在途上游尝试计、归属按供应商配额 scope，
+	// 见 docs/20261114-多供应商并发-调研-流量上限归属与并发计量.md）。
+	limitGroups map[string]*limitGroup
+	// maxInFlight / inFlight 是过载闸（load shedding；≤ 0 = 不启用）。
+	maxInFlight int64
+	inFlight    atomic.Int64
+
 	allowLoopback bool
 	pollInterval  time.Duration
 	cancels       *cancelRegistry
 	logger        *slog.Logger
+}
+
+// limitGroup 是一个配额共享组（端点级限流的两道闸：在途并发位 + 契约桶）。
+// 并发计量单位 = 在途上游尝试（runEndpoint 发起 acquire / 收口 release，流式长调用
+// 占位到流收口）；⛔ 不按 TCP 连接数计（HTTP/2 多路复用下连接数不约束并发）。
+type limitGroup struct {
+	// buckets 是契约桶（tpm/rpm 双维；nil = 不限流）。
+	buckets *policy.RateLimitBuckets
+	// maxInFlight 是在途并发上限（0 = 不限）。
+	maxInFlight int64
+	inFlight    atomic.Int64
+}
+
+// acquire 过两道闸（先并发位后契约桶 —— 桶是消耗品不回滚，并发位免费可退，
+// 故先占位后扣桶，桶不足时退位）：任一不足 ⇒ 拒绝并给出 Retry-After。
+// 返回的 concurrency 标识失败发生在哪道闸（对外错误分类同为 rate_limit，message 分开）。
+// 并发位满的等待按 1s 保守估（位释放时机不可预知，⛔ 不猜精确时刻）。
+func (g *limitGroup) acquire(est int64) (ok bool, retryAfter time.Duration, concurrency bool) {
+	if g.maxInFlight > 0 && g.inFlight.Add(1) > g.maxInFlight {
+		g.inFlight.Add(-1)
+		return false, time.Second, true
+	}
+	if g.buckets != nil {
+		if okB, wait := g.buckets.Allow(est); !okB {
+			if g.maxInFlight > 0 {
+				g.inFlight.Add(-1)
+			}
+			return false, wait, false
+		}
+	}
+	return true, 0, false
+}
+
+// release 释放一个并发位（runEndpoint 收口时；幂等由调用方 defer 保证恰好一次）。
+func (g *limitGroup) release() {
+	if g.maxInFlight > 0 {
+		g.inFlight.Add(-1)
+	}
 }
 
 // DefaultDetectBound 是断连检测延迟上界默认值（统一 SDD 6.6 要求 1「检测延迟上界可配置，默认 1s」）。
@@ -132,13 +187,45 @@ func New(opts Options) (*Server, error) {
 		bucket:        opts.TokenBucket,
 		budget:        opts.Budget,
 		guardrail:     opts.Guardrail,
-		callers:       newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill),
 		pools:         newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown),
 		maxTokenWait:  opts.MaxTokenWait,
+		maxInFlight:   opts.MaxInFlight,
 		allowLoopback: opts.AllowLoopbackEgress,
 		pollInterval:  poll,
 		logger:        lg,
 	}
+	// 配额共享组装配（统一 SDD 7.2 锚点分离：限流锚定契约，未登记 ⇒ 不限）：
+	// 同组端点共享同一个 limitGroup 实例（一份桶 + 一个并发计数，⛔ 不按端点各建一份 ——
+	// 共享配额池按端点各计一份会 N 倍超发）。
+	s.limitGroups = make(map[string]*limitGroup)
+	for _, ep := range opts.Registry.List() {
+		if ep.RateLimit == nil && ep.ConcurrencyLimit <= 0 {
+			continue // 无登记 = 不限流，不建组
+		}
+		key := ep.LimitsGroup
+		if key == "" {
+			key = ep.Name
+		}
+		if _, ok := s.limitGroups[key]; ok {
+			continue // 同组声明经 registry 一致性校验，首个即代表
+		}
+		g := &limitGroup{maxInFlight: ep.ConcurrencyLimit}
+		if ep.RateLimit != nil {
+			g.buckets = policy.NewRateLimitBuckets(ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+		}
+		s.limitGroups[key] = g
+	}
+	// 每调用方契约配额（caller_rate_limits：key_ref = 环境变量名，⛔ 不存明文）。
+	// key_ref 环境变量未设置 ⇒ 启动报错（⛔ 不静默忽略登记）。
+	callerRL := make(map[string]*policy.RateLimitBuckets, len(opts.Registry.CallerRateLimits))
+	for _, crl := range opts.Registry.CallerRateLimits {
+		key := strings.TrimSpace(os.Getenv(crl.KeyRef))
+		if key == "" {
+			return nil, fmt.Errorf("server: caller_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
+		}
+		callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
+	}
+	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
 	}

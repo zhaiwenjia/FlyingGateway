@@ -43,9 +43,10 @@ const (
 	adminTokenEnv = "GATEWAY_ADMIN_TOKEN"
 	// callerKeysEnv 是调用方 API key 白名单（英文逗号 / 换行分隔；同理 ⛔ 不进 argv）。
 	callerKeysEnv = "GATEWAY_CALLER_KEYS"
-	// 默认令牌桶参数（调用方与自有令牌两层同参；0 = 关闭）。
-	defaultBucketCapacity = 60000
-	defaultBucketRefill   = 10000.0
+	// ⛔ 令牌桶无默认配额（统一 SDD 7.2 锚点分离）：契约配额走注册表 rate_limit /
+	// caller_rate_limits（未登记 ⇒ 不限流），全局兜底桶默认关闭。拍脑袋默认值是负债 ——
+	// 旧默认（容量 60000 / 补充 10000 tokens/s）实测在小请求形态下造出 ≈454 rps
+	// 的隐藏吞吐天花板（P3 阶梯 c=256 档 429 实录，见 docs/20261114-限流过载-调研-*.md）。
 )
 
 // options 是命令行参数（长选项 + 单字母缩写双形式）。
@@ -72,6 +73,7 @@ type options struct {
 	upstreamBucketRefill   float64
 	rateLimitCooldown      time.Duration
 	maxTokenWait           time.Duration
+	maxInFlight            int64
 
 	guardrailPatterns []string
 	guardrailWebhook  string
@@ -153,18 +155,20 @@ func parseFlags(args []string) (*options, error) {
 	fs.Int64Var(&opts.budgetTokens, "budget-tokens", 0, "每调用方 token 预算上限（0 = 不限预算）")
 	fs.Int64Var(&opts.budgetTokens, "B", 0, "同 --budget-tokens")
 
-	fs.Int64Var(&opts.callerBucketCapacity, "caller-bucket-capacity", defaultBucketCapacity, "每调用方令牌桶容量（0 = 关闭）")
-	fs.Int64Var(&opts.callerBucketCapacity, "K", defaultBucketCapacity, "同 --caller-bucket-capacity")
-	fs.Float64Var(&opts.callerBucketRefill, "caller-bucket-refill", defaultBucketRefill, "每调用方令牌桶补充速率（token/秒）")
-	fs.Float64Var(&opts.callerBucketRefill, "E", defaultBucketRefill, "同 --caller-bucket-refill")
-	fs.Int64Var(&opts.upstreamBucketCapacity, "upstream-bucket-capacity", defaultBucketCapacity, "每自有令牌的本地令牌桶容量（0 = 关闭）")
-	fs.Int64Var(&opts.upstreamBucketCapacity, "U", defaultBucketCapacity, "同 --upstream-bucket-capacity")
-	fs.Float64Var(&opts.upstreamBucketRefill, "upstream-bucket-refill", defaultBucketRefill, "每自有令牌的本地令牌桶补充速率（token/秒）")
-	fs.Float64Var(&opts.upstreamBucketRefill, "u", defaultBucketRefill, "同 --upstream-bucket-refill")
+	fs.Int64Var(&opts.callerBucketCapacity, "caller-bucket-capacity", 0, "每调用方令牌桶的全局兜底容量（契约配额走注册表 caller_rate_limits；0 = 关闭）")
+	fs.Int64Var(&opts.callerBucketCapacity, "K", 0, "同 --caller-bucket-capacity")
+	fs.Float64Var(&opts.callerBucketRefill, "caller-bucket-refill", 0, "每调用方令牌桶的全局兜底补充速率（token/秒）")
+	fs.Float64Var(&opts.callerBucketRefill, "E", 0, "同 --caller-bucket-refill")
+	fs.Int64Var(&opts.upstreamBucketCapacity, "upstream-bucket-capacity", 0, "每自有令牌的本地令牌桶容量（契约配额走注册表 rate_limit；0 = 关闭）")
+	fs.Int64Var(&opts.upstreamBucketCapacity, "U", 0, "同 --upstream-bucket-capacity")
+	fs.Float64Var(&opts.upstreamBucketRefill, "upstream-bucket-refill", 0, "每自有令牌的本地令牌桶补充速率（token/秒）")
+	fs.Float64Var(&opts.upstreamBucketRefill, "u", 0, "同 --upstream-bucket-refill")
 	fs.DurationVar(&opts.rateLimitCooldown, "rate-limit-cooldown", 30*time.Second, "上游 429 无 Retry-After 时的令牌默认冷却")
 	fs.DurationVar(&opts.rateLimitCooldown, "k", 30*time.Second, "同 --rate-limit-cooldown")
 	fs.DurationVar(&opts.maxTokenWait, "max-token-wait", 3*time.Second, "全部自有令牌受限时的最长等待（超上限 ⇒ 429 + Retry-After）")
 	fs.DurationVar(&opts.maxTokenWait, "m", 3*time.Second, "同 --max-token-wait")
+	fs.Int64Var(&opts.maxInFlight, "max-in-flight", 0, "过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After）")
+	fs.Int64Var(&opts.maxInFlight, "i", 0, "同 --max-in-flight")
 
 	var pats multiFlag
 	fs.Var(&pats, "guardrail-pattern", "护栏正则（可重复）")
@@ -274,6 +278,7 @@ func run(args []string, stdout io.Writer) int {
 		UpstreamBucketRefill:   opts.upstreamBucketRefill,
 		RateLimitCooldown:      opts.rateLimitCooldown,
 		MaxTokenWait:           opts.maxTokenWait,
+		MaxInFlight:            opts.maxInFlight,
 		AllowLoopbackEgress:    opts.allowLoopback,
 		CancelGracePeriod:      opts.cancelGrace,
 		CancelGraceByProvider:  opts.cancelGraceByProvider,

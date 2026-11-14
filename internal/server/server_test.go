@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
@@ -284,11 +285,15 @@ type epSpec struct {
 	name, base, model, upstreamModel, provider, credRef string
 	ctxWindow, maxOut, maxRetries, priority             int
 	timeoutS                                            float64
+	// 以下为可选配额声明（rate_limit / concurrency_limit / limits_group）。
+	rateLimit        map[string]any
+	concurrencyLimit int64
+	limitsGroup      string
 }
 
 // toWire 转注册表配置行（⛔ 缺任何必备字段 —— 与 9.2 启动校验一致）。
 func (e epSpec) toWire() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"name":              e.name,
 		"base_url":          e.base,
 		"model":             e.model,
@@ -306,6 +311,16 @@ func (e epSpec) toWire() map[string]any {
 		"max_retries":    e.maxRetries,
 		"priority":       e.priority,
 	}
+	if e.rateLimit != nil {
+		m["rate_limit"] = e.rateLimit
+	}
+	if e.concurrencyLimit != 0 {
+		m["concurrency_limit"] = e.concurrencyLimit
+	}
+	if e.limitsGroup != "" {
+		m["limits_group"] = e.limitsGroup
+	}
+	return m
 }
 
 // primaryEP 是默认主端点（OpenAI 形，凭据来源 TEST_KEY_OPENAI）。
@@ -317,8 +332,9 @@ func primaryEP(base string) epSpec {
 	}
 }
 
-// writeRegistry 写注册表配置并加载（strategy=priority；chains 可空）。
-func writeRegistry(t *testing.T, eps []epSpec, chains map[string][]string) *registry.Registry {
+// writeRegistry 写注册表配置并加载（strategy=priority；chains 可空；extraTop 可注入
+// 顶层附加节，如 caller_rate_limits）。
+func writeRegistry(t *testing.T, eps []epSpec, chains map[string][]string, extraTop ...map[string]any) *registry.Registry {
 	t.Helper()
 	epsWire := make([]map[string]any, 0, len(eps))
 	for _, e := range eps {
@@ -327,6 +343,11 @@ func writeRegistry(t *testing.T, eps []epSpec, chains map[string][]string) *regi
 	cfg := map[string]any{"strategy": "priority", "endpoints": epsWire}
 	if chains != nil {
 		cfg["fallback_chains"] = chains
+	}
+	for _, x := range extraTop {
+		for k, v := range x {
+			cfg[k] = v
+		}
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -356,8 +377,9 @@ type env struct {
 }
 
 // newEnv 装配测试环境：假上游 → 注册表 → server.New → httptest 真实监听。
-// tweak 在 New 之前改 Options（限流 / 预算 / 护栏 / 取消窗口等）。
-func newEnv(t *testing.T, eps func(base string) []epSpec, chains map[string][]string, tweak func(o *Options)) *env {
+// tweak 在 New 之前改 Options（限流 / 预算 / 护栏 / 取消窗口等）；
+// extraTop 注入注册表顶层附加节（如 caller_rate_limits）。
+func newEnv(t *testing.T, eps func(base string) []epSpec, chains map[string][]string, tweak func(o *Options), extraTop ...map[string]any) *env {
 	t.Helper()
 	t.Setenv("TEST_KEY_OPENAI", "sk-gw-openai-0001")
 	t.Setenv("TEST_KEY_ANTHROPIC", "sk-gw-anthropic-0002")
@@ -365,7 +387,7 @@ func newEnv(t *testing.T, eps func(base string) []epSpec, chains map[string][]st
 
 	up := newFakeUpstream(t)
 	t.Cleanup(up.close) // 后注册 ⇒ 先关网关监听再关假上游
-	reg := writeRegistry(t, eps(up.srv.URL), chains)
+	reg := writeRegistry(t, eps(up.srv.URL), chains, extraTop...)
 	exp := &telemetry.InMemoryExporter{}
 	met := telemetry.NewMetrics()
 	opts := Options{
@@ -713,5 +735,48 @@ func TestCancelEndpointShape(t *testing.T) {
 	m := readBody(t, resp2)
 	if m["cancelled"] != false {
 		t.Errorf("未知 id 的 cancelled = %v，期望 false", m["cancelled"])
+	}
+}
+
+// TestLimitGroupAcquireRelease 断言并发位的占/放语义：满则拒（标记并发闸）、放后可复用。
+func TestLimitGroupAcquireRelease(t *testing.T) {
+	g := &limitGroup{maxInFlight: 1}
+	if ok, _, _ := g.acquire(1); !ok {
+		t.Fatal("首占应成功")
+	}
+	ok, wait, concurrency := g.acquire(1)
+	if ok {
+		t.Fatal("并发位已满时应拒绝")
+	}
+	if !concurrency || wait <= 0 {
+		t.Fatalf("拒绝应标记并发闸且给 Retry-After（concurrency=%v wait=%v）", concurrency, wait)
+	}
+	g.release()
+	if ok, _, _ := g.acquire(1); !ok {
+		t.Fatal("释放后应可复用")
+	}
+}
+
+// TestLimitGroupNoHalfCharge 断言「先占位后扣桶、桶不足退位」：契约桶拒绝后
+// 并发位必须退回（否则拒绝路径会漏占并发位，把后续流量挤死）。
+func TestLimitGroupNoHalfCharge(t *testing.T) {
+	g := &limitGroup{maxInFlight: 5, buckets: policy.NewRateLimitBuckets(600, 0, 1)} // token 桶深 10
+	if ok, _, _ := g.acquire(10); !ok {
+		t.Fatal("首占应成功")
+	}
+	ok, _, concurrency := g.acquire(10) // 桶不足
+	if ok {
+		t.Fatal("契约桶不足时应拒绝")
+	}
+	if concurrency {
+		t.Fatal("失败应在契约桶闸（非并发闸）")
+	}
+	// 首发占位未放（仍持有 1 位），失败发的占位必须退回 ⇒ 总在途 = 1。
+	if got := g.inFlight.Load(); got != 1 {
+		t.Fatalf("桶拒绝后失败发的并发位未退回：inFlight = %d，期望 1（首发仍持有）", got)
+	}
+	g.release()
+	if got := g.inFlight.Load(); got != 0 {
+		t.Fatalf("release 后 inFlight = %d，期望 0", got)
 	}
 }

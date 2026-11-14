@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
 
 // 本文件测试调用方 API key 侧（统一 SDD 8.1 两段式凭据）：强制鉴权、
@@ -181,4 +182,63 @@ func TestCallerIdentityFeedsBudget(t *testing.T) {
 		t.Fatalf("B = %d，期望 200（预算按调用方独立累计）", resp3.StatusCode)
 	}
 	readBody(t, resp3)
+}
+
+// TestCallerContractQuotaOverridesGlobal 断言契约配额（caller_rate_limits）优先于全局兜底桶：
+// 登记了契约的 key 以契约为准（哪怕全局兜底极宽）；未登记的 key 不限流（⛔ 不套默认值）。
+func TestCallerContractQuotaOverridesGlobal(t *testing.T) {
+	t.Setenv("TEST_CALLER_KEY", "ck-contract")
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, func(o *Options) {
+		o.CallerKeys = []string{"ck-contract", "ck-plain"}
+		o.CallerBucketCapacity = 1_000_000 // 全局兜底极宽 ⇒ 拒绝只可能来自契约桶
+		o.CallerBucketRefill = 1_000_000
+	}, map[string]any{"caller_rate_limits": []map[string]any{
+		{"key_ref": "TEST_CALLER_KEY", "tpm": 1200, "rpm": 0, "burst_s": 1}, // 桶深 20，每请求预估 13
+	}})
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+	auth := map[string]string{"Authorization": "Bearer ck-contract"}
+
+	// ck-contract 第一发放行（扣 13），第二发契约桶不足（剩 7）⇒ 429。
+	if resp := e.postJSON("/v1/chat/completions", body, auth); resp.StatusCode != http.StatusOK {
+		t.Fatalf("契约 key 首发 = %d，期望 200", resp.StatusCode)
+	} else {
+		readBody(t, resp)
+	}
+	resp2 := e.postJSON("/v1/chat/completions", body, auth)
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("契约 key 第二发 = %d，期望 429（契约桶优先于全局兜底）", resp2.StatusCode)
+	}
+	_, code, _ := errorFields(t, readBody(t, resp2))
+	if code != "rate_limit" {
+		t.Errorf("code = %q，期望 rate_limit", code)
+	}
+
+	// ck-plain 未登记 ⇒ 不限流（全局兜底虽开但仅兜未登记 key，且此处极宽）。
+	plain := map[string]string{"Authorization": "Bearer ck-plain"}
+	for i := 0; i < 3; i++ {
+		if resp := e.postJSON("/v1/chat/completions", body, plain); resp.StatusCode != http.StatusOK {
+			t.Fatalf("未登记 key 第 %d 发 = %d，期望 200（未登记不限流）", i+1, resp.StatusCode)
+		} else {
+			readBody(t, resp)
+		}
+	}
+}
+
+// TestCallerRateLimitsMissingEnvFails 断言 key_ref 环境变量取不到值时启动报错
+// （⛔ 不静默忽略登记 —— 静默忽略会把「契约配额」变成「不限流」）。
+func TestCallerRateLimitsMissingEnvFails(t *testing.T) {
+	reg := writeRegistry(t, []epSpec{primaryEP("http://127.0.0.1:1")}, nil, map[string]any{
+		"caller_rate_limits": []map[string]any{
+			{"key_ref": "TEST_CALLER_KEY_MISSING", "tpm": 600, "rpm": 0, "burst_s": 5},
+		},
+	})
+	_, err := New(Options{
+		Registry: reg,
+		Tracer:   telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:  telemetry.NewMetrics(),
+	})
+	if err == nil {
+		t.Fatal("key_ref 环境变量缺失时 server.New 应报错")
+	}
 }

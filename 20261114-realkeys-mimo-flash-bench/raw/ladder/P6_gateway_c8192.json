@@ -1,0 +1,24 @@
+{
+  "summary": {
+    "concurrency": 8192,
+    "dur_s": 5,
+    "fail": 0,
+    "latency_ms": {
+      "max": 4431.4,
+      "mean": 2874.5,
+      "p50": 2880,
+      "p90": 3117.1,
+      "p99": 3192.9
+    },
+    "model": "mimo-v2.6-flash",
+    "ok": 13964,
+    "ramp_per_s": 2000,
+    "requests": 13964,
+    "target": "gateway",
+    "throughput_rps": 2792.8,
+    "tool": "benchload",
+    "ts": "2026-11-14 21:46:22",
+    "wall_s": 5,
+    "warmup_s": 2
+  }
+}

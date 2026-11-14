@@ -20,6 +20,10 @@
 // 用法：
 //
 //	go run ./20261114-ultra-concurrency-sim/scripts/fakeupstream -listen 127.0.0.2:9102,127.0.0.3:9103 -hold 30
+//
+// 受控基准（固定上游延迟、无按住标记）：
+//
+//	go run ./20261114-ultra-concurrency-sim/scripts/fakeupstream -listen 127.0.0.1:9099 -latency 300ms
 package main
 
 import (
@@ -45,15 +49,18 @@ func main() {
 	var (
 		listen = flag.String("listen", "127.0.0.2:9102", "逗号分隔监听地址（多 ip:port 乘算端口空间）")
 		hold   = flag.Int("hold", 30, "ultra-hold 请求按住秒数")
+		// -latency：无 ultra-hold 标记请求的固定延迟（受控基准用，如 -latency 300ms）。
+		// 默认 0 = 旧行为（无标记请求立即收口），不破坏超并发模拟复现口径。
+		latency = flag.Duration("latency", 0, "无 ultra-hold 标记请求的固定延迟（受控基准用，如 300ms）")
 	)
 	flag.Parse()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		handleChat(w, r, time.Duration(*hold)*time.Second)
+		handleChat(w, r, time.Duration(*hold)*time.Second, *latency)
 	})
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		handleChat(w, r, time.Duration(*hold)*time.Second)
+		handleChat(w, r, time.Duration(*hold)*time.Second, *latency)
 	})
 	mux.HandleFunc("/_stats", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -138,15 +145,16 @@ var nonStream = map[string]any{
 	"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
 }
 
-// handleChat 处理一个 chat 请求：按 stream 分派、按正文标记决定是否按住。
-func handleChat(w http.ResponseWriter, r *http.Request, hold time.Duration) {
+// handleChat 处理一个 chat 请求：按 stream 分派、按正文标记决定按住时长。
+// 延迟取值：有 ultra-hold 标记 ⇒ hold；否则 ⇒ latency（受控基准的固定上游延迟）。
+func handleChat(w http.ResponseWriter, r *http.Request, hold, latency time.Duration) {
 	body, _ := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	raw := string(body)
 	isHold := strings.Contains(raw, "ultra-hold")
 	// stream 标记：请求体 "stream":true（容忍空白差异）。
 	isStream := strings.Contains(raw, "\"stream\"") && strings.Contains(raw, "true")
-	d := time.Duration(0)
+	d := latency
 	if isHold {
 		d = hold
 	}

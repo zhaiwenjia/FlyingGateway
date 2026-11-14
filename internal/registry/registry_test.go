@@ -393,3 +393,96 @@ func names(eps []Endpoint) []string {
 	}
 	return out
 }
+
+// epJSON 是带配额声明的端点 JSON 片段模板（%s 依次：name / rate_limit 行 / 并发行 / 组行）。
+func epJSON(name, extra string) string {
+	return `{
+      "name": "` + name + `",
+      "base_url": "https://api.openai.com/v1",
+      "model": "m-` + name + `",
+      "upstream_model": "gpt-4o-mini",
+      "provider_name": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {"supports_tools": true, "supports_stream": true, "supports_vision": false},
+      "credential_ref": "OPENAI_API_KEY",
+      "timeout_s": 30,
+      "max_retries": 1,
+      "priority": 0` + extra + `
+    }`
+}
+
+// TestLoadRateLimitAndConcurrency 断言 rate_limit / concurrency_limit / limits_group 正确解析。
+func TestLoadRateLimitAndConcurrency(t *testing.T) {
+	raw := `{"strategy": "priority", "endpoints": [` + epJSON("a",
+		`, "rate_limit": {"tpm": 100000, "rpm": 600, "burst_s": 5},
+      "concurrency_limit": 50, "limits_group": "openai-pool"`) + `]}`
+	reg, err := Load(writeConfig(t, raw))
+	if err != nil {
+		t.Fatalf("合法配额声明不应报错: %v", err)
+	}
+	ep := reg.List()[0]
+	if ep.RateLimit == nil || ep.RateLimit.TPM != 100000 || ep.RateLimit.RPM != 600 || ep.RateLimit.BurstS != 5 {
+		t.Fatalf("rate_limit 解析失真: %+v", ep.RateLimit)
+	}
+	if ep.ConcurrencyLimit != 50 || ep.LimitsGroup != "openai-pool" {
+		t.Fatalf("concurrency_limit/limits_group 解析失真: %d / %q", ep.ConcurrencyLimit, ep.LimitsGroup)
+	}
+}
+
+// TestLoadRejectsBadRateLimit 断言非法配额形状被拒（burst_s 缺失、两维全 0、负值）。
+func TestLoadRejectsBadRateLimit(t *testing.T) {
+	for _, extra := range []string{
+		`, "rate_limit": {"tpm": 600, "rpm": 0, "burst_s": 0}`,
+		`, "rate_limit": {"tpm": 0, "rpm": 0, "burst_s": 5}`,
+		`, "rate_limit": {"tpm": -1, "rpm": 0, "burst_s": 5}`,
+	} {
+		raw := `{"strategy": "priority", "endpoints": [` + epJSON("a", extra) + `]}`
+		if _, err := Load(writeConfig(t, raw)); err == nil {
+			t.Fatalf("非法 rate_limit 应报错：%s", extra)
+		}
+	}
+}
+
+// TestLoadRejectsNegativeConcurrency 断言 concurrency_limit 为负被拒。
+func TestLoadRejectsNegativeConcurrency(t *testing.T) {
+	raw := `{"strategy": "priority", "endpoints": [` + epJSON("a", `, "concurrency_limit": -1`) + `]}`
+	if _, err := Load(writeConfig(t, raw)); err == nil {
+		t.Fatal("负 concurrency_limit 应报错")
+	}
+}
+
+// TestLoadLimitsGroupConsistency 断言同组声明逐字一致才放行（共享一份计数的组里
+// 出现两份不同声明 = 超发/欠发的隐性错误 ⇒ 启动报错）。
+func TestLoadLimitsGroupConsistency(t *testing.T) {
+	okRaw := `{"strategy": "priority", "endpoints": [` +
+		epJSON("a", `, "rate_limit": {"tpm": 600, "rpm": 0, "burst_s": 5}, "concurrency_limit": 8, "limits_group": "pool"`) + `,` +
+		epJSON("b", `, "rate_limit": {"tpm": 600, "rpm": 0, "burst_s": 5}, "concurrency_limit": 8, "limits_group": "pool"`) + `]}`
+	if _, err := Load(writeConfig(t, okRaw)); err != nil {
+		t.Fatalf("同组一致声明不应报错: %v", err)
+	}
+	badRaw := `{"strategy": "priority", "endpoints": [` +
+		epJSON("a", `, "rate_limit": {"tpm": 600, "rpm": 0, "burst_s": 5}, "limits_group": "pool"`) + `,` +
+		epJSON("b", `, "rate_limit": {"tpm": 1200, "rpm": 0, "burst_s": 5}, "limits_group": "pool"`) + `]}`
+	if _, err := Load(writeConfig(t, badRaw)); err == nil {
+		t.Fatal("同组不同声明应报错")
+	}
+}
+
+// TestLoadCallerRateLimits 断言 caller_rate_limits 解析与校验（key_ref 必填 —— 只存来源引用）。
+func TestLoadCallerRateLimits(t *testing.T) {
+	okRaw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+      "caller_rate_limits": [{"key_ref": "CALLER_KEY_A", "tpm": 60000, "rpm": 600, "burst_s": 5}]}`
+	reg, err := Load(writeConfig(t, okRaw))
+	if err != nil {
+		t.Fatalf("合法 caller_rate_limits 不应报错: %v", err)
+	}
+	if len(reg.CallerRateLimits) != 1 || reg.CallerRateLimits[0].KeyRef != "CALLER_KEY_A" {
+		t.Fatalf("caller_rate_limits 解析失真: %+v", reg.CallerRateLimits)
+	}
+	badRaw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+      "caller_rate_limits": [{"key_ref": "", "tpm": 60000, "rpm": 600, "burst_s": 5}]}`
+	if _, err := Load(writeConfig(t, badRaw)); err == nil {
+		t.Fatal("缺 key_ref 的 caller_rate_limits 应报错")
+	}
+}

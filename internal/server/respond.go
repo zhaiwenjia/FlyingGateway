@@ -221,7 +221,9 @@ func (s *Server) writeFinalError(w http.ResponseWriter, h *execHandle, detail *c
 	if h.committed() {
 		return
 	}
-	if detail != nil && detail.Code == codeTokenPoolExhausted {
+	// 本地闸拒绝（token 池 / 契约桶 / 并发位）：分类为 rate_limit 的终态错误带
+	// Retry-After = 最短等待（统一 SDD 2.3 治理三件套；hint 由 setRetryAfterHint 记录）。
+	if detail != nil && detail.Category == core.ErrRateLimit && h.retryAfterHint() > 0 {
 		writeRetryAfter(w, h.retryAfterHint(), string(detail.Category), detail.Code, detail.Message)
 		return
 	}

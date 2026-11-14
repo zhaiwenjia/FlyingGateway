@@ -622,3 +622,103 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 		t.Fatalf("上游调用 = %d，期望 2（首试超时 + 重试成功）", got)
 	}
 }
+
+// TestEndpointConcurrencyLimitRejectsAndReleases 断言端点并发维生效（白组预占 + 收口释放）：
+// 并发位满 ⇒ 429（message 标明并发闸）；正常请求收口后位释放（inFlight 归零）。
+func TestEndpointConcurrencyLimitRejectsAndReleases(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		p := primaryEP(base)
+		p.concurrencyLimit = 1
+		return []epSpec{p}
+	}, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+
+	// 预占唯一并发位 ⇒ 下一发应被并发闸拒绝。
+	e.srv.limitGroups["primary"].inFlight.Store(1)
+	resp := e.postJSON("/v1/chat/completions", body, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("并发位满时 = %d，期望 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("429 缺 Retry-After 头")
+	}
+	_, code, msg := errorFields(t, readBody(t, resp))
+	if code != "rate_limit" || !strings.Contains(msg, "并发") {
+		t.Fatalf("code=%q msg=%q，期望 rate_limit 且标明并发闸", code, msg)
+	}
+
+	// 释放后放行，且收口自动归还并发位。
+	e.srv.limitGroups["primary"].inFlight.Store(0)
+	resp2 := e.postJSON("/v1/chat/completions", body, nil)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("释放后 = %d，期望 200", resp2.StatusCode)
+	}
+	readBody(t, resp2)
+	if got := e.srv.limitGroups["primary"].inFlight.Load(); got != 0 {
+		t.Fatalf("收口后并发位 = %d，期望 0（defer release）", got)
+	}
+}
+
+// TestLimitsGroupSharesQuota 断言同 limits_group 的端点共享一份契约桶：
+// 端点 A 用掉配额后，端点 B（同组）应被拒 —— 若各端点各建桶则 B 会放行（= 共享配额池超发）。
+func TestLimitsGroupSharesQuota(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec {
+		a := primaryEP(base)
+		a.limitsGroup = "pool"
+		a.rateLimit = map[string]any{"tpm": 1200, "rpm": 0, "burst_s": 1} // 桶深 20，每请求预估 13
+		b := primaryEP(base)
+		b.name, b.model, b.priority = "secondary", "gpt-4o", 1
+		b.limitsGroup = "pool"
+		b.rateLimit = map[string]any{"tpm": 1200, "rpm": 0, "burst_s": 1}
+		return []epSpec{a, b}
+	}, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+
+	resp := e.postJSON("/v1/chat/completions",
+		`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("端点 A 首发 = %d，期望 200", resp.StatusCode)
+	}
+	readBody(t, resp)
+
+	resp2 := e.postJSON("/v1/chat/completions",
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`, nil)
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("同组端点 B = %d，期望 429（共享桶剩余 7 < 预估 13）", resp2.StatusCode)
+	}
+	readBody(t, resp2)
+	if n, _, _, _ := e.up.stats(); n != 1 {
+		t.Errorf("上游调用数 = %d，期望 1（429 不打上游）", n)
+	}
+}
+
+// TestMaxInFlightSheds 断言全局过载闸（load shedding）：在途超上限 ⇒ 429 code=overloaded，
+// 与限流（rate_limit）分开编码；压力回落后恢复。
+func TestMaxInFlightSheds(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, func(o *Options) {
+		o.MaxInFlight = 1
+	})
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+
+	e.srv.inFlight.Store(1) // 白组预占：模拟在途已满
+	resp := e.postJSON("/v1/chat/completions", body, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("过载时 = %d，期望 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("429 缺 Retry-After 头")
+	}
+	_, code, _ := errorFields(t, readBody(t, resp))
+	if code != "overloaded" {
+		t.Fatalf("code = %q，期望 overloaded（过载闸与限流分账）", code)
+	}
+
+	e.srv.inFlight.Store(0)
+	resp2 := e.postJSON("/v1/chat/completions", body, nil)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("压力回落后 = %d，期望 200", resp2.StatusCode)
+	}
+	readBody(t, resp2)
+}

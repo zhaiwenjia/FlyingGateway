@@ -26,26 +26,34 @@ type callerIdentityKey struct{}
 // AnonymousCaller 是未启用调用方鉴权时的统一身份（预算 / 限流按此归并）。
 const AnonymousCaller = "anonymous"
 
-// callerAuth 是调用方鉴权与每调用方令牌桶。
+// callerAuth 是调用方鉴权与每调用方限流。
 type callerAuth struct {
 	// keys 是调用方 API key 白名单（空 = 开放模式，不校验）。
 	keys map[string]bool
 
 	mu sync.Mutex
-	// buckets 是每调用方令牌桶（惰性创建）。
+	// buckets 是每调用方令牌桶（惰性创建；全局兜底参数，token 维）。
 	buckets map[string]*policy.TokenBucket
-	// bucketCapacity / bucketRefill 是桶参数（≤ 0 = 不启用每调用方限流）。
+	// bucketCapacity / bucketRefill 是全局兜底桶参数（≤ 0 = 不启用）。
 	bucketCapacity int64
 	bucketRefill   float64
+
+	// rlOverrides 是按 key 的契约配额（注册表 caller_rate_limits，key 明文值 → 双维桶）。
+	// 命中 ⇒ 以契约桶为准（覆盖全局兜底）；未登记 ⇒ 不限流（⛔ 不套默认值）。
+	rlOverrides map[string]*policy.RateLimitBuckets
 }
 
 // newCallerAuth 构造调用方鉴权。keys 为空 ⇒ 开放模式。
-func newCallerAuth(keys []string, bucketCapacity int64, bucketRefill float64) *callerAuth {
+func newCallerAuth(keys []string, bucketCapacity int64, bucketRefill float64, rlOverrides map[string]*policy.RateLimitBuckets) *callerAuth {
 	c := &callerAuth{
 		keys:           map[string]bool{},
 		buckets:        map[string]*policy.TokenBucket{},
 		bucketCapacity: bucketCapacity,
 		bucketRefill:   bucketRefill,
+		rlOverrides:    rlOverrides,
+	}
+	if c.rlOverrides == nil {
+		c.rlOverrides = map[string]*policy.RateLimitBuckets{}
 	}
 	for _, k := range keys {
 		if k != "" {
@@ -87,6 +95,14 @@ func (c *callerAuth) wrap(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), callerIdentityKey{}, id)))
 	}
+}
+
+// rateLimitsFor 取指定调用方的契约配额桶（注册表 caller_rate_limits）；未登记 ⇒ nil（不限流）。
+func (c *callerAuth) rateLimitsFor(id string) *policy.RateLimitBuckets {
+	if c == nil {
+		return nil
+	}
+	return c.rlOverrides[id]
 }
 
 // bucketFor 取（并按需创建）指定调用方的令牌桶；未启用每调用方限流 ⇒ nil。

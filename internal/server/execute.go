@@ -64,6 +64,18 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode) {
 	startTime := time.Now()
 
+	// 过载闸（load shedding，统一 SDD 7.2 锚点分离）：护网关自身容量，与限流（护套餐配额）
+	// 分账 —— 超限 ⇒ 429 + Retry-After（显式背压，⛔ 不排队无界、⛔ 不静默丢弃）。
+	if s.maxInFlight > 0 {
+		if s.inFlight.Add(1) > s.maxInFlight {
+			s.inFlight.Add(-1)
+			writeRetryAfter(w, time.Second, string(core.ErrRateLimit), "overloaded",
+				fmt.Sprintf("网关过载：在途请求已达上限 %d（max-in-flight），请稍后重试", s.maxInFlight))
+			return
+		}
+		defer s.inFlight.Add(-1)
+	}
+
 	// 1. 请求体（上限保护）。
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes+1))
 	if err != nil {
@@ -408,7 +420,15 @@ func (s *Server) checkGovernance(w http.ResponseWriter, r *http.Request, h *exec
 			return false
 		}
 	}
-	if cb := s.callers.bucketFor(caller); cb != nil {
+	// 契约配额（caller_rate_limits）优先于全局兜底桶：登记了契约的 key 以契约为准，
+	// 全局兜底桶只兜未登记的 key（统一 SDD 7.2 锚点分离）。
+	if rl := s.callers.rateLimitsFor(caller); rl != nil {
+		if ok, retryAfter := rl.Allow(est); !ok {
+			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
+				fmt.Sprintf("调用方契约配额超限（预估 %d 归一化 token），请稍后重试", est))
+			return false
+		}
+	} else if cb := s.callers.bucketFor(caller); cb != nil {
 		if ok, retryAfter := cb.Allow(est); !ok {
 			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
 				fmt.Sprintf("调用方 token 限流超限（预估 %d 归一化 token），请稍后重试", est))
@@ -652,6 +672,16 @@ func (s *Server) endpointByName(name string) *registry.Endpoint {
 	return nil
 }
 
+// limitGroupFor 取端点所属的配额共享组（limits_group 缺省 = 端点名自成组）；
+// 无任何配额登记的组不建组 ⇒ nil（不限流）。
+func (s *Server) limitGroupFor(ep *registry.Endpoint) *limitGroup {
+	key := ep.LimitsGroup
+	if key == "" {
+		key = ep.Name
+	}
+	return s.limitGroups[key]
+}
+
 // failureKind 把错误分类映射到降级链失败类型（统一 SDD 7.4 七类）。
 func failureKind(cat core.ErrorCategory) routing.FailureKind {
 	switch cat {
@@ -694,6 +724,26 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 		detail := gwerrors.New(core.ErrInvalidRequest, http.StatusForbidden, "egress_denied", security.Redact(err.Error()))
 		s.observeExec(ep, req, nil, "failed")
 		return nil, degs, detail
+	}
+
+	// 端点配额共享组两道闸（统一 SDD 7.2 锚点分离）：在途并发位 + 契约桶（token/rpm 双维），
+	// 任一不足 ⇒ 429 + Retry-After 进重试/降级决策（⛔ 不静默换端点）。并发位占到本尝试
+	// 收口才释放（流式长调用占位到流收口 —— DeepSeek 类「只限并发」的供应商按此计量），
+	// release 由 defer 保证恰好一次。同组端点共享同一份计数（供应商配额池语义）。
+	if g := s.limitGroupFor(ep); g != nil {
+		ok, wait, concurrency := g.acquire(est)
+		if !ok {
+			h.setRetryAfterHint(wait)
+			gate := "契约桶不足"
+			if concurrency {
+				gate = fmt.Sprintf("在途并发位已满（上限 %d）", g.maxInFlight)
+			}
+			detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, "rate_limit",
+				fmt.Sprintf("端点 %q 配额超限：%s（预估 %d 归一化 token），请稍后重试", ep.Name, gate, est))
+			s.observeExec(ep, req, nil, resultForDetail(detail))
+			return nil, degs, detail
+		}
+		defer g.release()
 	}
 
 	// 自有令牌选择 + 凭据注入（8.4 三种形态按 provider 分派；⛔ 不透传调用方凭据 ——

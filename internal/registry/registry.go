@@ -64,6 +64,39 @@ type Endpoint struct {
 	MaxRetries int `json:"max_retries"`
 	// Priority 是优先级，数值越小越优先。
 	Priority int `json:"priority"`
+	// RateLimit 是该端点的上游套餐配额（限流锚点，统一 SDD 7.2 锚点分离）。
+	// 未配置（缺键）⇒ 该端点不限流 —— 配额数字只来自套餐契约，⛔ 不造默认值
+	//（无锚点的全局默认桶实测会造出隐藏吞吐天花板，见 policy.RateLimitBuckets 注释）。
+	RateLimit *RateLimit `json:"rate_limit,omitempty"`
+	// ConcurrencyLimit 是该端点（或其共享组）的在途上游请求数上限（0 = 不限）。
+	// 并发是一等限流维（DeepSeek 类供应商只限并发；流式长调用占位到流收口），
+	// 计量单位 = 在途上游尝试（发起 +1 / 收口 −1），⛔ 不按 TCP 连接数计
+	//（HTTP/2 多路复用下连接数不约束并发，调研见 docs/20261114-多供应商并发-调研-*.md）。
+	ConcurrencyLimit int64 `json:"concurrency_limit,omitempty"`
+	// LimitsGroup 是配额共享组名（可选）：同组端点共享同一份 rate_limit / concurrency_limit
+	// 计数（同供应商多模型 / 多 key / 多部署共享一个配额池的情形，如项目级配额）。
+	// 缺省（空）⇒ 该端点自成一组。同组各端点的配额声明必须逐字一致，否则启动报错。
+	LimitsGroup string `json:"limits_group,omitempty"`
+}
+
+// RateLimit 是端点的上游套餐配额（tokens/min、requests/min 与突发桶深）。
+type RateLimit struct {
+	// TPM 是每分钟归一化 token 配额（<= 0 ⇒ token 维不限）。
+	TPM float64 `json:"tpm"`
+	// RPM 是每分钟请求数配额（<= 0 ⇒ 请求维不限）。
+	RPM float64 `json:"rpm"`
+	// BurstS 是桶深折算秒数（桶深 = 速率/60 × burst_s；突发上限来自真实客户端扇出形态，⛔ 不猜）。
+	BurstS float64 `json:"burst_s"`
+}
+
+// CallerRateLimit 是按调用方 key 的配额登记（统一 SDD 7.2 锚点分离）。
+// KeyRef 是调用方 key 的**来源引用**（环境变量名），⛔ 不存明文 —— 调用方 key 也是凭据
+// （与 credential_ref 同一口径）；未登记的 key 不限流（⛔ 不套全局默认值）。
+type CallerRateLimit struct {
+	KeyRef string  `json:"key_ref"`
+	TPM    float64 `json:"tpm"`
+	RPM    float64 `json:"rpm"`
+	BurstS float64 `json:"burst_s"`
 }
 
 // Registry 是端点注册表（统一 SDD 9.1 / 9.2）。
@@ -73,6 +106,8 @@ type Registry struct {
 	// FallbackChains 是按失败类型的降级链（统一 SDD 7.4；实现计划偏差 4）：
 	// 键 = 失败类型，值 = 有序端点名数组（不含主端点语义由 routing.SelectChain 处理）。
 	FallbackChains map[routing.FailureKind][]string
+	// CallerRateLimits 是按调用方 key 的配额登记（key_ref = 环境变量名；未登记 ⇒ 不限流）。
+	CallerRateLimits []CallerRateLimit
 
 	endpoints []Endpoint             // 确定性排序后的全量端点
 	byModel   map[string][]*Endpoint // model 别名 → 候选端点（同 endpoints 排序）
@@ -81,9 +116,10 @@ type Registry struct {
 
 // fileWire 是配置文件顶层结构（统一 SDD 9.2）。
 type fileWire struct {
-	Strategy       string              `json:"strategy"`
-	Endpoints      []Endpoint          `json:"endpoints"`
-	FallbackChains map[string][]string `json:"fallback_chains"`
+	Strategy         string              `json:"strategy"`
+	Endpoints        []Endpoint          `json:"endpoints"`
+	FallbackChains   map[string][]string `json:"fallback_chains"`
+	CallerRateLimits []CallerRateLimit   `json:"caller_rate_limits"`
 }
 
 // ErrModelNotFound 是「模型不在注册表内」的哨兵错误（可 errors.Is 判定）。
@@ -152,6 +188,42 @@ func Load(path string) (*Registry, error) {
 		seen[ep.Name] = true
 		r.endpoints = append(r.endpoints, ep)
 	}
+
+	// 配额共享组一致性：同组（limits_group 相同）各端点的配额声明必须逐字一致 ——
+	// 共享一个计数器的组里出现两份不同声明，要么超发要么欠发，都是隐性错误 ⇒ 启动报错。
+	type limitDecl struct {
+		rl  *RateLimit
+		con int64
+	}
+	groupDecl := make(map[string]limitDecl, len(doc.Endpoints))
+	for _, ep := range doc.Endpoints {
+		key := ep.LimitsGroup
+		if key == "" {
+			continue // 自成一组，无一致性问题
+		}
+		d := limitDecl{rl: ep.RateLimit, con: ep.ConcurrencyLimit}
+		if prev, ok := groupDecl[key]; ok {
+			sameRL := (prev.rl == nil && d.rl == nil) ||
+				(prev.rl != nil && d.rl != nil && *prev.rl == *d.rl)
+			if !sameRL || prev.con != d.con {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：limits_group %q 内配额声明不一致（端点 %q 与先前声明不同；同组共享一份计数，声明必须逐字一致）", path, key, ep.Name)
+			}
+			continue
+		}
+		groupDecl[key] = d
+	}
+
+	// 调用方配额登记（可选）：key_ref 是环境变量名（⛔ 不存明文），配额口径与端点 rate_limit 同。
+	for i, crl := range doc.CallerRateLimits {
+		who := fmt.Sprintf("第 %d 条 caller_rate_limits", i+1)
+		if crl.KeyRef == "" {
+			return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：key_ref 缺失或为空（只存来源引用，⛔ 不存明文 key）", path, who)
+		}
+		if err := validateRateLimitShape(path, who, crl.TPM, crl.RPM, crl.BurstS); err != nil {
+			return nil, err
+		}
+	}
+	r.CallerRateLimits = doc.CallerRateLimits
 
 	// 确定性排序：Priority 升序（数值越小越优先），同值按 Name 升序
 	//（⛔ 不依赖配置文件顺序 / map 遍历顺序，统一 SDD 1.4.3 路由决策可复现）。
@@ -222,10 +294,36 @@ func validateEndpoint(path string, ordinal int, ep Endpoint) error {
 	if ep.MaxRetries < 0 {
 		return fmt.Errorf("%s：%q 的 max_retries = %d 不得为负", prefix, ep.Name, ep.MaxRetries)
 	}
+	if ep.ConcurrencyLimit < 0 {
+		return fmt.Errorf("%s：%q 的 concurrency_limit = %d 不得为负（0 = 不限）", prefix, ep.Name, ep.ConcurrencyLimit)
+	}
 	if ep.BaseURL != "" {
 		if !strings.Contains(ep.BaseURL, "://") {
 			return fmt.Errorf("%s：%q 的 base_url %q 须形如 scheme://host[/path]", prefix, ep.Name, ep.BaseURL)
 		}
+	}
+	if ep.RateLimit != nil {
+		if err := validateRateLimitShape(path, fmt.Sprintf("端点 %q 的 rate_limit", ep.Name),
+			ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRateLimitShape 校验配额登记形状（端点 rate_limit 与 caller_rate_limits 共用）：
+// burst_s 必须为正（桶深 = 速率/60 × burst_s，突发上限由部署方按真实扇出登记，⛔ 不猜）；
+// tpm / rpm 不得为负且至少一维为正（两维全 0 = 不限流 ⇒ 请直接省略该登记，别写空壳）。
+func validateRateLimitShape(path, who string, tpm, rpm, burstS float64) error {
+	prefix := fmt.Sprintf("registry: 配置 %s 自检失败：%s", path, who)
+	if tpm < 0 || rpm < 0 {
+		return fmt.Errorf("%s：tpm=%v / rpm=%v 不得为负", prefix, tpm, rpm)
+	}
+	if tpm == 0 && rpm == 0 {
+		return fmt.Errorf("%s：tpm 与 rpm 同时为 0 等于不限流（请省略该登记，⛔ 不写空壳）", prefix)
+	}
+	if burstS <= 0 {
+		return fmt.Errorf("%s：burst_s = %v 必须为正（桶深折算秒数，突发上限按真实客户端扇出登记）", prefix, burstS)
 	}
 	return nil
 }

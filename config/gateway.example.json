@@ -17,7 +17,14 @@
       "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 30,
       "max_retries": 2,
-      "priority": 0
+      "priority": 0,
+      "rate_limit": {
+        "tpm": 2000000,
+        "rpm": 5000,
+        "burst_s": 10
+      },
+      "concurrency_limit": 200,
+      "limits_group": "openai-org"
     },
     {
       "name": "backup",
@@ -81,5 +88,13 @@
     "rate_limit": ["backup", "local"],
     "timeout": ["backup"],
     "upstream_error": ["backup", "local"]
-  }
+  },
+  "caller_rate_limits": [
+    {
+      "key_ref": "CALLER_KEY_FRONTEND",
+      "tpm": 600000,
+      "rpm": 600,
+      "burst_s": 10
+    }
+  ]
 }

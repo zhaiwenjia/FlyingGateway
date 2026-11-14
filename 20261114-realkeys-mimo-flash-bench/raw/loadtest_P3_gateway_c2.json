@@ -1,0 +1,50 @@
+{
+ "ts": "2026-11-14 21:03:13",
+ "summary": {
+  "target": "gateway",
+  "model": "mimo-v2.6-flash",
+  "concurrency": 2,
+  "requests": 4,
+  "ok": 4,
+  "fail": 0,
+  "wall_s": 0.609,
+  "throughput_rps": 6.57,
+  "latency_ms": {
+   "p50": 303.9,
+   "p90": 304.1,
+   "p99": 304.1,
+   "mean": 303.8,
+   "max": 304.1
+  }
+ },
+ "results": [
+  {
+   "i": 0,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3041,
+   "err": ""
+  },
+  {
+   "i": 1,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3039,
+   "err": ""
+  },
+  {
+   "i": 2,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3037,
+   "err": ""
+  },
+  {
+   "i": 3,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3036,
+   "err": ""
+  }
+ ]
+}

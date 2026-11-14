@@ -1,0 +1,36 @@
+{
+ "ts": "2026-11-14 21:03:12",
+ "summary": {
+  "target": "litellm",
+  "model": "mimo-v2.6-flash",
+  "concurrency": 1,
+  "requests": 2,
+  "ok": 2,
+  "fail": 0,
+  "wall_s": 0.623,
+  "throughput_rps": 3.21,
+  "latency_ms": {
+   "p50": 311.2,
+   "p90": 311.2,
+   "p99": 311.2,
+   "mean": 311.0,
+   "max": 311.2
+  }
+ },
+ "results": [
+  {
+   "i": 0,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3108,
+   "err": ""
+  },
+  {
+   "i": 1,
+   "ok": true,
+   "status": 200,
+   "latency_s": 0.3112,
+   "err": ""
+  }
+ ]
+}

@@ -54,12 +54,26 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	if tokens <= 0 {
 		return false, 0
 	}
-	want := float64(tokens)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// 按经过时间补充（封顶 capacity）。
+	if ok, after := b.hasLocked(tokens); !ok {
+		return false, after
+	}
+	b.takeLocked(tokens)
+	return true, 0
+}
+
+// hasLocked 非扣减探查（须持 b.mu）：先按经过时间补充（封顶 capacity），
+// 再判 want 是否可付；不足时给出补足等待（向上取整到毫秒，保证拒绝时 > 0）。
+// 供 Allow 与复合桶（RateLimitBuckets「同时可付才扣」）共用同一套补充/判定口径。
+func (b *TokenBucket) hasLocked(tokens int64) (bool, time.Duration) {
+	if tokens <= 0 {
+		return false, 0
+	}
+	want := float64(tokens)
+
 	now := time.Now()
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	if elapsed > 0 {
@@ -68,14 +82,17 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	}
 
 	if want <= b.tokens {
-		b.tokens -= want
 		return true, 0
 	}
-	// 拒绝：算出补足缺口所需时长（向上取整到毫秒，保证 > 0）。
 	need := want - b.tokens
 	after := time.Duration(math.Ceil(need/b.refillPerSec*1000)) * time.Millisecond
 	if after <= 0 {
 		after = time.Millisecond
 	}
 	return false, after
+}
+
+// takeLocked 扣减 tokens 个 token（须持 b.mu；调用前须经 hasLocked 确认可付）。
+func (b *TokenBucket) takeLocked(tokens int64) {
+	b.tokens -= float64(tokens)
 }
