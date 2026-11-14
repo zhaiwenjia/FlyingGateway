@@ -31,10 +31,15 @@ vendor/
 output/
 logs/
 *.log
+.worktree
+.github
+.ruff_cache
+
 # ---- 参考代码（只读，不参与构建/测试/CI）----
 # AGENTS.md 规则 18：历史代码一律只读，不参与构建、测试与 CI。
 # reference/ 下存放外部项目的克隆/副本，仅供查阅实现参考。
 reference/
+docs/
 
 # ---- macOS ----
 # Finder 会在目录里塞 .DS_Store（. 开头 ⇒ git 默认不跟踪它，
