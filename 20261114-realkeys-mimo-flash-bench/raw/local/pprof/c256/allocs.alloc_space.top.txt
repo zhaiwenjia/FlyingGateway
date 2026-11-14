@@ -1,0 +1,67 @@
+File: gateway-local
+Type: alloc_space
+Time: 2026-11-14 18:54:16 CST
+Showing nodes accounting for 3383.08MB, 89.66% of 3773.10MB total
+Dropped 282 nodes (cum <= 18.87MB)
+Showing top 60 nodes out of 125
+      flat  flat%   sum%        cum   cum%
+ 2045.47MB 54.21% 54.21%  2048.97MB 54.30%  github.com/zhaiwenjia/FlyingGateway/internal/stream.NewSSEScanner (inline)
+  221.17MB  5.86% 60.07%   221.17MB  5.86%  github.com/tidwall/gjson.Result.arrayOrMap
+  166.70MB  4.42% 64.49%   560.44MB 14.85%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decodeOne
+  130.61MB  3.46% 67.95%   409.32MB 10.85%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).BuildRequest
+  124.60MB  3.30% 71.26%   124.60MB  3.30%  reflect.unsafe_New
+   84.10MB  2.23% 73.48%   166.61MB  4.42%  encoding/json/v2.makeMethodArshaler.func3
+   63.55MB  1.68% 75.17%    63.55MB  1.68%  github.com/zhaiwenjia/FlyingGateway/internal/telemetry.(*Span).SetAttr
+   55.55MB  1.47% 76.64%    55.55MB  1.47%  reflect.unsafe_NewArray
+   41.01MB  1.09% 77.73%    41.01MB  1.09%  net/textproto.MIMEHeader.Set (inline)
+   34.01MB   0.9% 78.63%    35.01MB  0.93%  net/textproto.readMIMEHeader
+   27.01MB  0.72% 79.35%    69.04MB  1.83%  fmt.Sprintf
+   26.52MB   0.7% 80.05%    38.52MB  1.02%  internal/fmtsort.Sort
+      26MB  0.69% 80.74%       26MB  0.69%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*frameAccumulator).result
+   25.58MB  0.68% 81.42%    25.58MB  0.68%  bufio.NewWriterSize (inline)
+   24.51MB  0.65% 82.06%    24.51MB  0.65%  bytes.Clone (inline)
+      24MB  0.64% 82.70%    47.50MB  1.26%  github.com/openai/openai-go/v3/internal/encoding/json.Marshal
+   22.50MB   0.6% 83.30%    22.50MB   0.6%  github.com/tidwall/gjson.ParseBytes (inline)
+   21.15MB  0.56% 83.86%    21.15MB  0.56%  net/http.init.func2
+   19.01MB   0.5% 84.36%    19.01MB   0.5%  net/http.Header.Clone (inline)
+      18MB  0.48% 84.84%    33.01MB  0.87%  github.com/zhaiwenjia/FlyingGateway/internal/codec/chat.DecodeRequest
+      18MB  0.48% 85.32%    23.50MB  0.62%  context.(*cancelCtx).propagateCancel
+      16MB  0.42% 85.74%   354.72MB  9.40%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).newStructTypeDecoder.func1
+      13MB  0.34% 86.08%    45.51MB  1.21%  net/http.readRequestLimit
+      13MB  0.34% 86.43%   573.95MB 15.21%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).decode
+      12MB  0.32% 86.75%    82.01MB  2.17%  github.com/openai/openai-go/v3/packages/param.MarshalWithExtras[go.shape.791e15863794e2da47acf9101d66ea17b3505fcf63e86d21cea79afae7bfdf1b,go.shape.interface {}]
+      12MB  0.32% 87.07%   178.10MB  4.72%  github.com/openai/openai-go/v3/internal/apijson.indirectUnmarshalerDecoder
+   11.50MB   0.3% 87.37%  2060.47MB 54.61%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.newSSEIter (inline)
+      10MB  0.27% 87.64%    20.50MB  0.54%  context.withCancel (inline)
+    8.50MB  0.23% 87.86%    68.04MB  1.80%  net/http.(*conn).readRequest
+    8.50MB  0.23% 88.09%    33.50MB  0.89%  github.com/openai/openai-go/v3/internal/encoding/json.marshalerEncoder
+       8MB  0.21% 88.30%       19MB   0.5%  net/http.(*persistConn).roundTrip
+       8MB  0.21% 88.51%       31MB  0.82%  net/http.(*persistConn).readLoop
+    6.50MB  0.17% 88.68%   356.22MB  9.44%  github.com/openai/openai-go/v3/internal/apijson.(*decoderBuilder).unmarshalResult
+    5.50MB  0.15% 88.83%    43.12MB  1.14%  net/http.(*Transport).dialConn
+    5.50MB  0.15% 88.97%    23.01MB  0.61%  github.com/zhaiwenjia/FlyingGateway/internal/codec/chat.EncodeResponse
+       5MB  0.13% 89.11%    21.50MB  0.57%  context.WithDeadlineCause
+       3MB  0.08% 89.19%    58.55MB  1.55%  reflect.MakeSlice
+       3MB  0.08% 89.27%    28.15MB  0.75%  net/http.(*Request).write
+    2.50MB 0.066% 89.33%  3558.42MB 94.31%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).handle
+    2.50MB 0.066% 89.40%    68.01MB  1.80%  net/http.(*Transport).roundTrip
+    2.50MB 0.066% 89.46%   133.09MB  3.53%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).endEndpointSpan
+       2MB 0.053% 89.52%    22.50MB   0.6%  net/http.ReadResponse
+    1.50MB  0.04% 89.56%    24.52MB  0.65%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenChatStreamDecoder).usageOf
+       1MB 0.027% 89.58%  3279.28MB 86.91%  github.com/zhaiwenjia/FlyingGateway/internal/server.(*Server).runEndpoint
+       1MB 0.027% 89.61%  3645.60MB 96.62%  net/http.(*conn).serve
+    0.50MB 0.013% 89.62%    28.65MB  0.76%  net/http.(*persistConn).writeLoop
+    0.50MB 0.013% 89.64%  2420.67MB 64.16%  github.com/zhaiwenjia/FlyingGateway/internal/adapter.(*qwenAdapter).StreamStart
+    0.50MB 0.013% 89.65%    75.54MB  2.00%  main.(*logExporter).Export
+    0.50MB 0.013% 89.66%    76.04MB  2.02%  github.com/zhaiwenjia/FlyingGateway/internal/telemetry.(*Span).End
+         0     0% 89.66%    21.50MB  0.57%  context.WithDeadline (inline)
+         0     0% 89.66%   275.21MB  7.29%  encoding/json.Marshal (inline)
+         0     0% 89.66%   396.75MB 10.52%  encoding/json.Unmarshal (inline)
+         0     0% 89.66%   275.21MB  7.29%  encoding/json/v2.Marshal
+         0     0% 89.66%   396.75MB 10.52%  encoding/json/v2.Unmarshal
+         0     0% 89.66%   372.72MB  9.88%  encoding/json/v2.makeMethodArshaler.func6
+         0     0% 89.66%   249.71MB  6.62%  encoding/json/v2.marshalEncode
+         0     0% 89.66%   396.25MB 10.50%  encoding/json/v2.unmarshalDecode
+         0     0% 89.66%    41.52MB  1.10%  fmt.(*pp).doPrintf
+         0     0% 89.66%    41.52MB  1.10%  fmt.(*pp).printArg
+         0     0% 89.66%    41.52MB  1.10%  fmt.(*pp).printValue
