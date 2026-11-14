@@ -229,6 +229,127 @@ rate_limited、timeout、cancelled、upstream_error 等）；凭据类信息一�
 **可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限）；
 `499` 不重试（取消后抑制重试）；其余 4xx 为请求问题，不重试。
 
+### 4.4 请求 / 响应 Schema（输入 / 输出）
+
+**通用 HTTP 头**（两个入口一致）：
+
+| 头 | 说明 |
+|---|---|
+| `Authorization: Bearer <key>` | 调用方 key（`GATEWAY_CALLER_KEYS` 非空时必带） |
+| `Content-Type: application/json` | 请求体为 JSON |
+| `X-Client-Request-Id` | 可选。本轮唯一标识，供 `/v1/cancel` 与请求合并；不传则网关生成 |
+
+**输入 · `POST /v1/chat/completions`**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `model` | string | ✅ | 注册表模型别名（列表外 ⇒ 404 `model_not_found`） |
+| `messages` | array | ✅ | 消息数组（见下） |
+| `stream` | bool | — | `true` = SSE 流式 |
+| `temperature` / `top_p` | number | — | 采样参数 |
+| `stop` | string 或 [string] | — | 停止序列 |
+| `max_tokens` / `max_completion_tokens` | int | — | 输出上限（参与上下文越界估算与预估扣减） |
+| `tools` | array | — | `[{type:"function", function:{name, description, parameters}}]` |
+| `tool_choice` | string 或 object | — | `auto` / `none` / `required` / 指定函数 |
+| `reasoning_effort` | string | — | 推理强度（透传给支持的上游） |
+
+`messages[]` 元素：`role`（`system` / `user` / `assistant` / `tool`）、`content`（string 或
+part 数组：`{type:"text", text}` / `{type:"image_url", image_url:{url}}`）、
+`reasoning_content`（多轮带思考回填）、`tool_calls[]`（`{id, type, function:{name, arguments}}`）、
+`tool_call_id`（tool 角色回填）、`name`。
+
+**输入 · `POST /v1/responses`**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `model` | string | ✅ | 注册表模型别名 |
+| `input` | string 或 array | ✅ | 文本或 item 数组（`message` / `reasoning` / `function_call` / `function_call_output` …） |
+| `instructions` | string | — | 系统指令 |
+| `tools` / `tool_choice` | array / string·object | — | 同 Chat 语义 |
+| `max_output_tokens` | int | — | 输出上限 |
+| `temperature` / `top_p` | number | — | 采样参数 |
+| `stream` | bool | — | `true` = 事件流 |
+| `previous_response_id` | string | — | 前轮响应续接（端点不支持时 ⇒ 400 `unsupported_capability`） |
+| `conversation` | string 或 {id} | — | 会话引用 |
+| `prompt_cache_key` | string | — | 缓存亲和键 |
+| `reasoning` | object | — | `{effort, summary, context, mode}` |
+
+**输出 · 非流式（Chat，`object:"chat.completion"`）**：
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "created": 1731560000,
+  "model": "gpt-6-luna",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "你好",
+      "reasoning_content": "（思考过程，可选）",
+      "tool_calls": [{"id": "call_x", "type": "function",
+                       "function": {"name": "f", "arguments": "{}"}}]
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12,
+    "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 0}
+  },
+  "x_gateway": {"degradations": [{"field": "...", "reason": "...", "detail": "..."}]}
+}
+```
+
+`finish_reason` 取值：`stop` / `length` / `tool_calls` / `content_filter` / `function_call`。
+`x_gateway.degradations[]` 是跨供应商映射的**不可逆语义丢失标记**（`field` / `reason` / `detail`），
+无丢失则不出现。
+
+**输出 · 流式（Chat，`stream:true`）**：SSE 帧序列，每帧一条 `data: {chat.completion.chunk}`
+（`choices[].delta` 增量：`content` / `reasoning_content` / `tool_calls[]`，`tool_calls[]` 带
+`index`/`id`/`function{name,arguments}` 增量）；末帧带 `finish_reason` 与归一 `usage`，
+以 `data: [DONE]` 收尾。
+
+**输出 · Responses（`object:"response"`）**：
+
+```json
+{
+  "id": "resp_xxx",
+  "object": "response",
+  "created_at": 1731560000,
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "你好"}]}],
+  "output_text": "你好",
+  "usage": {
+    "input_tokens": 9, "output_tokens": 3, "total_tokens": 12,
+    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+    "output_tokens_details": {"reasoning_tokens": 0}
+  },
+  "incomplete_details": {"reason": "max_output_tokens"},
+  "x_gateway": {"degradations": []}
+}
+```
+
+`status` 六值原值透传：`completed` / `failed` / `in_progress` / `cancelled` / `queued` /
+`incomplete`（Responses 体系用 `status`，不用 `finish_reason`）；`incomplete_details.reason`：
+`max_output_tokens` / `max_messages` / `content_filter` / `steered`。流式为 `event: response.*` +
+`data:` 双字段事件流（`response.output_text.delta` / `response.reasoning_text.delta` /
+`response.function_call_arguments.delta` / 终止事件等）。
+
+**输出 · usage 归一口径**（两入口一致语义）：`input`/`prompt` 侧为**总输入**（缓存命中与缓存写入
+分列在 `*_tokens_details`，不打折并入）；`output`/`completion` 侧含 `reasoning_tokens` 维度。
+所有 usage 经逐家归一（MiMo 两拍收口、Kimi `choices[0].usage` 等差异在适配层抹平）。
+
+**辅助端点**：
+
+| 端点 | 输入 | 输出 |
+|---|---|---|
+| `GET /v1/models` | — | `{"object":"list","data":[{id, object:"model", owned_by, context_window, max_output_tokens, capabilities:{supports_tools, supports_stream, supports_vision}}]}` |
+| `POST /v1/cancel` | `{"client_request_id": "..."}` | `{"cancelled": true\|false}` |
+| `GET /health` | — | `{"status":"ok"}` |
+
 ## 五、运行参数
 
 长选项与单字母缩写双形式等价（如 `--config` / `-c`）。
