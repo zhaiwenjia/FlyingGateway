@@ -17,6 +17,7 @@ import (
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/adapter"
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/chat"
+	"github.com/zhaiwenjia/FlyingGateway/internal/codec/messages"
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/responses"
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/detect"
@@ -40,6 +41,7 @@ type inboundMode int
 const (
 	modeChat inboundMode = iota
 	modeResponses
+	modeMessages
 )
 
 const (
@@ -58,6 +60,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // handleResponses 处理 POST /v1/responses。
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	s.handle(w, r, modeResponses)
+}
+
+// handleMessages 处理 POST /v1/messages（Anthropic Messages 入口，统一 SDD 3.1 第三入站形）。
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	s.handle(w, r, modeMessages)
 }
 
 // handle 是双入口共用管线。
@@ -93,6 +100,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	switch mode {
 	case modeChat:
 		req, err = chat.DecodeRequest(body)
+	case modeMessages:
+		req, err = messages.DecodeRequest(body)
 	default:
 		req, err = responses.DecodeRequest(body)
 	}

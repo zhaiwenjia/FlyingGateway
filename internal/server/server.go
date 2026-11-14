@@ -261,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.callers.wrap(s.handleChatCompletions))
 	mux.HandleFunc("POST /v1/responses", s.callers.wrap(s.handleResponses))
+	mux.HandleFunc("POST /v1/messages", s.callers.wrap(s.handleMessages))
 	mux.HandleFunc("GET /v1/models", s.callers.wrap(s.handleModels))
 	mux.HandleFunc("POST /v1/cancel", s.callers.wrap(s.handleCancel))
 	mux.HandleFunc("GET /health", s.handleHealth)

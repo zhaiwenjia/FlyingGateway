@@ -722,3 +722,60 @@ func TestMaxInFlightSheds(t *testing.T) {
 	}
 	readBody(t, resp2)
 }
+
+// TestMessagesIngressEndToEnd 断言 Anthropic Messages 入口端到端（统一 SDD 3.1 第三入站形）：
+// Messages 形请求 ⇒ 管线（治理/路由/上游执行）⇒ Messages 形响应；缺 max_tokens ⇒ 400。
+func TestMessagesIngressEndToEnd(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+
+	resp := e.postJSON("/v1/messages", body, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	m := readBody(t, resp)
+	if m["type"] != "message" || m["role"] != "assistant" {
+		t.Fatalf("外壳失真（须 type=message/role=assistant）: %v", m)
+	}
+	if sr, _ := m["stop_reason"].(string); sr == "" {
+		t.Fatalf("缺 stop_reason: %v", m)
+	}
+	if _, ok := m["usage"].(map[string]any); !ok {
+		t.Fatalf("缺 usage: %v", m)
+	}
+	if _, ok := m["content"].([]any); !ok {
+		t.Fatalf("缺 content 数组: %v", m)
+	}
+
+	// Anthropic 语义：max_tokens 必填 ⇒ 缺失 400。
+	resp2 := e.postJSON("/v1/messages", `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺 max_tokens = %d，期望 400", resp2.StatusCode)
+	}
+	readBody(t, resp2)
+}
+
+// TestMessagesIngressStream 断言 Messages 入口流式：SSE 事件序列含 message_start /
+// content_block_* / message_delta / message_stop（Anthropic 事件语义）。
+func TestMessagesIngressStream(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	resp := e.postJSON("/v1/messages", body, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("读流失败: %v", err)
+	}
+	s := string(raw)
+	for _, want := range []string{"event: message_start", "event: content_block_delta",
+		"event: message_delta", "event: message_stop"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("流式缺 %q；实际尾部: %.300s", want, s[max(0, len(s)-300):])
+		}
+	}
+}

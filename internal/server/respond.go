@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/chat"
+	"github.com/zhaiwenjia/FlyingGateway/internal/codec/messages"
 	"github.com/zhaiwenjia/FlyingGateway/internal/codec/responses"
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
@@ -31,10 +32,14 @@ type clientEncoder interface {
 
 // newClientEncoder 按入站模式选客户端帧编码器。
 func newClientEncoder(mode inboundMode, model string) clientEncoder {
-	if mode == modeResponses {
+	switch mode {
+	case modeResponses:
 		return responses.NewEventEncoder(model)
+	case modeMessages:
+		return messages.NewEventEncoder(model)
+	default:
+		return chat.NewChunkEncoder(model)
 	}
-	return chat.NewChunkEncoder(model)
 }
 
 // reasoningBlock 是一个 thinking 块的流式累积（正文增量 + 块签名）。
@@ -201,9 +206,12 @@ func (s *Server) writeOutcome(w http.ResponseWriter, r *http.Request, h *execHan
 		body []byte
 		err  error
 	)
-	if mode == modeResponses {
+	switch mode {
+	case modeResponses:
 		body, err = responses.EncodeResponse(resp)
-	} else {
+	case modeMessages:
+		body, err = messages.EncodeResponse(resp)
+	default:
 		body, err = chat.EncodeResponse(resp)
 	}
 	if err != nil {
