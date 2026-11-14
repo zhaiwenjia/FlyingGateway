@@ -44,6 +44,28 @@ type Options struct {
 	// AllowLoopbackEgress 控制出网校验是否放行环回地址（本地 Ollama 等，统一 SDD 8.2）。
 	AllowLoopbackEgress bool
 
+	// ---- 调用方 API key 与令牌桶（与上游自有令牌解耦）----
+
+	// CallerKeys 是调用方 API key 白名单（Authorization: Bearer <key>）。
+	// 空 = 开放模式（不校验）；非空 ⇒ /v1/* 强制鉴权，缺失 / 无效 401（统一 SDD 8.1）。
+	CallerKeys []string
+	// CallerBucketCapacity / CallerBucketRefill 是每调用方令牌桶（token 级限流，8.3）；
+	// ≤ 0 = 不启用每调用方限流。
+	CallerBucketCapacity int64
+	CallerBucketRefill   float64
+
+	// ---- 上游自有令牌池与限流轮换 ----
+
+	// UpstreamBucketCapacity / UpstreamBucketRefill 是每自有令牌的本地令牌桶；≤ 0 = 不启用
+	// （轮换仍按上游 429 冷却生效）。
+	UpstreamBucketCapacity int64
+	UpstreamBucketRefill   float64
+	// RateLimitCooldown 是上游 429 无 Retry-After 时的默认冷却（默认 30s）。
+	RateLimitCooldown time.Duration
+	// MaxTokenWait 是「全部自有令牌受限」时的最长等待上限（默认 3s；
+	// 超上限 ⇒ 429 + Retry-After=最短等待，⛔ 不盲发）。
+	MaxTokenWait time.Duration
+
 	// CancelGracePeriod 是延迟取消窗口（默认 0 = 立即取消，统一 SDD 3.7）。
 	CancelGracePeriod time.Duration
 	// CancelGraceByProvider 是按 provider 的窗口覆盖（统一 SDD 3.7 作用域）。
@@ -68,6 +90,10 @@ type Server struct {
 	bucket    *policy.TokenBucket
 	budget    *policy.Budget
 	guardrail *policy.Guardrail
+
+	callers       *callerAuth
+	pools         *poolManager
+	maxTokenWait  time.Duration
 
 	allowLoopback bool
 	pollInterval  time.Duration
@@ -106,9 +132,15 @@ func New(opts Options) (*Server, error) {
 		bucket:        opts.TokenBucket,
 		budget:        opts.Budget,
 		guardrail:     opts.Guardrail,
+		callers:       newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill),
+		pools:         newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown),
+		maxTokenWait:  opts.MaxTokenWait,
 		allowLoopback: opts.AllowLoopbackEgress,
 		pollInterval:  poll,
 		logger:        lg,
+	}
+	if s.maxTokenWait <= 0 {
+		s.maxTokenWait = DefaultMaxTokenWait
 	}
 	installAuthTransport() // 凭据注入点（ctx 键精确到请求，统一 SDD 8.4）
 	s.cancels = newCancelRegistry(opts.CancelGracePeriod, opts.CancelGraceByProvider, opts.CancelRetention)
@@ -116,13 +148,14 @@ func New(opts Options) (*Server, error) {
 }
 
 // Handler 返回数据面路由（统一 SDD 2.1 ①）。
+// /v1/* 经调用方鉴权（CallerKeys 非空时强制）；/health 保持开放（存活探针）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
-	mux.HandleFunc("POST /v1/responses", s.handleResponses)
-	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("POST /v1/chat/completions", s.callers.wrap(s.handleChatCompletions))
+	mux.HandleFunc("POST /v1/responses", s.callers.wrap(s.handleResponses))
+	mux.HandleFunc("GET /v1/models", s.callers.wrap(s.handleModels))
+	mux.HandleFunc("POST /v1/cancel", s.callers.wrap(s.handleCancel))
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /v1/cancel", s.handleCancel)
 	return mux
 }
 

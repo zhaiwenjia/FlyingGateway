@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -681,10 +682,10 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 
 	// 自有令牌选择 + 凭据注入（8.4 三种形态按 provider 分派；⛔ 不透传调用方凭据 ——
 	// 调用方 API key 与自有令牌解耦，上游头永远是池内令牌）。
-	payload, _, _, detail := buildUpstreamAuth(s.pools, ad, res.CredentialRef, est, s.maxTokenWait)
-	if detail != nil {
-		s.observeExec(ep, req, nil, resultForDetail(detail))
-		return nil, degs, detail
+	payload, _, _, authDetail := buildUpstreamAuth(s.pools, ad, res.CredentialRef, est, s.maxTokenWait)
+	if authDetail != nil {
+		s.observeExec(ep, req, nil, resultForDetail(authDetail))
+		return nil, degs, authDetail
 	}
 
 	// 每次上游调用一个超时预算（Endpoint.TimeoutS）；执行上下文挂在取消句柄上
