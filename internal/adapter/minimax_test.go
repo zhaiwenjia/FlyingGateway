@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -17,7 +19,7 @@ import (
 // 本文件覆盖 MiniMax 适配器（统一 SDD 4.3.11，三形态；① 出站已 Responses 化）：
 // ① BuildRequest（POST {base}/responses、input/instructions/tools 扁平形、⛔ 无 GroupId /
 // temperature / top_p、max_output_tokens、tool_choice 仅 auto ⇒ 降级记录、previous_response_id
-// 不支持 ⇒ 显式报错）、ParseResponse / 流式（构造 wire 断言——⚠️ 无真实样本，待 key 补采）、
+// 不支持 ⇒ 显式报错）、ParseResponse / 流式（真实样本直喂 + 构造 wire 断言）、
 // base_resp 必检（HTTP 200 也判错）；②③ 的既有覆盖（V2 / Anthropic）不动。
 // thinking 拆包（splitThinkingTags / thinkSplitter —— 2026-11-14 修复后必须钉死；机件由 V2 承载，
 // Responses 形推理走 reasoning item / 事件，⛔ 不拆标签）、ParseUsage（无缓存字段 ⇒ 记 0）。
@@ -47,7 +49,7 @@ func newMiniMaxResolution(base string) *core.Resolution {
 // ④ max_output_tokens + stream:true（Responses 形 usage 随 response.completed，⛔ 无 stream_options）；
 // ⑤ tool_choice 仅 auto ⇒ 非 auto 降为 auto 并记降级（⛔ 不静默）；
 // ⑥ previous_response_id 不支持 ⇒ 传入即 400 unsupported_capability（3.5）。
-// ⚠️ 无真实样本（无可用 key）⇒ wire 断言为构造形、待 key 补采；期望值取自官方 Create Response
+// 构造 wire 断言（真实样本直喂另见 TestMiniMaxParseResponseReal，2026-11-16 直采）；期望值取自官方 Create Response
 // OpenAPI 示例（https://platform.minimax.io/docs/api-reference/responses-create）。
 // 错误实现会红：任一禁发键进 body ⇒ assertNoKey 红；tool_choice 降级不记 ⇒ degs 断言红；
 // 静默丢 previous_response_id ⇒ err==nil ⇒ 红。
@@ -290,7 +292,7 @@ func TestMiniMaxAnthropicShape(t *testing.T) {
 
 // TestMiniMaxBaseRespError 钉住 base_resp 必检（4.3.11：HTTP 200 + status_code != 0 ⇒ 业务错误，
 // ⛔ 不检查 base_resp 就会把错误当成功）：1008 余额不足 ⇒ budget_exceeded 分类。
-// ① Responses 形（minimaxAdapter）构造 wire 断言（⚠️ 无真实样本，待 key 补采；base_resp 为 chat 形
+// ① Responses 形（minimaxAdapter）构造 wire 断言（真实样本直喂另见 TestMiniMaxParseResponseReal；base_resp 为 chat 形
 //
 //	实证形态，/responses 官方示例未见该字段 ⇒ 按「base_resp 错误处理保持现状」保守探测）；
 //
@@ -516,7 +518,7 @@ func TestMiniMaxStreamBaseRespError(t *testing.T) {
 // TestMiniMaxStreamToolCallName 钉住流式工具调用名进帧（帧承载约定：FrameToolCallArgsDelta.Text
 // 载函数名）：Responses 形 output_item.added 的 item.name 以补名帧进帧序列（arguments.delta
 // 不再带名），参数增量照常拼接（ToolCallID 一致）。
-// ⚠️ 无真实样本（无可用 key）⇒ 构造事件断言、待 key 补采。
+// 构造事件断言（真实流直喂另见 TestMiniMaxStreamRealResponses，2026-11-16 直采）。
 // 错误实现会红：不发补名帧 ⇒ name 为空 ≠ search ⇒ 红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxStreamToolCallName -v
 func TestMiniMaxStreamToolCallName(t *testing.T) {
@@ -641,7 +643,7 @@ func TestMiniMaxFinishWithoutUsageDoneAtSentinel(t *testing.T) {
 // TestMiniMaxResponsesStream 钉住 Responses 形流式帧序列（构造事件流）：
 // Lifecycle(response.created) → ReasoningDelta → TextDelta → Usage → Done(completed)；
 // usage 由 response.completed 自带（⛔ 不需要 stream_options）。
-// ⚠️ 无真实样本（无可用 key）⇒ 构造事件断言、待 key 补采；事件序取自官方 Create Response
+// 构造事件断言（真实流直喂另见 TestMiniMaxStreamRealResponses，2026-11-16 直采）；事件序取自官方 Create Response
 // OpenAPI 示例（https://platform.minimax.io/docs/api-reference/responses-create）。
 // 错误实现会红：帧序/帧种错配 ⇒ 序列断言红；usage 丢失 ⇒ Usage 断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxResponsesStream -v
@@ -687,5 +689,132 @@ func TestMiniMaxResponsesStream(t *testing.T) {
 	}
 	if frames[4].Status != core.StatusCompleted {
 		t.Fatalf("Done.Status = %q，期望 completed", frames[4].Status)
+	}
+}
+
+// TestMiniMaxParseResponseReal 钉住真实样本直喂 ParseResponse（testdata/real/
+// minimax_responses_*_real.json，2026-11-16 MiniMax 国内站 api.minimax.cn 实调直采
+// （MiniMax-M3.1-Flash；key 绑站——io 站同 key 401），来源见 testdata/real/README.md）：
+// basic：output[reasoning, message]（message「好，说定了！😄」）、reasoning 带 encrypted_content
+// （summary 空）、usage 逐字 204/0/75/279（reasoning 66）；
+// tools：output[message, function_call]（call_id/name/arguments 逐字、扁平工具形直通）、
+// finish ⇒ tool_calls、**cached_tokens 真实命中 189**（⛔ 「无缓存字段记 0」是 chat 形旧口径）；
+// reasoning：缓存命中 197、reasoning_tokens 106。
+// 错误实现会红：按 chat 形解析 ⇒ items 全丢；缓存误记 0 ⇒ CacheReadTokens 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxParseResponseReal -v
+func TestMiniMaxParseResponseReal(t *testing.T) {
+	a := NewMiniMax(http.DefaultClient)
+	out, err := a.ParseResponse(newMiniMaxResolution(""), loadFixture(t, "real/minimax_responses_basic_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse(basic) 报错: %v", err)
+	}
+	if out.Status != core.StatusCompleted || out.FinishReason != core.FinishStop {
+		t.Fatalf("basic 解析 = %q/%q，期望 completed/stop", out.Status, out.FinishReason)
+	}
+	if out.Text != "好，说定了！😄" {
+		t.Fatalf("basic Text = %q，期望 %q", out.Text, "好，说定了！😄")
+	}
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "reasoning" || out.OutputItems[1].Type != "message" {
+		t.Fatalf("basic OutputItems = %+v，期望 [reasoning, message]", out.OutputItems)
+	}
+	if out.OutputItems[0].EncryptedContent == "" {
+		t.Fatalf("basic reasoning item = %+v，期望 encrypted_content 保留", out.OutputItems[0])
+	}
+	u := out.Usage
+	if u.InputTokens != 204 || u.CacheReadTokens != 0 || u.OutputTokens != 75 || u.TotalTokens != 279 || u.ReasoningTokens != 66 {
+		t.Fatalf("basic usage = In%d/Read%d/Out%d/Total%d/Rsn%d，期望 204/0/75/279/66（样本逐字）",
+			u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.TotalTokens, u.ReasoningTokens)
+	}
+	out, err = a.ParseResponse(newMiniMaxResolution(""), loadFixture(t, "real/minimax_responses_tools_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse(tools) 报错: %v", err)
+	}
+	if out.FinishReason != core.FinishToolCalls {
+		t.Fatalf("tools FinishReason = %q，期望 tool_calls", out.FinishReason)
+	}
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "message" || out.OutputItems[1].Type != "function_call" {
+		t.Fatalf("tools OutputItems = %+v，期望 [message, function_call]", out.OutputItems)
+	}
+	fc := out.OutputItems[1]
+	if fc.CallID != "call_cw9YJCKpV3OyLPrwtT4jxuUu" || fc.Name != "get_weather" || fc.Arguments != `{"city": "北京"}` {
+		t.Fatalf("function_call item = %+v，期望 call_cw9YJCKpV3OyLPrwtT4jxuUu/get_weather 逐字", fc)
+	}
+	if out.Usage.InputTokens != 499 || out.Usage.CacheReadTokens != 189 || out.Usage.OutputTokens != 38 || out.Usage.TotalTokens != 537 {
+		t.Fatalf("tools usage = In%d/Read%d/Out%d/Total%d，期望 499/189/38/537（样本逐字；缓存命中 189 ⛔ 不记 0）",
+			out.Usage.InputTokens, out.Usage.CacheReadTokens, out.Usage.OutputTokens, out.Usage.TotalTokens)
+	}
+	out, err = a.ParseResponse(newMiniMaxResolution(""), loadFixture(t, "real/minimax_responses_reasoning_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse(reasoning) 报错: %v", err)
+	}
+	if out.Usage.CacheReadTokens != 197 || out.Usage.ReasoningTokens != 106 {
+		t.Fatalf("reasoning usage = Read%d/Rsn%d，期望 197/106（样本逐字）", out.Usage.CacheReadTokens, out.Usage.ReasoningTokens)
+	}
+}
+
+// TestMiniMaxStreamRealResponses 钉住真实流样本直喂解码器（testdata/real/
+// minimax_responses_stream_real.sse，2026-11-16 api.minimax.cn 逐帧直采）：
+// response.completed 收口（无 [DONE]）；帧序列 Lifecycle×2 → ReasoningDelta×2 → TextDelta×1
+// → Usage → Done；usage 由 response.completed 自带（204/42/246，reasoning 35）。
+// 错误实现会红：帧序/帧种错配、收口依赖 [DONE]（真机流无 [DONE]）⇒ 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxStreamRealResponses -v
+func TestMiniMaxStreamRealResponses(t *testing.T) {
+	f, err := os.Open("testdata/real/minimax_responses_stream_real.sse")
+	if err != nil {
+		t.Fatalf("打开真实样本失败: %v", err)
+	}
+	defer f.Close()
+	a := NewMiniMax(http.DefaultClient)
+	d := a.(*minimaxAdapter).streamDecoder()
+	sc := stream.NewSSEScanner(f)
+	var frames []stream.Frame
+	done := false
+	for sc.Scan() {
+		fs, dn, err := d.decode(sc.Event())
+		if err != nil {
+			t.Fatalf("decode 出错: %v", err)
+		}
+		frames = append(frames, fs...)
+		if dn {
+			done = true
+			break
+		}
+	}
+	if !done {
+		t.Fatal("response.completed 未收口（真机流无 [DONE]，以终态事件判结束）")
+	}
+	wantKinds := []stream.FrameKind{
+		stream.FrameLifecycle, stream.FrameLifecycle,
+		stream.FrameReasoningDelta, stream.FrameReasoningDelta,
+		stream.FrameTextDelta, stream.FrameUsage, stream.FrameDone,
+	}
+	if len(frames) != len(wantKinds) {
+		t.Fatalf("帧数 = %d，期望 %d：%+v", len(frames), len(wantKinds), frames)
+	}
+	var think, text string
+	for i, wk := range wantKinds {
+		if frames[i].Kind != wk {
+			t.Fatalf("帧[%d].Kind = %v，期望 %v（Lifecycle×2→ReasoningDelta×2→TextDelta→Usage→Done）", i, frames[i].Kind, wk)
+		}
+		switch frames[i].Kind {
+		case stream.FrameReasoningDelta:
+			think += frames[i].Reasoning
+		case stream.FrameTextDelta:
+			text += frames[i].Text
+		}
+	}
+	if !strings.HasPrefix(think, `We need respond Chinese. User says "说好"`) || len([]rune(think)) != 144 {
+		t.Fatalf("推理增量拼接 = %d 字，前缀不对（期望 144 字、以 We need respond 开头）", len([]rune(think)))
+	}
+	if text != "好，就这么定了。" {
+		t.Fatalf("正文增量拼接 = %q，期望 %q", text, "好，就这么定了。")
+	}
+	usageFrame := frames[len(frames)-2]
+	if usageFrame.Usage == nil || usageFrame.Usage.InputTokens != 204 || usageFrame.Usage.OutputTokens != 42 ||
+		usageFrame.Usage.TotalTokens != 246 || usageFrame.Usage.ReasoningTokens != 35 {
+		t.Fatalf("usage 帧 = %+v，期望 204/42/246、reasoning 35（response.completed 自带，样本逐字）", usageFrame.Usage)
+	}
+	if frames[len(frames)-1].Status != core.StatusCompleted {
+		t.Fatalf("Done.Status = %q，期望 completed", frames[len(frames)-1].Status)
 	}
 }

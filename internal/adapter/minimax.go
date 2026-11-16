@@ -34,8 +34,9 @@ import (
 //   - reasoning_split=false 时思考并入 content 且用 <think> 标签包裹 ⇒ 必须拆包
 //    （思考进推理正文位、正文留 content）。⚠️ 仅 chat 形（③）承载——Responses 形（①）的推理
 //    走 reasoning item / reasoning_text 事件（官方 Create Response 示例），⛔ 不拆标签。
-//   - usage：① 按实际 usage 树选口径（usageTreeShape）；③ 无缓存命中/写入字段 ⇒ 记 0；
-//    ② input_tokens 是残值（同 Claude）。
+//   - usage：① 按实际 usage 树选口径（usageTreeShape）——Responses 树带
+//    input_tokens_details.cached_tokens（2026-11-16 真实样本命中 189/197），按通用口径归一；
+//    ③ 无缓存命中/写入字段 ⇒ 记 0；② input_tokens 是残值（同 Claude）。
 //   - finish_reason 取值 stop / length / content_filter / tool_calls（流式 chunk 与非流式同一枚举口径）。
 //
 // previous_response_id：① /responses 按不支持处理（官方 Create Response schema 明言「请求中暂不支持
@@ -175,7 +176,8 @@ func (a *minimaxAdapter) AuthScheme() AuthScheme {
 }
 
 // ParseUsage 委托 usage.Normalize（4.4）：按实际 usage 树选口径（usageTreeShape）——Chat 树
-// 无缓存命中/写入字段 ⇒ 记 0（4.4.2 MiniMax 行）；Responses 树按 input_tokens_details 归一。
+// 无缓存命中/写入字段 ⇒ 记 0；Responses 树带 input_tokens_details.cached_tokens
+// （2026-11-16 真实样本：tools 例命中 189、reasoning 例 197）⇒ 按通用口径归一，⛔ 不记 0。
 func (a *minimaxAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderMiniMax, usageTreeShape(raw), raw)
 }
