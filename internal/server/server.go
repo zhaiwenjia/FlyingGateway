@@ -70,6 +70,13 @@ type Options struct {
 	// truncated exponential backoff 推荐值）；测试注入小值提速。
 	RetryBackoff Backoff
 
+	// UpstreamProbeInterval 是上游周期巡检间隔（统一 SDD 2.8：主动巡检是预防）；
+	// 0 = 不启用（默认关、显式开）。探测为 HTTP 可达性巡检（⛔ 不发模型调用、不花配额），
+	// 结果进 /admin/health 的 probes 视图并与熔断器联动（不可达 ⇒ 主动熔断）。
+	UpstreamProbeInterval time.Duration
+	// UpstreamProbeTimeout 是单次巡检探测超时（默认 3s）。
+	UpstreamProbeTimeout time.Duration
+
 	// ---- 上游自有令牌池与限流轮换 ----
 
 	// UpstreamBucketCapacity / UpstreamBucketRefill 是每自有令牌的本地令牌桶；≤ 0 = 不启用
@@ -124,6 +131,11 @@ type Server struct {
 
 	// breakers 是端点熔断器（键 = 端点名，统一 SDD 7.3 三态；注册表每端点一个）。
 	breakers map[string]*EndpointBreaker
+
+	// prober 是上游周期巡检器（nil = 不启用）。
+	prober *upstreamProber
+	// shuttingDown 由 Shutdown 置位：readiness 转 503（先摘流量再排空，K8s readiness 口径）。
+	shuttingDown atomic.Bool
 
 	allowLoopback bool
 	pollInterval  time.Duration
@@ -270,6 +282,9 @@ func New(opts Options) (*Server, error) {
 		}
 		s.breakers[ep.Name] = NewEndpointBreaker(ep.Name, th, cd, pb, s.logger)
 	}
+	// 上游周期巡检器（统一 SDD 2.8；interval=0 ⇒ 不启用，newUpstreamProber 返回 nil）。
+	s.prober = newUpstreamProber(opts.Registry.List(), s.breakers,
+		opts.UpstreamProbeInterval, opts.UpstreamProbeTimeout, s.allowLoopback, s.logger)
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
 	}
@@ -288,7 +303,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.callers.wrap(s.handleModels))
 	mux.HandleFunc("POST /v1/cancel", s.callers.wrap(s.handleCancel))
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/readiness", s.handleReadiness)
 	return mux
+}
+
+// handleReadiness 是就绪探针（GET /health/readiness，K8s readiness 口径：管「能不能接流量」）：
+// 就绪 ⇒ 200 {"status":"ready"}；Shutdown 进行中 ⇒ 503（先摘流量再排空在途执行）。
+// ⛔ 不因上游端点不健康而 503 —— 上游是共享外部依赖，全部实例会同时不就绪 ⇒
+// 全摘流量比上游故障本身更糟；上游健康由熔断器逐端点管理（统一 SDD 2.8 / 7.3 分工）。
+func (s *Server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	if s.shuttingDown.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "shutting_down"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
 }
 
 // AdminHandler 返回管理面路由（统一 SDD 8.5：强制鉴权；只读视图）。
@@ -368,6 +396,10 @@ func ValidateAdminAddr(addr string) error {
 // Shutdown 优雅关闭：进程关闭 ⇒ 全部在途执行以 shutdown 原因立即收口
 // （统一 SDD 6.6 要求 4 / 8.5）。
 func (s *Server) Shutdown() {
+	s.shuttingDown.Store(true) // readiness 转 503：先摘流量（K8s readiness 口径）
+	if s.prober != nil {
+		s.prober.Stop() // 停上游巡检（⛔ 关闭后继续敲上游）
+	}
 	s.cancels.cancelAll(reasonShutdown)
 }
 
@@ -493,7 +525,16 @@ func (s *Server) handleAdminHealth(w http.ResponseWriter, _ *http.Request) {
 		"cancel_pending":     s.cancels.pendingCount(),
 		"usage_missing_rate": s.metrics.UsageMissingRate(),
 		"breakers":           breakers,
+		"probes":             s.probeSnapshot(),
 	})
+}
+
+// probeSnapshot 返回巡检结果视图（未启用 ⇒ "disabled"）。
+func (s *Server) probeSnapshot() any {
+	if s.prober == nil {
+		return "disabled"
+	}
+	return s.prober.Snapshot()
 }
 
 // ---- 错误与 JSON 出口 ----

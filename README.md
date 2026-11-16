@@ -124,6 +124,7 @@ OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 | `GET /v1/models`            | 列出注册表模型别名与能力（tools / stream / vision、上下文窗口、输出上限） |
 | `POST /v1/cancel`           | 显式取消在途执行，请求体 `{"client_request_id": "..."}`                 |
 | `GET /health`               | 存活探针（不鉴权）                                                        |
+| `GET /health/readiness`     | 就绪探针（不鉴权）：就绪 200 / 优雅关闭中 503                              |
 
 **非流式调用**：
 
@@ -417,6 +418,8 @@ usage）→ `message_stop`。
 | `--rate-limit-cooldown`      | `-k` | 上游 429 无 Retry-After 时的令牌默认冷却                                        | `30s`                         |
 | `--max-token-wait`           | `-m` | 全部令牌受限时的最长等待（超上限 ⇒ 429 + Retry-After）                         | `3s`                          |
 | `--max-in-flight`            | `-i` | 过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After） | `0`                           |
+| `--upstream-probe-interval`  | `-I` | 上游周期巡检间隔（HTTP 可达性巡检、⛔ 不发模型调用；0 = 不启用）              | `0`                           |
+| `--upstream-probe-timeout`   | `-T` | 单次上游巡检探测超时                                                          | `3s`                          |
 | `--guardrail-pattern`        | `-P` | 护栏正则（可重复）                                                              | —                              |
 | `--guardrail-webhook`        | `-W` | 护栏 Webhook URL（空 = 只做正则）                                               | —                              |
 | `--version`                  | —     | 打印版本号后退出                                                                | —                              |

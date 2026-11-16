@@ -75,6 +75,9 @@ type options struct {
 	maxTokenWait           time.Duration
 	maxInFlight            int64
 
+	upstreamProbeInterval time.Duration
+	upstreamProbeTimeout  time.Duration
+
 	guardrailPatterns []string
 	guardrailWebhook  string
 
@@ -169,6 +172,10 @@ func parseFlags(args []string) (*options, error) {
 	fs.DurationVar(&opts.maxTokenWait, "m", 3*time.Second, "同 --max-token-wait")
 	fs.Int64Var(&opts.maxInFlight, "max-in-flight", 0, "过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After）")
 	fs.Int64Var(&opts.maxInFlight, "i", 0, "同 --max-in-flight")
+	fs.DurationVar(&opts.upstreamProbeInterval, "upstream-probe-interval", 0, "上游周期巡检间隔（HTTP 可达性巡检、⛔ 不发模型调用；0 = 不启用；结果见 /admin/health probes）")
+	fs.DurationVar(&opts.upstreamProbeInterval, "I", 0, "同 --upstream-probe-interval")
+	fs.DurationVar(&opts.upstreamProbeTimeout, "upstream-probe-timeout", 3*time.Second, "单次上游巡检探测超时")
+	fs.DurationVar(&opts.upstreamProbeTimeout, "T", 3*time.Second, "同 --upstream-probe-timeout")
 
 	var pats multiFlag
 	fs.Var(&pats, "guardrail-pattern", "护栏正则（可重复）")
@@ -279,6 +286,8 @@ func run(args []string, stdout io.Writer) int {
 		RateLimitCooldown:      opts.rateLimitCooldown,
 		MaxTokenWait:           opts.maxTokenWait,
 		MaxInFlight:            opts.maxInFlight,
+		UpstreamProbeInterval:  opts.upstreamProbeInterval,
+		UpstreamProbeTimeout:   opts.upstreamProbeTimeout,
 		AllowLoopbackEgress:    opts.allowLoopback,
 		CancelGracePeriod:      opts.cancelGrace,
 		CancelGraceByProvider:  opts.cancelGraceByProvider,

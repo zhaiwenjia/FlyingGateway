@@ -178,6 +178,36 @@ func (b *EndpointBreaker) RecordNeutral(now time.Time) {
 	}
 }
 
+// Trip 主动熔断打开（上游周期巡检发现不可达时用，统一 SDD 2.8「主动巡检是预防」）：
+// 不走失败计数、直接 OPEN + 冷却；已 OPEN 不缩短既有冷却。⛔ 与 RecordFailure 分开 ——
+// 巡检失败是「连通性判定」，不是一次流量失败。
+func (b *EndpointBreaker) Trip(now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == breakerOpen {
+		return
+	}
+	b.state = breakerOpen
+	b.cooldownUntil = now.Add(b.cooldown)
+	b.probesInFlight = 0
+	b.consecutiveFails = 0
+	b.logger.Warn("端点熔断打开（巡检判不可达）",
+		"endpoint", b.name, "cooldown_s", b.cooldown.Seconds())
+}
+
+// RecordProbeSuccess 记一次巡检成功：仅 HALF-OPEN 时闭合（巡检即探测）；
+// CLOSED ⛔ 不清零真实流量的连续失败计数（巡检可达 ≠ 流量成功，不许掩盖真实失败）。
+func (b *EndpointBreaker) RecordProbeSuccess(now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == breakerHalfOpen {
+		b.releaseProbeLocked()
+		b.state = breakerClosed
+		b.consecutiveFails = 0
+		b.logger.Info("端点熔断闭合（巡检探测成功）", "endpoint", b.name)
+	}
+}
+
 // releaseProbeLocked 释放一个探测位（调用方持锁）。
 func (b *EndpointBreaker) releaseProbeLocked() {
 	if b.probesInFlight > 0 {
