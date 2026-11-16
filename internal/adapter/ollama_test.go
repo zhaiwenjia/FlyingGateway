@@ -91,7 +91,8 @@ func TestOllamaNativeBuildRequest(t *testing.T) {
 // ① URL {base}/v1/responses；② 请求体 Responses 形（input 数组 / instructions 顶层 / tools 扁平形）；
 // ③ ⛔ 不发 tool_choice / n / user / logit_bias（4.3.6 已知偏差；官方 Supported features 仅
 //
-//	Streaming / Tools (function calling) / Reasoning summaries）⇒ tool_choice 出站剔除 + 降级记录
+//	Streaming / Tools (function calling) / Reasoning summaries）⇒ tool_choice 出站剔除，
+//	非 auto（none/required/指定函数名）记降级、**auto 不记**（语义无损失，口径同 zhipu/moonshot）
 //	（DegradationAware，⛔ 不静默丢弃无标记）；
 //
 // ④ stream:true（Responses 形 usage 随 response.completed，⛔ 无 stream_options）；
@@ -142,6 +143,17 @@ func TestOllamaCompatBuildRequest(t *testing.T) {
 	assertNoKey(t, m, "logit_bias")
 	if len(degs) != 1 || degs[0].Field != "tool_choice" || degs[0].Reason != core.DegradationCapabilityUnsupported {
 		t.Fatalf("degradations = %+v，期望 1 条 tool_choice 降级（⛔ 不静默丢弃无标记）", degs)
+	}
+	// auto 不记降级（语义无损失：Ollama 默认即模型自决；口径同 zhipu/moonshot「auto 不记」）。
+	rAuto := *r
+	rAuto.ToolChoice = &core.ToolChoice{Mode: "auto"}
+	outAuto, degsAuto, err := a.(*ollamaCompatAdapter).BuildRequestWithDegradations(context.Background(), &rAuto, newOllamaCompatResolution("http://127.0.0.1:11434"))
+	if err != nil {
+		t.Fatalf("BuildRequest(tool_choice=auto) 报错: %v", err)
+	}
+	assertNoKey(t, bodyMap(t, outAuto), "tool_choice")
+	if len(degsAuto) != 0 {
+		t.Fatalf("tool_choice=auto 的 degradations = %+v，期望 0 条（auto 无语义损失 ⛔ 不记）", degsAuto)
 	}
 	// ④ stream:true、⛔ 无 stream_options。
 	if mustAt(t, m, "stream") != true {

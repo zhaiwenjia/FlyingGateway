@@ -38,7 +38,7 @@ func newZhipuResolution(base string) *core.Resolution {
 //
 // ② 请求体 Responses 形：input 数组 / instructions 顶层 / tools 扁平形；
 //
-//	previous_response_id 支持 ⇒ 直通不报错（服务端会话 store=true、7 天，官方）；
+//	previous_response_id 支持 ⇒ 直通不报错且**强制 store=true**（官方硬条件「须 store=true」）；
 //	thinking.type 经 Extra 透传。
 //
 // 错误实现会红：URL 不重写 ⇒ 断言红；消息塞 messages[] ⇒ input 断言红；Extra 被丢 ⇒ thinking 断言红。
@@ -131,6 +131,32 @@ func TestZhipuBuildRequestResponses(t *testing.T) {
 	// thinking.type 经 Extra 透传（4.3.8 特异参数）。
 	if mustString(t, m, "thinking", "type") != "enabled" {
 		t.Fatalf("thinking = %v，期望 thinking.type=enabled（Extra 透传）", m["thinking"])
+	}
+	// previous_response_id 携带 ⇒ 强制 store=true（官方硬条件「须 store=true，有效期 7 天」）。
+	if mustAt(t, m, "store") != true {
+		t.Fatalf("store = %v，期望 true（previous_response_id 透传的官方硬条件）", m["store"])
+	}
+	// 调用方 store:false 与续接矛盾时仍强制 true（以官方硬条件为准）。
+	r2 := *r
+	r2.Extra = map[string]any{"store": false}
+	o2, err := a.BuildRequest(context.Background(), &r2, newZhipuResolution("https://open.bigmodel.cn/api/paas/v4"))
+	if err != nil {
+		t.Fatalf("BuildRequest(store:false) 报错: %v", err)
+	}
+	if mustAt(t, bodyMap(t, o2), "store") != true {
+		t.Fatal("store:false + previous_response_id ⇒ 仍须强制 store=true（官方硬条件）")
+	}
+	// 无 previous_response_id ⇒ 不强制（store 按调用方原样）。
+	r3 := &core.Request{
+		Messages: []core.Message{{Role: "user", Content: []core.ContentPart{{Text: "hi"}}}},
+		Extra:    map[string]any{"store": false},
+	}
+	o3, err := a.BuildRequest(context.Background(), r3, newZhipuResolution("https://open.bigmodel.cn/api/paas/v4"))
+	if err != nil {
+		t.Fatalf("BuildRequest(无续接) 报错: %v", err)
+	}
+	if mustAt(t, bodyMap(t, o3), "store") != false {
+		t.Fatal("无 previous_response_id ⇒ store 按调用方原样（false）")
 	}
 	// 非流式 ⇒ ⛔ 不发 stream 键。
 	assertNoKey(t, m, "stream")

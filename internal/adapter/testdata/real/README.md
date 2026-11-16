@@ -98,3 +98,12 @@
 | `minimax_responses_stream_real.sse` | MiniMax | 同上（stream=true） | 真机逐帧录制 | `response.completed` 收口、无 `[DONE]`；usage 204/42/246 |
 
 ⚠️ key 绑站：同一把 key 打 `api.minimax.io/v1/models` 返 401（io 站），国内站 200。
+
+### 2026-11-16 OpenAI 补采（代理解除区域封锁后直采，gpt-6-luna）
+
+| 文件 | 供应商 | 来源 | 真实性依据 | 关键事实 |
+|---|---|---|---|---|
+| `openai_responses_basic_real.json` | OpenAI | `api.openai.com/v1/responses` 实调（代理下） | 真机直采 | 首轮 403 区域封锁；代理下 4/4 全通 |
+| `openai_responses_tools_real.json` | OpenAI | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
+| `openai_responses_reasoning_real.json` | OpenAI | 同上 | 真机直采 | output 含 reasoning item |
+| `openai_responses_stream_real.sse` | OpenAI | 同上（stream=true） | 真机逐帧录制 | `response.completed` 收口 |
