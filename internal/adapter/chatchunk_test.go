@@ -82,31 +82,12 @@ func BenchmarkQwenChatChunkDecode(b *testing.B) {
 	benchChunkDecode(b, d.decodeOne, payloads)
 }
 
-// BenchmarkMoonshotChatChunkDecode：Kimi 真实捕获（含 choices[0].usage quirk）+ docs 示例。
-func BenchmarkMoonshotChatChunkDecode(b *testing.B) {
-	d := NewMoonshot(http.DefaultClient).(*moonshotAdapter).streamDecoder()
-	payloads := append(loadRealChunks(b, "real/kimi_stream_real.sse"), benchConstructedChunks...)
-	benchChunkDecode(b, d.decodeOne, payloads)
-}
-
 // BenchmarkZhipuChatChunkDecode：智谱 docs 示例（逐块带 usage 形态）。
+// （Moonshot / DeepSeek / Xiaomi 的 chat-chunk 基准随出站 Responses 改形删除——三家 chat
+// 解码器已不存在，被测对象消失；chat-chunk 共享机件的载体测试与基准由 qwen / zhipu 承接。）
 func BenchmarkZhipuChatChunkDecode(b *testing.B) {
 	d := NewZhipu(http.DefaultClient).(*zhipuAdapter).streamDecoder()
 	payloads := append(loadRealChunks(b, "real/zhipu_stream_docs_example.txt"), benchConstructedChunks...)
-	benchChunkDecode(b, d.decodeOne, payloads)
-}
-
-// BenchmarkDeepSeekChatChunkDecode：DeepSeek 真实捕获（逐块 "usage":null 形态）。
-func BenchmarkDeepSeekChatChunkDecode(b *testing.B) {
-	d := NewDeepSeek(http.DefaultClient).(*deepseekAdapter).streamDecoder()
-	payloads := append(loadRealChunks(b, "real/deepseek_stream_real.sse"), benchConstructedChunks...)
-	benchChunkDecode(b, d.decodeOne, payloads)
-}
-
-// BenchmarkXiaomiChatChunkDecode：MiMo 真实捕获（reasoning_content 承载形态）。
-func BenchmarkXiaomiChatChunkDecode(b *testing.B) {
-	d := NewXiaomi(http.DefaultClient).(*xiaomiAdapter).streamDecoder()
-	payloads := append(loadRealChunks(b, "real/mimo_stream_real.sse"), benchConstructedChunks...)
 	benchChunkDecode(b, d.decodeOne, payloads)
 }
 

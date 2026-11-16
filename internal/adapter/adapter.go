@@ -146,15 +146,16 @@ func ForShape(p core.Provider, s core.APIShape) (Adapter, error) {
 	case core.ProviderQwen:
 		switch s {
 		case core.APIShapeOpenAIChat, core.APIShapeOpenAIResponses:
-			// 兼容层出站 Chat Completions（A/B 实测裁定全部走 Chat）；登记键 OpenAIResponses 是
-			// 无端点路径信号的旧占位 ⇒ 映射到同一 chat 形适配器（⛔ 不静默换供应商，出站形状统一）。
+			// 兼容层出站 Responses（出站方法口径：除 Claude 外优先 OpenAI SDK Response API，
+			// 不支持才回退）；两个登记键归同一 responses 形适配器（⛔ 不静默换供应商）。
 			return NewQwen(defaultClient), nil
 		case core.APIShapeQwenNative:
 			return NewQwenNative(defaultClient), nil
 		}
 	case core.ProviderMiniMax:
 		switch s {
-		case core.APIShapeOpenAIChat:
+		case core.APIShapeOpenAIChat, core.APIShapeOpenAIResponses:
+			// OpenAI 兼容层出站 Responses（POST {base}/responses）；两个登记键归同一适配器。
 			return NewMiniMax(defaultClient), nil
 		case core.APIShapeAnthropicMessages:
 			return NewMiniMaxAnthropic(defaultClient), nil
@@ -169,7 +170,9 @@ func ForShape(p core.Provider, s core.APIShape) (Adapter, error) {
 		switch s {
 		case core.APIShapeOllamaNative:
 			return NewOllama(defaultClient), nil
-		case core.APIShapeOpenAIChat:
+		case core.APIShapeOpenAIChat, core.APIShapeOpenAIResponses:
+			// 兼容层出站 Responses（POST {base}/v1/responses，v0.13.3+ 无状态 flavor）；
+			// 两个登记键归同一适配器。
 			return NewOllamaCompat(defaultClient), nil
 		}
 	default:
@@ -180,21 +183,17 @@ func ForShape(p core.Provider, s core.APIShape) (Adapter, error) {
 		fmt.Sprintf("供应商 %s 不支持出站形状 %s（形态清单见 adapter.ForShape）", p, s))}
 }
 
-// defaultShapeFor 返回 For() 的默认登记形状（统一 SDD 3.6 / 4.1；实际出站 wire 形状以各家
-// OutboundShape() 为准——OpenAI 兼容族登记键沿用 Responses，出站是 Chat Completions）：
-// OpenAI / Grok / DeepSeek / Kimi / 智谱 / Qwen 兼容层 / 小米 ⇒ Responses；
-// Claude ⇒ Messages；Gemini ⇒ 原生 generateContent；MiniMax ⇒ OpenAI 形（/v1/chat/completions，4.3.11）；
-// Ollama ⇒ 原生 /api/chat（⛔ 不走 Responses，4.3.6）。
+// defaultShapeFor 返回 For() 的默认登记形状（统一 SDD 3.6 / 4.1；出站方法口径：除 Claude 外
+// 优先 OpenAI SDK Response API，不支持才回退）：OpenAI / Grok / DeepSeek / Kimi / 智谱 /
+// Qwen 兼容层 / 小米 / MiniMax 兼容层 / Ollama 兼容层 ⇒ Responses（登记键 OpenAIResponses）；
+// Claude ⇒ Messages；Gemini ⇒ 原生 generateContent（其 OpenAI 兼容层无 /responses）。
+// 原生形状（Ollama /api/chat、Qwen 原生、MiniMax V2）仅显式登记时使用。
 func defaultShapeFor(p core.Provider) core.APIShape {
 	switch p {
 	case core.ProviderAnthropic:
 		return core.APIShapeAnthropicMessages
 	case core.ProviderGemini:
 		return core.APIShapeGeminiNative
-	case core.ProviderMiniMax:
-		return core.APIShapeOpenAIChat
-	case core.ProviderOllama:
-		return core.APIShapeOllamaNative
 	default:
 		return core.APIShapeOpenAIResponses
 	}

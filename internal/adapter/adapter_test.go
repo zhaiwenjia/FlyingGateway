@@ -146,11 +146,13 @@ func TestForShapeDispatch(t *testing.T) {
 		{core.ProviderQwen, core.APIShapeOpenAIResponses, "*adapter.qwenAdapter"},
 		{core.ProviderQwen, core.APIShapeQwenNative, "*adapter.qwenNativeAdapter"},
 		{core.ProviderMiniMax, core.APIShapeOpenAIChat, "*adapter.minimaxAdapter"},
+		{core.ProviderMiniMax, core.APIShapeOpenAIResponses, "*adapter.minimaxAdapter"},
 		{core.ProviderMiniMax, core.APIShapeAnthropicMessages, "*adapter.minimaxAnthropicAdapter"},
 		{core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2, "*adapter.minimaxV2Adapter"},
 		{core.ProviderXiaomi, core.APIShapeOpenAIResponses, "*adapter.xiaomiAdapter"},
 		{core.ProviderOllama, core.APIShapeOllamaNative, "*adapter.ollamaAdapter"},
 		{core.ProviderOllama, core.APIShapeOpenAIChat, "*adapter.ollamaCompatAdapter"},
+		{core.ProviderOllama, core.APIShapeOpenAIResponses, "*adapter.ollamaCompatAdapter"},
 	}
 	for _, c := range cases {
 		a, err := ForShape(c.p, c.s)
@@ -173,8 +175,8 @@ func TestForShapeUnsupported(t *testing.T) {
 	// OpenAI × Chat（OpenAI 只登记 Responses 形）。
 	_, err := ForShape(core.ProviderOpenAI, core.APIShapeOpenAIChat)
 	requireDetailErr(t, err, "unsupported_shape")
-	// Ollama × Responses（4.3.6：Responses 不完整，⛔ 不登记）。
-	_, err = ForShape(core.ProviderOllama, core.APIShapeOpenAIResponses)
+	// DeepSeek × Chat（出站方法口径：DeepSeek 支持 /responses ⇒ 只登记 Responses 形）。
+	_, err = ForShape(core.ProviderDeepSeek, core.APIShapeOpenAIChat)
 	requireDetailErr(t, err, "unsupported_shape")
 	// 未登记供应商。
 	_, err = ForShape(core.ProviderUnknown, core.APIShapeOpenAIChat)
@@ -182,9 +184,9 @@ func TestForShapeUnsupported(t *testing.T) {
 }
 
 // TestForDefaultShape 钉住 For() 的默认出站形状（SDD 3.6 / defaultShapeFor 注释口径）：
-// OpenAI / Grok ⇒ Responses；DeepSeek / Kimi / 智谱 / 小米 / Qwen 兼容 ⇒ Chat Completions
-// （真实流为 chat.completion.chunk 形）；Claude ⇒ Messages；Gemini ⇒ 原生；MiniMax ⇒ OpenAI 形；
-// Ollama ⇒ 原生 /api/chat。
+// 出站方法口径——除 Claude 外优先 OpenAI SDK Response API，不支持才回退：
+// OpenAI / Grok / DeepSeek / Kimi / 智谱 / 小米 / Qwen 兼容 / MiniMax 兼容 / Ollama 兼容 ⇒ Responses；
+// Claude ⇒ Messages；Gemini ⇒ 原生（其 OpenAI 兼容层无 /responses）。
 // 错误实现会红：默认形状错配 ⇒ OutboundShape 断言不匹配即红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestForDefaultShape -v
 func TestForDefaultShape(t *testing.T) {
@@ -196,13 +198,13 @@ func TestForDefaultShape(t *testing.T) {
 		{core.ProviderAnthropic, ShapeAnthropicMessages},
 		{core.ProviderGemini, ShapeGeminiNative},
 		{core.ProviderXAI, ShapeResponses},
-		{core.ProviderDeepSeek, ShapeChatCompletions},
-		{core.ProviderMoonshot, ShapeChatCompletions},
-		{core.ProviderZhipu, ShapeChatCompletions},
-		{core.ProviderQwen, ShapeChatCompletions},
-		{core.ProviderMiniMax, ShapeChatCompletions},
-		{core.ProviderXiaomi, ShapeChatCompletions},
-		{core.ProviderOllama, ShapeOllamaNative},
+		{core.ProviderDeepSeek, ShapeResponses},
+		{core.ProviderMoonshot, ShapeResponses},
+		{core.ProviderZhipu, ShapeResponses},
+		{core.ProviderQwen, ShapeResponses},
+		{core.ProviderMiniMax, ShapeResponses},
+		{core.ProviderXiaomi, ShapeResponses},
+		{core.ProviderOllama, ShapeResponses},
 	}
 	for _, c := range cases {
 		a, err := For(c.p)

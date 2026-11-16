@@ -19,7 +19,8 @@
   用户面只认注册表里的模型别名，别名 → 上游模型 / 端点 / 协议形状的映射全在注册表，
   新增供应商只加注册表条目与适配器，不改调用方。
 - **11 家供应商适配** —— OpenAI、Anthropic、Gemini、DeepSeek、Qwen、智谱、Kimi（moonshot）、
-  MiniMax、MiMo（xiaomi）、Grok（xai）、Ollama；出站统一 Chat Completions 形，
+  MiniMax、MiMo（xiaomi）、Grok（xai）、Ollama；出站优先 OpenAI SDK Response API
+  （Responses 形，Claude 走 Anthropic Messages、Gemini 走原生 SDK），
   usage 逐家归一到统一口径，费用按费率表计量。
 - **路由与降级** —— `priority`（显式有序降级链）/ `round_robin` 两种策略；
   路由决策可复现（同输入 + 同注册表 + 同配置 ⇒ 同一决策），降级目标不可用时显式报错、
@@ -377,7 +378,8 @@ usage）→ `message_stop`。
   每 key 桶余量可查管理面 `GET /admin/credential-pools`。
   ⚠️ **两域解耦**：调用方令牌（外部项目签发，只管理本系统的消费额度）与上游自有令牌
   互不相通，⛔ 调用方凭据永不发给供应商。
-- **出站协议**：统一 Chat Completions 形（实测裁定），流式经 SSE 逐帧转发；
+- **出站协议**：优先 Responses 形（`POST {base}/responses`；Claude 走 Anthropic Messages、
+  Gemini 走原生 SDK），流式经 SSE 逐帧转发（`response.completed` 等终态事件收口）；
   usage 逐家归一后计量费用（费率表）。
 - **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
 - **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供

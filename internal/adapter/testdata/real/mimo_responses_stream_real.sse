@@ -1,0 +1,114 @@
+event:response.created
+data:{"type":"response.created","sequence_number":0,"response":{"id":"resp_908acaa718ba4c339eff4bb27282832e","object":"response","created_at":1794813629,"model":"mimo-v2.6-flash","metadata":null,"status":"in_progress","output":[]}}
+
+event:response.in_progress
+data:{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_908acaa718ba4c339eff4bb27282832e","object":"response","created_at":1794813629,"model":"mimo-v2.6-flash","metadata":null,"status":"in_progress","output":[]}}
+
+event:response.output_item.added
+data:{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","type":"reasoning","summary":[],"content":[],"status":"in_progress"}}
+
+event:response.content_part.added
+data:{"type":"response.content_part.added","sequence_number":3,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":4,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":"The"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":5,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" user wrote"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":6,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" \"说好\""}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":7,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" which means"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":8,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" \"say well"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":9,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":"\" or \"s"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":10,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":"peak well\" in"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":11,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" Chinese. This seems"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":12,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" like an"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":13,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" incomplete message. Let"}
+
+event:response.reasoning_text.delta
+data:{"type":"response.reasoning_text.delta","sequence_number":14,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"delta":" me respond appropriately."}
+
+event:response.output_item.added
+data:{"type":"response.output_item.added","sequence_number":15,"output_index":1,"item":{"id":"msg_5ea68c749bf04b32935d7f7de1759bc9","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event:response.content_part.added
+data:{"type":"response.content_part.added","sequence_number":16,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":17,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"你好"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":18,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"！看起来你的消息"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":19,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"可能没有"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":20,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"发"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":21,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"完整"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":22,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":" 😊"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":23,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"\n\n"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":24,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"\""}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":25,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"说好\"——"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":26,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"你想说什么"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":27,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"呢？欢迎"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":28,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"继续补充"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":29,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"，我很"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":30,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"乐意帮助"}
+
+event:response.output_text.delta
+data:{"type":"response.output_text.delta","sequence_number":31,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"delta":"你！"}
+
+event:response.reasoning_text.done
+data:{"type":"response.reasoning_text.done","sequence_number":32,"item_id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","output_index":0,"content_index":0,"text":"The user wrote \"说好\" which means \"say well\" or \"speak well\" in Chinese. This seems like an incomplete message. Let me respond appropriately."}
+
+event:response.output_item.done
+data:{"type":"response.output_item.done","sequence_number":33,"output_index":0,"item":{"id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"The user wrote \"说好\" which means \"say well\" or \"speak well\" in Chinese. This seems like an incomplete message. Let me respond appropriately."}],"status":"completed"}}
+
+event:response.output_text.done
+data:{"type":"response.output_text.done","sequence_number":34,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"text":"你好！看起来你的消息可能没有发完整 😊\n\n\"说好\"——你想说什么呢？欢迎继续补充，我很乐意帮助你！"}
+
+event:response.content_part.done
+data:{"type":"response.content_part.done","sequence_number":35,"item_id":"msg_5ea68c749bf04b32935d7f7de1759bc9","output_index":1,"content_index":0,"part":{"type":"output_text","text":"你好！看起来你的消息可能没有发完整 😊\n\n\"说好\"——你想说什么呢？欢迎继续补充，我很乐意帮助你！","annotations":[]}}
+
+event:response.output_item.done
+data:{"type":"response.output_item.done","sequence_number":36,"output_index":1,"item":{"id":"msg_5ea68c749bf04b32935d7f7de1759bc9","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"你好！看起来你的消息可能没有发完整 😊\n\n\"说好\"——你想说什么呢？欢迎继续补充，我很乐意帮助你！","annotations":[]}]}}
+
+event:response.completed
+data:{"type":"response.completed","sequence_number":37,"response":{"id":"resp_908acaa718ba4c339eff4bb27282832e","object":"response","created_at":1794813629,"status":"completed","error":null,"incomplete_details":null,"model":"mimo-v2.6-flash","metadata":null,"output":[{"id":"rs_bb57f17a4c4643bb8e0d32f7ad63f0c6","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"The user wrote \"说好\" which means \"say well\" or \"speak well\" in Chinese. This seems like an incomplete message. Let me respond appropriately."}],"status":"completed"},{"id":"msg_5ea68c749bf04b32935d7f7de1759bc9","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"你好！看起来你的消息可能没有发完整 😊\n\n\"说好\"——你想说什么呢？欢迎继续补充，我很乐意帮助你！","annotations":[]}]}],"output_text":"你好！看起来你的消息可能没有发完整 😊\n\n\"说好\"——你想说什么呢？欢迎继续补充，我很乐意帮助你！","usage":{"input_tokens":9,"input_tokens_details":{},"output_tokens":67,"output_tokens_details":{"reasoning_tokens":35},"total_tokens":76}}}
+
