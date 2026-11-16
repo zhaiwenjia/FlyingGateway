@@ -6,16 +6,8 @@ package adapter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/packages/ssestream"
-	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
@@ -26,9 +18,10 @@ import (
 // Ollama 适配器（统一 SDD 4.3.6），两形态按 res.Shape 选：
 //   - 原生 /api/chat（ShapeOllamaNative）：NDJSON 流（application/x-ndjson，⛔ 非 SSE、⛔ 无 [DONE]），
 //     usage 只在 done:true 帧（prompt_eval_count / prompt_eval_cached_count / eval_count 平铺）；
-//   - /v1 兼容层（ShapeChatCompletions）：只走 Chat Completions（Responses 不完整，3.6 ③ 兜底），
-//     请求构造 / 流式执行 / 响应解析经官方 SDK openai-go/v3（10.3）；⛔ tool_choice / n / user /
-//     logit_bias 不发（4.3.6 已知偏差）；usage 仅三字段无缓存明细 ⇒ 归一化缓存读写记 0（4.4.2 Ollama /v1 行）。
+//   - /v1 兼容层（res.Shape=APIShapeOpenAIChat 注册键）：出站 OpenAI Responses 形 POST {base}/v1/responses
+//     （v0.13.3+ 支持、仅无状态 flavor），装配 / 响应解析 / 流式解码走响应系共享机件；
+//     ⛔ tool_choice / n / user / logit_bias 不发（4.3.6 已知偏差；tool_choice 剔除记降级）；
+//     usage 两种树按实际字段选口径（usageTreeShape，4.4.2 Ollama /v1 行）。
 // 鉴权：本地进程无鉴权（/v1 兼容层任意值忽略）⇒ AuthScheme 空。
 // SupportsPreviousResponseID=false（3.5 表：Ollama ❌；/v1/responses 仅无状态 flavor）。
 
@@ -268,7 +261,7 @@ func (a *ollamaAdapter) StreamStart(ctx context.Context, r *core.Request, res *c
 	return newNDJSONIter(ctx, resp.Body, a.streamDecoder().decode, nil), nil
 }
 
-// ---- /v1 兼容层（Chat Completions；⛔ 不用 Responses——4.3.6「仅无状态 flavor」）----
+// ---- /v1 兼容层（OpenAI Responses 形：POST {base}/v1/responses）----
 
 type ollamaCompatAdapter struct {
 	hc *http.Client
@@ -277,386 +270,94 @@ type ollamaCompatAdapter struct {
 // NewOllamaCompat 构造 Ollama /v1 兼容层适配器。
 func NewOllamaCompat(hc *http.Client) Adapter { return &ollamaCompatAdapter{hc: hc} }
 
-func (a *ollamaCompatAdapter) Provider() core.Provider          { return core.ProviderOllama }
-func (a *ollamaCompatAdapter) OutboundShape() OutboundShape     { return ShapeChatCompletions }
+func (a *ollamaCompatAdapter) Provider() core.Provider      { return core.ProviderOllama }
+func (a *ollamaCompatAdapter) OutboundShape() OutboundShape { return ShapeResponses }
+
+// SupportsPreviousResponseID=false：/v1/responses 仅无状态 flavor（官方原话「Only the non-stateful
+// flavor is supported (i.e., there is no previous_response_id or conversation support)」，v0.13.3+）。
 func (a *ollamaCompatAdapter) SupportsPreviousResponseID() bool { return false }
 
 // AuthScheme 空：/v1 兼容层鉴权任意值忽略（4.3.6）。
 func (a *ollamaCompatAdapter) AuthScheme() AuthScheme { return AuthScheme{} }
 
-// ParseUsage 委托 usage.Normalize：/v1 仅 prompt_tokens/completion_tokens/total_tokens，
-// 无缓存明细 ⇒ 读写记 0（4.4.2 Ollama /v1 行）。
+// ParseUsage 委托 usage.Normalize（4.4）：按实际 usage 树选口径（usageTreeShape）——Responses 树
+// （input_tokens*）按 input_tokens_details 归一；Chat 树（prompt_tokens*）无缓存明细 ⇒ 读写记 0
+// （4.4.2 Ollama /v1 行）。
 func (a *ollamaCompatAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
-	return usage.Normalize(core.ProviderOllama, core.APIShapeOpenAIChat, raw)
+	return usage.Normalize(core.ProviderOllama, usageTreeShape(raw), raw)
 }
 
-// ---- SDK 构造（openai-go/v3 typed 参数，3.6 / 10.3）----
-
-// ollamaCompatSDKClient 构造 openai-go 客户端（Tier 1：流式执行经 SDK 客户端）。
-// base 须带 /v1 前缀（SDK 内部路径是 chat/completions，出站端点为 {base}/v1/chat/completions）；
-// 其余口径：注入既有 *http.Client（凭据由 authTransport 在 RoundTrip 注入，⛔ 不进 SDK）、
-// ⛔ 不读环境变量密钥、⛔ SDK 自带重试不许生效（重试/降级由网关统一管，24）。
-func ollamaCompatSDKClient(hc *http.Client, baseURL string) openai.Client {
-	return openai.NewClient(
-		option.WithBaseURL(joinURL(baseURL, "/v1")),
-		option.WithHTTPClient(hc),
-		option.WithAPIKey(""),
-		option.WithMaxRetries(0),
-	)
-}
-
-// ollamaCompatSDKMapErr 把 SDK 错误映射回 DetailError（与 streamRequest 的错误口径逐项对齐，7.1）。
-func ollamaCompatSDKMapErr(err error) error {
-	var ae *openai.Error
-	if errors.As(err, &ae) {
-		var body []byte
-		var rid string
-		if ae.Response != nil {
-			if ae.Response.Body != nil {
-				body, _ = io.ReadAll(ae.Response.Body)
-			}
-			rid = ae.Response.Header.Get("X-Request-Id")
-		}
-		return &DetailError{Detail: gwerrors.FromUpstream(core.ProviderOllama, ae.StatusCode, body, rid)}
-	}
-	return &DetailError{Detail: gwerrors.FromTransportError(core.ProviderOllama, err, "")}
-}
-
-// ollamaCompatSDKMessages 映射消息序列（wire 与既有 ollamaMessage 形逐字段一致）。
-// SDK typed 只承载 role / content；Ollama 扩展字段（thinking / tool_name）与原生形 tool_calls
-// （function.arguments 是 JSON 对象、⛔ 无 id/type）经 SetExtraFields 补（quirks 不许丢）；
-// role=tool ⛔ 不发 tool_call_id（既有 wire 无此键、靠 tool_name 关联 ⇒ 用 param.Omit 剔除
-// SDK 必发的 tool_call_id）。
-func ollamaCompatSDKMessages(r *core.Request) []openai.ChatCompletionMessageParamUnion {
-	var out []openai.ChatCompletionMessageParamUnion
-	for _, m := range r.Messages {
-		text := contentText(m.Content)
-		var msg openai.ChatCompletionMessageParamUnion
-		switch m.Role {
-		case "system":
-			msg = openai.SystemMessage(text)
-		case "developer":
-			msg = openai.DeveloperMessage(text)
-		case "assistant":
-			msg = openai.ChatCompletionMessageParamOfAssistant(text)
-		case "tool":
-			msg = openai.ToolMessage(text, m.ToolCallID)
-		default:
-			msg = openai.UserMessage(text)
-		}
-		extras := map[string]any{}
-		if m.Role == "tool" {
-			extras["tool_call_id"] = param.Omit
-		}
-		if m.ReasoningContent != "" {
-			extras["thinking"] = m.ReasoningContent
-		}
-		if m.Name != "" {
-			extras["tool_name"] = m.Name
-		}
-		if len(m.ToolCalls) > 0 {
-			var calls []ollamaToolCall
-			for _, tc := range m.ToolCalls {
-				args := json.RawMessage(tc.Arguments)
-				if len(args) == 0 {
-					args = json.RawMessage("{}")
-				}
-				calls = append(calls, ollamaToolCall{Function: ollamaToolCallFn{Name: tc.Name, Arguments: args}})
-			}
-			extras["tool_calls"] = calls
-		}
-		if len(extras) > 0 {
-			switch {
-			case msg.OfUser != nil:
-				msg.OfUser.SetExtraFields(extras)
-			case msg.OfSystem != nil:
-				msg.OfSystem.SetExtraFields(extras)
-			case msg.OfDeveloper != nil:
-				msg.OfDeveloper.SetExtraFields(extras)
-			case msg.OfAssistant != nil:
-				msg.OfAssistant.SetExtraFields(extras)
-			case msg.OfTool != nil:
-				msg.OfTool.SetExtraFields(extras)
-			}
-		}
-		out = append(out, msg)
-	}
-	return out
-}
-
-// ollamaCompatSDKTools 映射工具声明（wire 与既有 type:function + function{name,...} 形一致）。
-// parameters `{}` ⇒ 空非 nil map ⇒ 仍发 `"parameters":{}`；nil ⇒ 不发该键（omitempty 口径）。
-func ollamaCompatSDKTools(r *core.Request) ([]openai.ChatCompletionToolUnionParam, error) {
-	var out []openai.ChatCompletionToolUnionParam
-	for _, t := range r.Tools {
-		fn := shared.FunctionDefinitionParam{Name: t.Name}
-		if t.Description != "" {
-			fn.Description = param.NewOpt(t.Description)
-		}
-		if len(t.Parameters) > 0 {
-			var schema map[string]any
-			if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-				return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed",
-					"工具 "+t.Name+" 的 parameters 不是合法 JSON: "+err.Error())}
-			}
-			fn.Parameters = schema
-		}
-		out = append(out, openai.ChatCompletionToolUnionParam{OfFunction: &openai.ChatCompletionFunctionToolParam{Function: fn}})
-	}
-	return out, nil
-}
-
-// ollamaCompatParams 用 SDK typed 参数构造 /v1 请求（wire：model / messages / max_tokens /
-// temperature / top_p / stop / tools / stream / stream_options，逐字段不变）：
-// max_tokens / temperature / top_p / stop / tools / stream_options.include_usage；
-// ⛔ 不设 tool_choice / n / user / logit_bias（4.3.6 已知偏差）。
-func ollamaCompatParams(r *core.Request, res *core.Resolution) (openai.ChatCompletionNewParams, error) {
-	var body openai.ChatCompletionNewParams
-	body.Model = openai.ChatModel(res.Model)
-	body.Messages = ollamaCompatSDKMessages(r)
-	tools, err := ollamaCompatSDKTools(r)
-	if err != nil {
-		return body, err
-	}
-	body.Tools = tools
-	if r.MaxOutputTokens > 0 {
-		body.MaxTokens = param.NewOpt(int64(r.MaxOutputTokens))
-	}
-	if r.Temperature != nil {
-		body.Temperature = param.NewOpt(*r.Temperature)
-	}
-	if r.TopP != nil {
-		body.TopP = param.NewOpt(*r.TopP)
-	}
-	if len(r.Stop) > 0 {
-		body.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: r.Stop}
-	}
-	extras := map[string]any{}
-	if r.Stream {
-		body.StreamOptions = openai.ChatCompletionStreamOptionsParam{IncludeUsage: param.NewOpt(true)}
-		extras["stream"] = true
-	}
-	if len(body.Messages) == 0 {
-		// 既有 wire：messages 无 omitempty ⇒ 空消息发 `"messages":null`（SDK omitzero 会整键省略）。
-		extras["messages"] = nil
-	}
-	if len(extras) > 0 {
-		body.SetExtraFields(extras)
-	}
-	return body, nil
-}
-
-// BuildRequest：POST {base}/v1/chat/completions（OpenAI 形状，3.6 ③ Chat 兜底）。
-// ⚠️ 兼容层不支持 tool_choice / n / user / logit_bias（4.3.6 已知偏差）⇒ ⛔ 不发这些字段
-// （tool_choice 被剔除属能力缺失，按 1.4.2 在 doc 注释登记；上层的 degradation 标记由
-// DegradationAware 变体承载，Ollama 兼容层不实现该可选接口）。
-func (a *ollamaCompatAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
+// BuildRequestWithDegradations 构造 POST {base}/v1/responses 请求并返回降级记录。
+// 装配走共享机件 responsesBuildParams（3.6）；家差：tool_choice 官方未列支持（OpenAI compatibility
+// Supported features 仅 Streaming / Tools (function calling) / Reasoning summaries）⇒ 请求带
+// tool_choice 时出站剔除并记降级（DegradationAware，⛔ 不静默丢弃无标记）；⛔ n / user / logit_bias
+// 不发（4.3.6 已知偏差，Responses 形装配本就不产出这些字段）。
+func (a *ollamaCompatAdapter) BuildRequestWithDegradations(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, []core.Degradation, error) {
+	// previous_response_id 不支持（官方：v0.13.3+ 仅无状态 flavor）⇒ 显式报错（3.5）。
 	if err := checkPreviousResponseID(false, r); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	body, err := ollamaCompatParams(r, res)
-	if err != nil {
-		return nil, err
+	var degs []core.Degradation
+	rc := *r
+	if r.ToolChoice != nil {
+		degs = append(degs, core.Degradation{
+			Field:  "tool_choice",
+			Reason: core.DegradationCapabilityUnsupported,
+			Detail: "Ollama /v1 兼容层不支持 tool_choice，已从出站请求剔除",
+		})
+		// 从装配入参剔除 ⇒ wire 不出 tool_choice 键（⛔ 不静默丢弃：降级随 DegradationAware 返回）。
+		rc.ToolChoice = nil
 	}
-	raw, err := body.MarshalJSON()
+	p, err := responsesBuildParams(&rc, res)
 	if err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed", err.Error())}
+		return nil, nil, err
+	}
+	raw, err := marshalBody(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 供应商特异参数经 Extra 透传（mergeExtraBody 黑名单口径，3.1）。
+	raw, err = mergeExtraBody(raw, r.Extra)
+	if err != nil {
+		return nil, nil, err
 	}
 	return &Outbound{
-		Method:  http.MethodPost,
-		URL:     joinURL(res.BaseURL, "/v1/chat/completions"),
+		Method:  "POST",
+		URL:     joinURL(res.BaseURL, "/v1/responses"),
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    raw,
-	}, nil
+	}, degs, nil
 }
 
-// ollamaCompatProbe 是 SDK typed 解析之外的 quirk 原始探测（openai.ChatCompletion 不承载）：
-// message.tool_calls 的 arguments 原样 JSON（既有 wire 把 arguments 当 JSON 值透传，
-// ⛔ 不是 SDK 的字符串字段）与原始 usage（vendor 字段逐字进 usage.Normalize）。
-type ollamaCompatProbe struct {
-	Usage   json.RawMessage `json:"usage"`
-	Choices []struct {
-		Message struct {
-			ToolCalls []ollamaToolCall `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
+// BuildRequest 委托 BuildRequestWithDegradations（降级记录由上层合并进 x_gateway.degradations[]）。
+func (a *ollamaCompatAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
+	out, _, err := a.BuildRequestWithDegradations(ctx, r, res)
+	return out, err
 }
 
-// ParseResponse 解析 /v1 兼容层非流式响应（Tier 1：SDK 响应类型解析 + quirk 原始探测，
-// usage 走既有归一）。解析口径与既有实现逐项一致。
+// ParseResponse 解析 Responses 响应对象（共享机件 parseResponsesBody；真机样本
+// testdata/real/ollama_responses_*_real.json 无家差特殊解析需求）。
 func (a *ollamaCompatAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var probe ollamaCompatProbe
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
-	}
-	var cc openai.ChatCompletion
-	if err := json.Unmarshal(body, &cc); err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
-	}
-	out := &core.Response{ID: cc.ID, Model: cc.Model, Status: core.StatusCompleted}
-	if len(cc.Choices) > 0 {
-		c := cc.Choices[0]
-		var toolCalls []ollamaToolCall
-		if len(probe.Choices) > 0 {
-			toolCalls = probe.Choices[0].Message.ToolCalls
-		}
-		oi := core.OutputItem{Type: "message", Role: "assistant"}
-		oi.Content = append(oi.Content, core.ContentPart{Type: "text", Text: c.Message.Content})
-		out.OutputItems = append(out.OutputItems, oi)
-		out.Text = c.Message.Content
-		for _, tc := range toolCalls {
-			out.OutputItems = append(out.OutputItems, core.OutputItem{
-				Type: "function_call", Name: tc.Function.Name, Arguments: string(tc.Function.Arguments),
-			})
-		}
-		out.FinishReason = c.FinishReason
-		if out.FinishReason == "" {
-			out.FinishReason = core.FinishStop
-		}
-	}
-	if len(probe.Usage) > 0 && string(probe.Usage) != "null" {
-		out.Usage = a.ParseUsage(probe.Usage)
-	}
-	return out, nil
+	return parseResponsesBody(a.ParseUsage, body)
 }
 
-// ---- 流式（Tier 1：SDK 客户端流式执行 + SDK 流事件 ⇒ stream.Frame）----
-
-// ollamaCompatChunkProbe 是流式 chunk 的 quirk 原始探测：delta.tool_calls 的 arguments
-// 原样 JSON（既有帧把 raw JSON 文本当 Arguments 透传）与原始 usage。
-type ollamaCompatChunkProbe struct {
-	Usage   json.RawMessage `json:"usage"`
-	Choices []struct {
-		Delta struct {
-			ToolCalls []ollamaToolCall `json:"tool_calls"`
-		} `json:"delta"`
-	} `json:"choices"`
+// streamDecoder 返回 Responses 形帧解码器（共享机件；真机流以 response.completed 收口、
+// 无 [DONE]，[DONE] 有无都容忍）。
+func (a *ollamaCompatAdapter) streamDecoder() *openAIStreamDecoder {
+	return newResponsesStreamDecoder(a.ParseUsage)
 }
 
-// ollamaCompatChunkDecoder 把 SDK 流事件映射为内部帧（帧序列口径 ⛔ 不变：
-// 文本增量 → 工具帧（call_N 合成 id）→ done 帧 → usage 帧，⛔ 非终态）。
-type ollamaCompatChunkDecoder struct {
-	usageFn func(json.RawMessage) *core.Usage
-	toolSeq int
-}
-
-func newOllamaCompatChunkDecoder(usageFn func(json.RawMessage) *core.Usage) *ollamaCompatChunkDecoder {
-	return &ollamaCompatChunkDecoder{usageFn: usageFn}
-}
-
-func (d *ollamaCompatChunkDecoder) decode(c openai.ChatCompletionChunk) ([]stream.Frame, bool) {
-	var probe ollamaCompatChunkProbe
-	_ = json.Unmarshal([]byte(c.RawJSON()), &probe)
-	var frames []stream.Frame
-	if len(c.Choices) > 0 {
-		choice := c.Choices[0]
-		if choice.Delta.Content != "" {
-			frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: choice.Delta.Content})
-		}
-		var toolCalls []ollamaToolCall
-		if len(probe.Choices) > 0 {
-			toolCalls = probe.Choices[0].Delta.ToolCalls
-		}
-		for _, tc := range toolCalls {
-			d.toolSeq++
-			frames = append(frames, stream.Frame{
-				Kind: stream.FrameToolCallArgsDelta,
-				// Frame 承载约定：Text 载函数名、ToolCallID 载调用 id（Ollama 无 call_id ⇒ 顺序生成）。
-				ToolCallID: fmt.Sprintf("call_%d", d.toolSeq),
-				Text:       tc.Function.Name,
-				Arguments:  string(tc.Function.Arguments),
-			})
-		}
-		if choice.FinishReason != "" {
-			frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: choice.FinishReason})
-		}
-	}
-	if len(probe.Usage) > 0 && string(probe.Usage) != "null" {
-		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: d.usageFn(probe.Usage)})
-	}
-	// ⛔ 非终态（与既有解码器同口径）：终态由 [DONE] 哨兵 / 连接收口判定。
-	return frames, false
-}
-
-// ollamaCompatStreamIter 是 SDK 流式帧迭代器（语义对齐 sseIter）。
-type ollamaCompatStreamIter struct {
-	ctx     context.Context
-	st      *ssestream.Stream[openai.ChatCompletionChunk]
-	dec     *ollamaCompatChunkDecoder
-	queue   []stream.Frame
-	cur     stream.Frame
-	err     error
-	stop    bool
-	closed  bool
-	seqAuto int64
-}
-
-func (it *ollamaCompatStreamIter) Next() bool {
-	for len(it.queue) == 0 {
-		if it.stop {
-			it.close()
-			return false
-		}
-		if err := it.ctx.Err(); err != nil {
-			// ctx 取消 ⇒ 立即中断并关闭上游连接（3.7 取消语义；cancel_grace_period 默认 0）。
-			it.err = err
-			it.close()
-			return false
-		}
-		if !it.st.Next() {
-			if e := it.st.Err(); e != nil {
-				it.err = e
-			}
-			it.close()
-			return false
-		}
-		frames, done := it.dec.decode(it.st.Current())
-		for i := range frames {
-			it.seqAuto++
-			if frames[i].Seq == 0 {
-				frames[i].Seq = it.seqAuto
-			}
-		}
-		it.queue = frames
-		it.stop = done
-	}
-	it.cur = it.queue[0]
-	it.queue = it.queue[1:]
-	return true
-}
-
-// Frame 返回当前帧。
-func (it *ollamaCompatStreamIter) Frame() stream.Frame { return it.cur }
-
-// Err 返回终态错误（nil 表示正常结束）。
-func (it *ollamaCompatStreamIter) Err() error { return it.err }
-
-// close 关闭 SDK 流（连带关闭上游 body）；幂等。
-func (it *ollamaCompatStreamIter) close() {
-	if !it.closed {
-		it.closed = true
-		_ = it.st.Close()
-	}
-}
-
-// StreamStart（Tier 1）：强制 stream=true ⇒ SDK 客户端流式执行 ⇒ SDK 流事件映射帧。
-// 请求体与 BuildRequest 的 Outbound.Body 同源（经 SetJSON 原样发）。
+// StreamStart：强制 stream=true ⇒ BuildRequest ⇒ 真实 HTTP ⇒ SSE 解码（照 openai.go）。
 func (a *ollamaCompatAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
 	rc := *r
 	rc.Stream = true
-	params, err := ollamaCompatParams(&rc, res)
+	out, err := a.BuildRequest(ctx, &rc, res)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := params.MarshalJSON()
+	resp, err := streamRequest(ctx, a.hc, a.Provider(), out)
 	if err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 400, "request_marshal_failed", err.Error())}
+		return nil, err
 	}
-	param.SetJSON(raw, &params)
-	cl := ollamaCompatSDKClient(a.hc, res.BaseURL)
-	st := cl.Chat.Completions.NewStreaming(ctx, params)
-	if err := st.Err(); err != nil {
-		return nil, ollamaCompatSDKMapErr(err)
-	}
-	return &ollamaCompatStreamIter{ctx: ctx, st: st, dec: newOllamaCompatChunkDecoder(a.ParseUsage)}, nil
+	return newSSEIter(ctx, resp.Body, a.streamDecoder().decode, nil), nil
 }
