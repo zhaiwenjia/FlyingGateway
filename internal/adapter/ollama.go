@@ -20,7 +20,7 @@ import (
 //     usage 只在 done:true 帧（prompt_eval_count / prompt_eval_cached_count / eval_count 平铺）；
 //   - /v1 兼容层（res.Shape=APIShapeOpenAIChat 注册键）：出站 OpenAI Responses 形 POST {base}/v1/responses
 //     （v0.13.3+ 支持、仅无状态 flavor），装配 / 响应解析 / 流式解码走响应系共享机件；
-//     ⛔ tool_choice / n / user / logit_bias 不发（4.3.6 已知偏差；tool_choice 剔除记降级）；
+//     ⛔ tool_choice / n / user / logit_bias 不发（4.3.6 已知偏差；tool_choice 剔除、非 auto 才记降级）；
 //     usage 两种树按实际字段选口径（usageTreeShape，4.4.2 Ollama /v1 行）。
 // 鉴权：本地进程无鉴权（/v1 兼容层任意值忽略）⇒ AuthScheme 空。
 // SupportsPreviousResponseID=false（3.5 表：Ollama ❌；/v1/responses 仅无状态 flavor）。
@@ -290,7 +290,8 @@ func (a *ollamaCompatAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 // BuildRequestWithDegradations 构造 POST {base}/v1/responses 请求并返回降级记录。
 // 装配走共享机件 responsesBuildParams（3.6）；家差：tool_choice 官方未列支持（OpenAI compatibility
 // Supported features 仅 Streaming / Tools (function calling) / Reasoning summaries）⇒ 请求带
-// tool_choice 时出站剔除并记降级（DegradationAware，⛔ 不静默丢弃无标记）；⛔ n / user / logit_bias
+// tool_choice 时出站剔除，仅非 auto（none / required / 指定函数名）记降级——auto 与 Ollama 默认
+// 行为语义一致、无损失 ⛔ 不记（DegradationAware，口径同 zhipu / moonshot）；⛔ n / user / logit_bias
 // 不发（4.3.6 已知偏差，Responses 形装配本就不产出这些字段）。
 func (a *ollamaCompatAdapter) BuildRequestWithDegradations(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, []core.Degradation, error) {
 	// previous_response_id 不支持（官方：v0.13.3+ 仅无状态 flavor）⇒ 显式报错（3.5）。
@@ -300,11 +301,16 @@ func (a *ollamaCompatAdapter) BuildRequestWithDegradations(ctx context.Context, 
 	var degs []core.Degradation
 	rc := *r
 	if r.ToolChoice != nil {
-		degs = append(degs, core.Degradation{
-			Field:  "tool_choice",
-			Reason: core.DegradationCapabilityUnsupported,
-			Detail: "Ollama /v1 兼容层不支持 tool_choice，已从出站请求剔除",
-		})
+		// tool_choice 官方未列支持 ⇒ 出站一律剔除；仅当调用方意图真正丢失（none / required /
+		// 指定函数名）时记降级——auto 与 Ollama 默认行为（模型自行决定）语义一致、无损失
+		// ⛔ 不记（口径同 zhipu / moonshot：auto 不记、非 auto 才记）。
+		if r.ToolChoice.Mode != "auto" {
+			degs = append(degs, core.Degradation{
+				Field:  "tool_choice",
+				Reason: core.DegradationCapabilityUnsupported,
+				Detail: "Ollama /v1 兼容层不支持 tool_choice，已从出站请求剔除",
+			})
+		}
 		// 从装配入参剔除 ⇒ wire 不出 tool_choice 键（⛔ 不静默丢弃：降级随 DegradationAware 返回）。
 		rc.ToolChoice = nil
 	}

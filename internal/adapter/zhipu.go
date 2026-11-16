@@ -23,7 +23,8 @@ import (
 // chat 形 base https://open.bigmodel.cn/api/paas/v4（其下 /responses 实测 4×404）
 // ⇒ BuildRequest 对 base 做后缀重写（见 zhipuResponsesURL）。
 // AuthScheme: Authorization + "Bearer "。
-// previous_response_id：支持 = true（官方「创建 Response」：服务端会话 store=true、保留 7 天）⇒ 直通。
+// previous_response_id：支持 = true（官方「创建 Response」：服务端会话 store=true、保留 7 天）
+// ⇒ 直通；携带时**强制 store=true**（官方硬条件「须 store=true」，⛔ 不静默丢弃续接语义）。
 // tool_choice：官方 enum 仅 none/auto ⇒ required / 指定函数名按降级处理（降为 auto 并记
 // Degradation，⛔ 不静默丢弃无标记）；thinking.type / thinking.clear_thinking 经 core.Request.Extra 透传。
 // 请求构造走共享机件 responsesBuildParams（openai-go/v3 typed 参数，统一 SDD 3.6 / 10.3）；
@@ -99,6 +100,15 @@ func (a *zhipuAdapter) BuildRequestWithDegradations(ctx context.Context, r *core
 	raw, err = mergeExtraBody(raw, r.Extra)
 	if err != nil {
 		return nil, nil, err
+	}
+	// previous_response_id 透传须 store=true（官方「创建 Response」原话：「须 store=true，
+	// 有效期 7 天」）⇒ 携带 previous_response_id 时**强制 store=true**（置于 Extra 合并之后，
+	// 调用方 store:false 与多轮续接自相矛盾时以官方硬条件为准；⛔ 不静默丢弃续接语义）。
+	if r.PreviousResponseID != "" {
+		raw, err = mergeExtraBody(raw, map[string]any{"store": true})
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	return &Outbound{
 		Method:  "POST",
