@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -15,10 +16,12 @@ import (
 )
 
 // 本文件覆盖 Qwen / DashScope 适配器两形态（统一 SDD 4.3.7）：
-// ① 兼容层（Chat 形，A/B 实测裁定全部走 Chat Completions）：/chat/completions、
-//    enable_thinking / enable_search 经 Extra 透传、stream_options.include_usage、
-//    usage 的 cached_tokens + cache_creation_input_tokens（4.4.2 Qwen 兼容行）、
-//    流式延后收口（usage 在末帧的两拍形态）、previous_response_id 显式 400；
+// ① 兼容层（OpenAI Responses 形，2026-11-16 真机直采 4/4 全通）：POST {base}/responses、
+//    请求体 Responses 形（input 数组 / instructions / tools 扁平形）、
+//    enable_thinking / enable_search 经 Extra 透传、reasoning.effort 透传、
+//    tool_choice 同 Chat 语义（auto / none / required / 指定函数名直通）、
+//    previous_response_id 支持（服务端会话 7 天）⇒ 直通、usage 归一（4.4.2 Qwen 兼容行）、
+//    流式真实样本直喂（testdata/real/qwen_responses_stream_real.sse）；
 // ② 原生 text-generation：/api/v1/services/aigc/text-generation/generation、
 //    流式须加头 X-DashScope-SSE: enable（3.6 坑 1）、帧 `data:{json}` 冒号无空格、
 //    每帧自带 usage、无 [DONE]、usage 字段 input_tokens/output_tokens（⛔ 与兼容模式不同）。
@@ -41,57 +44,72 @@ func newQwenNativeResolution(base string) *core.Resolution {
 	}
 }
 
-// TestQwenCompatBuildRequest 钉住兼容层请求（Chat 形，4.3.7）：
-// ① POST {base}/chat/completions + messages[] + max_tokens + stream + stream_options.include_usage
-//   - tools（chat 形 function 对象）+ tool_choice；
+// TestQwenCompatBuildRequestResponses 钉住兼容层 Responses 请求（2026-11-16 实测口径）：
+// ① POST {base}/responses + input 数组 + instructions 顶层 + tools 扁平形 +
 //
-// ② enable_thinking / enable_search 经 Extra 透传；prompt_cache_key 若请求携带则带在 body。
-// 错误实现会红：仍发 /responses ⇒ URL 断言红；Extra 被丢 ⇒ enable_thinking 断言红；
-// 漏发 stream_options ⇒ 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatBuildRequest -v
-func TestQwenCompatBuildRequest(t *testing.T) {
+//	max_output_tokens / prompt_cache_key / reasoning.effort 透传 + previous_response_id 直通；
+//
+// ② enable_thinking / enable_search 经 Extra 透传；流式 stream:true（usage 由
+//
+//	response.completed 自带，⛔ 无 stream_options）。
+//
+// 错误实现会红：仍发 /chat/completions ⇒ URL 断言红；消息塞 messages[] ⇒ input 断言红；
+// Extra 被丢 ⇒ enable_thinking 断言红；照搬 chat 形 stream_options ⇒ 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatBuildRequestResponses -v
+func TestQwenCompatBuildRequestResponses(t *testing.T) {
 	a := NewQwen(http.DefaultClient)
 	r := &core.Request{
-		Messages:        []core.Message{{Role: "user", Content: []core.ContentPart{{Text: "你好"}}}},
-		MaxOutputTokens: 256,
-		PromptCacheKey:  "pk-qwen-1",
-		Stream:          true,
-		Tools:           []core.Tool{{Type: "function", Name: "search", Description: "搜索", Parameters: json.RawMessage(`{"type":"object"}`)}},
-		ToolChoice:      &core.ToolChoice{Mode: "auto"},
-		Extra:           map[string]any{"enable_thinking": true, "enable_search": false},
+		Messages: []core.Message{
+			{Role: "system", Content: []core.ContentPart{{Text: "系统提示"}}},
+			{Role: "user", Content: []core.ContentPart{{Text: "你好"}}},
+		},
+		MaxOutputTokens:    256,
+		PromptCacheKey:     "pk-qwen-1",
+		PreviousResponseID: "resp_prev",
+		Reasoning:          &core.ReasoningConfig{Effort: "high"},
+		Stream:             true,
+		Tools:              []core.Tool{{Type: "function", Name: "search", Description: "搜索", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		ToolChoice:         &core.ToolChoice{Mode: "auto"},
+		Extra:              map[string]any{"enable_thinking": true, "enable_search": false},
 	}
 	out, err := a.BuildRequest(context.Background(), r, newQwenResolution("https://dashscope.aliyuncs.com/compatible-mode/v1"))
 	if err != nil {
 		t.Fatalf("BuildRequest 报错: %v", err)
 	}
-	if out.URL != "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" {
-		t.Fatalf("URL = %s，期望 {base}/chat/completions", out.URL)
+	if out.Method != "POST" || out.URL != "https://dashscope.aliyuncs.com/compatible-mode/v1/responses" {
+		t.Fatalf("URL/方法 = %s %s，期望 POST {base}/responses", out.Method, out.URL)
 	}
 	m := bodyMap(t, out)
 	if mustString(t, m, "model") != "qwen3.8-max" {
 		t.Fatalf("model = %v", m["model"])
 	}
-	msgs := mustSlice(t, m, "messages")
-	if len(msgs) != 1 || mustString(t, msgs[0].(map[string]any), "role") != "user" {
-		t.Fatalf("messages = %v，期望单条 user（chat 形 messages[]）", msgs)
+	// instructions 顶层 + input 数组（⛔ 不是 messages[]）。
+	if mustString(t, m, "instructions") != "系统提示" {
+		t.Fatalf("instructions = %v，期望系统消息并入顶层", m["instructions"])
 	}
-	if mustNumber(t, m, "max_tokens") != 256 {
-		t.Fatalf("max_tokens = %v，期望 256（chat 形普通字段）", m["max_tokens"])
+	items := mustSlice(t, m, "input")
+	if len(items) != 1 || items[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("input = %v，期望单条 user item", items)
+	}
+	if mustNumber(t, m, "max_output_tokens") != 256 {
+		t.Fatalf("max_output_tokens = %v，期望 256（Responses 形字段名）", m["max_output_tokens"])
 	}
 	if mustAt(t, m, "stream") != true {
 		t.Fatalf("stream = %v，期望 true", m["stream"])
 	}
-	so := mustAt(t, m, "stream_options").(map[string]any)
-	if so["include_usage"] != true {
-		t.Fatalf("stream_options = %v，期望 include_usage:true（Qwen chat usage 在末帧）", so)
-	}
-	tools := mustSlice(t, m, "tools")
-	t0 := tools[0].(map[string]any)
-	if fn := t0["function"].(map[string]any); fn["name"] != "search" {
-		t.Fatalf("tools[0] = %v，期望 chat 形 function 对象 name=search", t0)
+	// ⛔ 无 stream_options：Responses 的 usage 由 response.completed 自带。
+	assertNoKey(t, m, "stream_options")
+	// tools 扁平形（type/name 顶层，⛔ 不是 chat 形 function 嵌套）。
+	t0 := mustSlice(t, m, "tools")[0].(map[string]any)
+	if t0["type"] != "function" || t0["name"] != "search" {
+		t.Fatalf("tools[0] = %v，期望扁平形 {type:function,name:search}", t0)
 	}
 	if mustString(t, m, "tool_choice") != "auto" {
 		t.Fatalf("tool_choice = %v，期望 auto", m["tool_choice"])
+	}
+	// reasoning.effort 五档透传（4.3.7）。
+	if mustString(t, m, "reasoning", "effort") != "high" {
+		t.Fatalf("reasoning 对象不对: %v", m["reasoning"])
 	}
 	// quirks 经 Extra 透传（4.3.7 非标准参数）。
 	if mustAt(t, m, "enable_thinking") != true {
@@ -100,9 +118,15 @@ func TestQwenCompatBuildRequest(t *testing.T) {
 	if mustAt(t, m, "enable_search") != false {
 		t.Fatalf("enable_search = %v，期望 false", m["enable_search"])
 	}
-	// prompt_cache_key 若请求携带则带在 body（兼容层忽略无害）。
+	// prompt_cache_key / previous_response_id 始终透传（3.5；Qwen 支持 ⇒ 不报错）。
 	if mustString(t, m, "prompt_cache_key") != "pk-qwen-1" {
 		t.Fatalf("prompt_cache_key = %v", m["prompt_cache_key"])
+	}
+	if mustString(t, m, "previous_response_id") != "resp_prev" {
+		t.Fatalf("previous_response_id 未透传: %v", m["previous_response_id"])
+	}
+	if !a.SupportsPreviousResponseID() {
+		t.Fatalf("Qwen Responses 支持 previous_response_id（服务端会话 7 天，官方「创建响应」）")
 	}
 	sch := a.AuthScheme()
 	if sch.HeaderName != "Authorization" || sch.Prefix != "Bearer " {
@@ -117,61 +141,237 @@ func TestQwenCompatBuildRequest(t *testing.T) {
 	}
 	m = bodyMap(t, out)
 	assertNoKey(t, m, "stream_options")
-	if v, ok := m["stream"]; ok && v == true {
-		t.Fatalf("非流式不应发 stream:true: %v", m["stream"])
+	assertNoKey(t, m, "stream")
+}
+
+// TestQwenCompatToolChoicePassthrough 钉住 tool_choice 同 Chat 语义（保持现状语义）：
+// auto / none / required 原样直通、指定函数名出 {type:function,name} 形、
+// function 无名退 auto（与 chat 形映射逐项一致）。
+// 错误实现会红：required 被误降 ⇒ 断言红；函数名不带 name ⇒ 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatToolChoicePassthrough -v
+func TestQwenCompatToolChoicePassthrough(t *testing.T) {
+	a := NewQwen(http.DefaultClient)
+	res := newQwenResolution("https://dashscope.aliyuncs.com/compatible-mode/v1")
+	for _, tc := range []struct {
+		in   *core.ToolChoice
+		want any
+	}{
+		{&core.ToolChoice{Mode: "auto"}, "auto"},
+		{&core.ToolChoice{Mode: "none"}, "none"},
+		{&core.ToolChoice{Mode: "required"}, "required"},
+		{&core.ToolChoice{Mode: "function", Name: "search"}, map[string]any{"type": "function", "name": "search"}},
+		{&core.ToolChoice{Mode: "function"}, "auto"},
+	} {
+		r := &core.Request{
+			Messages:   []core.Message{{Role: "user", Content: []core.ContentPart{{Text: "hi"}}}},
+			ToolChoice: tc.in,
+		}
+		out, err := a.BuildRequest(context.Background(), r, res)
+		if err != nil {
+			t.Fatalf("BuildRequest(%+v) 报错: %v", tc.in, err)
+		}
+		got := bodyMap(t, out)["tool_choice"]
+		wantJSON, _ := json.Marshal(tc.want)
+		gotJSON, _ := json.Marshal(got)
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("tool_choice(%+v) = %s，期望 %s", tc.in, gotJSON, wantJSON)
+		}
 	}
 }
 
-// TestQwenCompatPreviousResponseIDRejected 钉住 3.5：chat 形 wire 无 previous_response_id
-// ⇒ SupportsPreviousResponseID=false，携带即显式 400 unsupported_capability（⛔ 不静默丢弃）。
-// 错误实现会红：声明 true 或静默丢弃 ⇒ 断言 / requireDetailErr 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatPreviousResponseIDRejected -v
-func TestQwenCompatPreviousResponseIDRejected(t *testing.T) {
+// TestQwenCompatParseResponseRealSample 钉住真实样本直喂（2026-11-16 真机直采 qwen3.8-flash，
+// 来源见 testdata/real/README.md）上 ParseResponse 成立：reasoning item 的 summary 保留、
+// message 文本逐字、finish 由 status 推导（completed ⇒ stop / 有工具调用 ⇒ tool_calls）、
+// usage 归一（Responses 树 input_tokens_details，x_details 扩展不干扰）。
+// 错误实现会红：丢 summary ⇒ 断言红；x_details 干扰解析 ⇒ usage 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatParseResponseRealSample -v
+func TestQwenCompatParseResponseRealSample(t *testing.T) {
 	a := NewQwen(http.DefaultClient)
-	if a.SupportsPreviousResponseID() {
-		t.Fatalf("Qwen chat 形不支持 previous_response_id（wire 无此字段）")
-	}
-	_, err := a.BuildRequest(context.Background(), &core.Request{PreviousResponseID: "resp_prev"},
-		newQwenResolution("https://dashscope.aliyuncs.com/compatible-mode/v1"))
-	requireDetailErr(t, err, "unsupported_capability")
-}
-
-// TestQwenCompatParseResponseChatShape 钉住 chat.completion 解析：message.content /
-// reasoning_content 进推理正文位 / tool_calls 函数名进 core.OutputItem.Name /
-// finish_reason 超集原值 / usage 经 usage.Normalize(Qwen)。
-// 错误实现会红：name 不进 Name ⇒ 断言红；finish_reason 被归并改写 ⇒ 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatParseResponseChatShape -v
-func TestQwenCompatParseResponseChatShape(t *testing.T) {
-	const body = `{"id":"chatcmpl-6ada","model":"qwen3.8-max","choices":[{"index":0,` +
-		`"message":{"role":"assistant","content":"你好","reasoning_content":"思考中",` +
-		`"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"search","arguments":"{\"q\":1}"}}]},` +
-		`"finish_reason":"content_filter"}],` +
-		`"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":140,` +
-		`"prompt_tokens_details":{"cached_tokens":25,"cache_creation_input_tokens":10}}}`
-	a := NewQwen(http.DefaultClient)
-	out, err := a.ParseResponse(newQwenResolution("https://dashscope.aliyuncs.com/compatible-mode/v1"), []byte(body))
+	out, err := a.ParseResponse(newQwenResolution(""), loadFixture(t, "real/qwen_responses_basic_real.json"))
 	if err != nil {
 		t.Fatalf("ParseResponse 报错: %v", err)
 	}
-	if out.Text != "你好" {
-		t.Fatalf("Text = %q，期望 你好", out.Text)
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "reasoning" {
+		t.Fatalf("OutputItems 顺序/类型不对: %+v（⛔ 不假设 output[0] 是 message）", out.OutputItems)
 	}
-	if len(out.OutputItems) != 2 {
-		t.Fatalf("OutputItems = %+v，期望 message + function_call", out.OutputItems)
+	if len(out.OutputItems[0].Summary) != 1 ||
+		!strings.HasPrefix(out.OutputItems[0].Summary[0].Text, `用户说了"说好"，这是一个简短的中文回复。`) {
+		t.Fatalf("reasoning summary 丢失/不对: %+v", out.OutputItems[0].Summary)
 	}
-	if out.OutputItems[0].ReasoningText != "思考中" {
-		t.Fatalf("ReasoningText = %q，期望 思考中（reasoning_content 进推理正文位）", out.OutputItems[0].ReasoningText)
+	const wantText = "好的 👌 有什么需要我帮忙的吗？"
+	if out.OutputItems[1].Type != "message" || out.Text != wantText {
+		t.Fatalf("message 文本 = %q，期望逐字 %q", out.Text, wantText)
+	}
+	if out.FinishReason != core.FinishStop || out.Status != core.StatusCompleted {
+		t.Fatalf("finish/status = %q/%q，期望 stop/completed", out.FinishReason, out.Status)
+	}
+	u := out.Usage
+	if u == nil || u.InputTokens != 94 || u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 ||
+		u.OutputTokens != 137 || u.ReasoningTokens != 124 || u.TotalTokens != 231 {
+		t.Fatalf("usage 归一 = %+v，期望 In94/Read0/Write0/Out137/Reason124/Total231（样本逐字）", u)
+	}
+
+	// reasoning 样本：message 文本逐字 + usage（In106/Out118/Reason91/Total224）。
+	out2, err := a.ParseResponse(newQwenResolution(""), loadFixture(t, "real/qwen_responses_reasoning_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse(reasoning 样本) 报错: %v", err)
+	}
+	const wantText2 = "**9.9** 更大。9.9 = 9.90 > 9.11。"
+	if out2.Text != wantText2 {
+		t.Fatalf("message 文本 = %q，期望逐字 %q", out2.Text, wantText2)
+	}
+	if u := out2.Usage; u == nil || u.InputTokens != 106 || u.OutputTokens != 118 || u.ReasoningTokens != 91 || u.TotalTokens != 224 {
+		t.Fatalf("usage 归一 = %+v，期望 In106/Out118/Reason91/Total224（样本逐字）", u)
+	}
+}
+
+// TestQwenCompatParseResponseToolCallRealSample 钉住真实 tools 样本（扁平工具形出 function_call
+// item，2026-11-16 真机直采）上函数名 / 参数 / 调用 id 逐字进 core.OutputItem，finish=tool_calls。
+// 错误实现会红：name 不进 Name、call_id 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatParseResponseToolCallRealSample -v
+func TestQwenCompatParseResponseToolCallRealSample(t *testing.T) {
+	a := NewQwen(http.DefaultClient)
+	out, err := a.ParseResponse(newQwenResolution(""), loadFixture(t, "real/qwen_responses_tools_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse 报错: %v", err)
+	}
+	if len(out.OutputItems) != 2 || out.OutputItems[1].Type != "function_call" {
+		t.Fatalf("OutputItems = %+v，期望 reasoning + function_call", out.OutputItems)
 	}
 	tc := out.OutputItems[1]
-	if tc.Type != "function_call" || tc.Name != "search" || tc.Arguments != "{\"q\":1}" || tc.CallID != "call_abc" {
-		t.Fatalf("tool item = %+v，期望 Name=search（name 必须进 Name）", tc)
+	if tc.Name != "get_weather" || tc.Arguments != `{"city": "北京"}` ||
+		tc.CallID != "call_0c62a2295f62452e876e6905" || tc.ID != "fc_cb37f532-01ff-4405-9e10-69d3f2e4c11d" {
+		t.Fatalf("function_call item = %+v，期望 name/arguments/call_id 逐字（样本）", tc)
 	}
-	if out.FinishReason != "content_filter" {
-		t.Fatalf("FinishReason = %q，期望超集原值 content_filter", out.FinishReason)
+	if out.FinishReason != core.FinishToolCalls {
+		t.Fatalf("FinishReason = %q，期望 tool_calls", out.FinishReason)
 	}
-	if out.Usage == nil || out.Usage.InputTokens != 100 || out.Usage.CacheReadTokens != 25 ||
-		out.Usage.CacheWriteTokens != 10 || out.Usage.OutputTokens != 40 {
-		t.Fatalf("usage 归一 = %+v，期望 In100/Read25/Write10/Out40（4.4.2 Qwen 兼容行）", out.Usage)
+	if u := out.Usage; u == nil || u.InputTokens != 339 || u.OutputTokens != 68 || u.ReasoningTokens != 40 || u.TotalTokens != 407 {
+		t.Fatalf("usage 归一 = %+v，期望 In339/Out68/Reason40/Total407（样本逐字）", u)
+	}
+}
+
+// TestQwenStreamRealSample 钉住真实流样本直喂（2026-11-16 真机逐帧录制；真实 wire 是
+// `data:{json}` 冒号无空格 + `:HTTP_STATUS/200` 注释行 + `id:` 行 + 无 [DONE]、
+// response.incomplete 收口，来源见 testdata/real/README.md）：
+// 帧序列 = lifecycle×2 + 推理增量×78 + usage + done = 82 帧；usage（In94/Out256/Reason256/Total350）
+// 先于 done（incomplete）。
+// 错误实现会红：只认 `data: {`（带空格）⇒ 帧全丢 ⇒ 计数红；usage/done 顺序颠倒 ⇒ 帧序红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenStreamRealSample -v
+func TestQwenStreamRealSample(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(loadFixture(t, "real/qwen_responses_stream_real.sse"))
+	}))
+	defer srv.Close()
+
+	a := NewQwen(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newQwenResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v（无 [DONE]，response.incomplete 收口）", cerr)
+	}
+	if len(frames) != 82 {
+		t.Fatalf("帧数 = %d，期望 82（lifecycle×2 + 推理×78 + usage + done）", len(frames))
+	}
+	for i, want := range []string{"response.created", "response.in_progress"} {
+		if frames[i].Kind != stream.FrameLifecycle || frames[i].Status != want {
+			t.Fatalf("帧[%d] = %+v，期望 lifecycle %s", i, frames[i], want)
+		}
+	}
+	// 推理增量（样本逐字前三帧）。
+	for i, want := range []string{"用户", "说“", "说好”，"} {
+		f := frames[2+i]
+		if f.Kind != stream.FrameReasoningDelta || f.Reasoning != want {
+			t.Fatalf("帧[%d] = %+v，期望推理增量 %q（样本逐字）", 2+i, f, want)
+		}
+	}
+	if frames[79].Kind != stream.FrameReasoningDelta {
+		t.Fatalf("帧[79] = %+v，期望推理增量（末个）", frames[79])
+	}
+	// 尾两帧：usage（response.incomplete 自带）→ done incomplete，usage 先于 done。
+	u := frames[80]
+	if u.Kind != stream.FrameUsage || u.Usage.InputTokens != 94 || u.Usage.OutputTokens != 256 ||
+		u.Usage.ReasoningTokens != 256 || u.Usage.TotalTokens != 350 {
+		t.Fatalf("帧[80] = %+v，期望 usage（In94/Out256/Reason256/Total350，样本逐字）", u)
+	}
+	d := frames[81]
+	if d.Kind != stream.FrameDone || d.Status != core.StatusIncomplete {
+		t.Fatalf("帧[81] = %+v，期望 done incomplete", d)
+	}
+}
+
+// TestQwenStreamToolCallName 钉住 Responses 形流式工具调用名进帧（帧承载约定：
+// FrameToolCallArgsDelta.Text 载函数名、ToolCallID 载调用 id）：output_item.added 的
+// item.name 必须以补名帧（ToolCallID=call_abc、Text=search）进入帧序列，参数增量帧照常到
+// （partial_json ⇒ Arguments）、completed 收口（⛔ 无 [DONE] 也必须收口）。
+// 错误实现会红：不发补名帧 ⇒ named=0 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenStreamToolCallName -v
+func TestQwenStreamToolCallName(t *testing.T) {
+	const sse = "" +
+		"event: response.output_item.added\n" +
+		"data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"search\"}}\n\n" +
+		"event: response.function_call_arguments.delta\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":1,\"item_id\":\"fc_1\",\"partial_json\":\"{\\\"q\\\":1}\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"usage\":{\"input_tokens\":339,\"output_tokens\":68,\"total_tokens\":407}}}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	a := NewQwen(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newQwenResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v（⛔ 无 [DONE]，completed 必须收口）", cerr)
+	}
+	var named, args int
+	var doneStatus string
+	for _, f := range frames {
+		if f.Kind == stream.FrameToolCallArgsDelta && f.ToolCallID == "call_abc" {
+			if f.Text == "search" {
+				named++
+			}
+			if f.Arguments == "{\"q\":1}" {
+				args++
+			}
+		}
+		if f.Kind == stream.FrameDone {
+			doneStatus = f.Status
+		}
+	}
+	if named == 0 {
+		t.Fatalf("缺补名帧（ToolCallID=call_abc 且 Text=search）：%+v", frames)
+	}
+	if args == 0 {
+		t.Fatalf("参数帧缺失（partial_json={\"q\":1}）：%+v", frames)
+	}
+	if doneStatus != core.StatusCompleted {
+		t.Fatalf("done 状态 = %q，期望 completed", doneStatus)
+	}
+}
+
+// TestQwenCompatParseUsage 钉住兼容层 usage（4.4.2 Qwen 兼容行）：
+// 命中 = cached_tokens=25、写入 = cache_creation_input_tokens=10（两级都在 prompt_tokens_details）。
+// 错误实现会红：写入丢 ⇒ Write=0 ⇒ 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatParseUsage -v
+func TestQwenCompatParseUsage(t *testing.T) {
+	a := NewQwen(http.DefaultClient)
+	u := a.ParseUsage(loadFixture(t, "qwen_compat_usage.json"))
+	if u.InputTokens != 100 || u.CacheReadTokens != 25 || u.CacheWriteTokens != 10 || u.OutputTokens != 40 {
+		t.Fatalf("归一不对：In=%d(100) Read=%d(25) Write=%d(10) Out=%d(40)",
+			u.InputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.OutputTokens)
+	}
+	if u.InputTokensUncached != 65 {
+		t.Fatalf("Uncached = %d，期望 65 = 100−25−10", u.InputTokensUncached)
 	}
 }
 
@@ -245,22 +445,6 @@ func TestQwenNativeParseUsage(t *testing.T) {
 	}
 }
 
-// TestQwenCompatParseUsage 钉住兼容层 usage（4.4.2 Qwen 兼容行）：
-// 命中 = cached_tokens=25、写入 = cache_creation_input_tokens=10（两级都在 prompt_tokens_details）。
-// 错误实现会红：写入丢 ⇒ Write=0 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenCompatParseUsage -v
-func TestQwenCompatParseUsage(t *testing.T) {
-	a := NewQwen(http.DefaultClient)
-	u := a.ParseUsage(loadFixture(t, "qwen_compat_usage.json"))
-	if u.InputTokens != 100 || u.CacheReadTokens != 25 || u.CacheWriteTokens != 10 || u.OutputTokens != 40 {
-		t.Fatalf("归一不对：In=%d(100) Read=%d(25) Write=%d(10) Out=%d(40)",
-			u.InputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.OutputTokens)
-	}
-	if u.InputTokensUncached != 65 {
-		t.Fatalf("Uncached = %d，期望 65 = 100−25−10", u.InputTokensUncached)
-	}
-}
-
 // TestQwenNativeStreamFrames 钉住原生流式（3.6 坑 1 / 4.3.7）：
 // 帧格式 `data:{json}`（冒号后无空格）⇒ SSE 解析要容忍；每帧自带 usage；⛔ 无 [DONE] 哨兵；
 // 终态以 output.finish_reason 判定。请求头 X-DashScope-SSE: enable 随真实 HTTP 核验。
@@ -308,117 +492,6 @@ func TestQwenNativeStreamFrames(t *testing.T) {
 	}
 	if frames[4].Kind != stream.FrameDone || frames[4].Status != "stop" {
 		t.Fatalf("帧[4] = %+v，期望 done/stop", frames[4])
-	}
-}
-
-// TestQwenStreamToolCallName 钉住兼容层（Chat 形）流式工具调用名进帧（帧承载约定：
-// FrameToolCallArgsDelta.Text 载函数名、ToolCallID 载调用 id）：delta.tool_calls 首块的
-// function.name 必须以补名帧（ToolCallID=call_abc、Text=search）进入帧序列，参数帧照常到
-// （ToolCallID 一致）。
-// 错误实现会红：不发补名帧 ⇒ 帧序列里只有 Text 为空的参数帧 ⇒ named=0 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenStreamToolCallName -v
-func TestQwenStreamToolCallName(t *testing.T) {
-	const sse = "" +
-		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]}}]}\n\n" +
-		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n" +
-		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":null}\n\n" +
-		"data: [DONE]\n\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(sse))
-	}))
-	defer srv.Close()
-
-	a := NewQwen(srv.Client())
-	it, err := a.StreamStart(context.Background(), &core.Request{}, newQwenResolution(srv.URL))
-	if err != nil {
-		t.Fatalf("StreamStart 报错: %v", err)
-	}
-	frames, cerr := collectFrames(t, it)
-	if cerr != nil {
-		t.Fatalf("流式终态错误: %v", cerr)
-	}
-	var named, args int
-	for _, f := range frames {
-		if f.Kind == stream.FrameToolCallArgsDelta && f.ToolCallID == "call_abc" {
-			if f.Text == "search" {
-				named++
-			}
-			if f.Arguments == "{\"q\":1}" {
-				args++
-			}
-		}
-	}
-	if named == 0 {
-		t.Fatalf("缺补名帧（ToolCallID=call_abc 且 Text=search）：%+v", frames)
-	}
-	if args == 0 {
-		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
-	}
-}
-
-// TestQwenStreamUsageBeforeDone 钉住延后收口的两拍形态（Qwen chat 的 usage 在末帧）：
-// finish(usage:null) ⇒ 独立 usage 帧 ⇒ [DONE]。finish 即收口会把独立 usage 帧丢掉
-// ⇒ usage 缺失被置 Estimated 估算（与 moonshot / xiaomi 同一口径的实测 bug）。
-// 错误实现对照：提前收口 ⇒ 无 usage 帧或 Done 在 usage 前 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenStreamUsageBeforeDone -v
-func TestQwenStreamUsageBeforeDone(t *testing.T) {
-	const sse = "" +
-		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你\"}}]}\n\n" +
-		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
-		"data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" +
-		"data: [DONE]\n\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte(sse))
-	}))
-	defer srv.Close()
-
-	a := NewQwen(srv.Client())
-	it, err := a.StreamStart(context.Background(), &core.Request{}, newQwenResolution(srv.URL))
-	if err != nil {
-		t.Fatalf("StreamStart 报错: %v", err)
-	}
-	frames, cerr := collectFrames(t, it)
-	if cerr != nil {
-		t.Fatalf("流式终态错误: %v", cerr)
-	}
-	ui, di := -1, -1
-	for i, fr := range frames {
-		if fr.Kind == stream.FrameUsage {
-			ui = i
-			if fr.Usage == nil || fr.Usage.InputTokens != 10 || fr.Usage.OutputTokens != 5 {
-				t.Fatalf("usage 帧 = %+v，期望 10/5（独立 usage 帧逐字）", fr.Usage)
-			}
-		}
-		if fr.Kind == stream.FrameDone {
-			di = i
-			if fr.Status != "stop" {
-				t.Fatalf("done 状态 = %q，期望 stop 超集原值", fr.Status)
-			}
-		}
-	}
-	if ui < 0 {
-		t.Fatal("两拍形态未产出 usage 帧（独立 usage 帧被丢）")
-	}
-	if di < 0 || ui > di {
-		t.Fatalf("usage 帧(%d) 必须先于 Done 帧(%d)", ui, di)
-	}
-}
-
-// TestQwenDeferredDoneAtSentinel 钉住延后收口的 [DONE] 补收口（无 usage 流终止帧不丢）：
-// finish(usage:null) 不立即收口；[DONE] 处补发 Done(stop)。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestQwenDeferredDoneAtSentinel -v
-func TestQwenDeferredDoneAtSentinel(t *testing.T) {
-	a := NewQwen(http.DefaultClient)
-	d := a.(*qwenAdapter).streamDecoder()
-	fs, done, _ := d.decode(stream.SSEEvent{Data: `{"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}`})
-	if done || len(fs) != 0 {
-		t.Fatalf("finish 帧不应终态（usage 可能在其后），实际 done=%v frames=%d", done, len(fs))
-	}
-	fs, done, _ = d.decode(stream.SSEEvent{Data: `[DONE]`})
-	if !done || len(fs) != 1 || fs[0].Kind != stream.FrameDone || fs[0].Status != "stop" {
-		t.Fatalf("[DONE] 补收口 = %+v done=%v，期望恰一帧 Done(stop)", fs, done)
 	}
 }
 
