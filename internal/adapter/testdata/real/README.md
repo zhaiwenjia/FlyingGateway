@@ -56,3 +56,34 @@
 |---|---|---|---|
 | `mimo_stream_real.sse` | MiMo 开放平台 API 实调录制（MIMO_API_KEY，mimo-v2.6-flash，stream=true） | 真机逐帧录制 | **finish 帧 `usage:null` ⇒ 独立 usage 帧 ⇒ [DONE]**（usage 两拍，文档「同帧」口径与真实 wire 不符） |
 | `kimi_stream_real.sse` | Moonshot 开放平台 API 实调录制（MOONSHOT_API_KEY，kimi-k3.1-pro，stream=true） | 真机逐帧录制 | **usage 在 `choices[0].usage`（非顶层）**且与 finish 同帧 |
+
+## 2026-11-16 Responses 形实测样本（出站 Responses 改形轮直采）
+
+来源均为 2026-11-16 实测轮真实上游直采（逐格原始响应体留 `tests/20261116-responses-api-survey/raw/`，本地留档）；
+请求电池为 basic / tools / reasoning / stream 四项（tools 用 Responses 规范**扁平**工具形，`max_output_tokens` 1024）。
+所有 stream 样本的终止形态均为 `response.completed` 收口、**无 `data: [DONE]`**。
+
+| 文件 | 供应商 | 来源 | 真实性依据 | 关键事实 |
+|---|---|---|---|---|
+| `qwen_responses_basic_real.json` | Qwen | `dashscope.aliyuncs.com/compatible-mode/v1/responses` 实调（qwen3.8-flash） | 真机直采 | 4/4 全通；usage 树 `input_tokens_details.cached_tokens` |
+| `qwen_responses_tools_real.json` | Qwen | 同上 | 真机直采 | 扁平工具形出 `function_call` item（带 name） |
+| `qwen_responses_reasoning_real.json` | Qwen | 同上 | 真机直采 | output 含 reasoning item |
+| `qwen_responses_stream_real.sse` | Qwen | 同上（stream=true） | 真机逐帧录制 | `response.completed` 收口、无 `[DONE]` |
+| `zhipu_responses_basic_real.json` | 智谱 | `open.bigmodel.cn/api/v1/responses` 实调（glm-5.3-flash，**普通 key**） | 真机直采 | 普通 key 可用 `/api/v1`（同轮 `/api/paas/v4/responses` 4×404） |
+| `zhipu_responses_tools_real.json` | 智谱 | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
+| `zhipu_responses_reasoning_real.json` | 智谱 | 同上 | 真机直采 | output 含 reasoning item |
+| `zhipu_responses_stream_real.sse` | 智谱 | 同上（stream=true） | 真机逐帧录制 | 无 `[DONE]`（官方原话「不发送 data: [DONE]」） |
+| `deepseek_responses_basic_real.json` | DeepSeek | `api.deepseek.com/v1/responses` 实调（deepseek-flash） | 真机直采 | 无状态（官方明言） |
+| `deepseek_responses_tools_real.json` | DeepSeek | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
+| `deepseek_responses_stream_real.sse` | DeepSeek | 同上（stream=true） | 真机逐帧录制 | 事件含 `response.reasoning_text.delta`；无 `[DONE]` |
+| `moonshot_responses_basic_real.json` | Kimi | `api.moonshot.cn/v1/responses` 实调（kimi-k3.1-pro） | 真机直采 | usage 含 `cache_write_tokens` 扩展 |
+| `moonshot_responses_tools_real.json` | Kimi | 同上 | 真机直采 | **嵌套工具形 400（function name is invalid）**，扁平形通 |
+| `moonshot_responses_reasoning_real.json` | Kimi | 同上 | 真机直采 | output 含 reasoning item |
+| `moonshot_responses_stream_real.sse` | Kimi | 同上（stream=true） | 真机逐帧录制 | 无 `[DONE]` |
+| `mimo_responses_basic_real.json` | MiMo | `api.xiaomimimo.com/v1/responses` 实调（mimo-v2.6-flash） | 真机直采 | 4/4 全通 |
+| `mimo_responses_tools_real.json` | MiMo | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
+| `mimo_responses_reasoning_real.json` | MiMo | 同上 | 真机直采 | output 含 reasoning item |
+| `mimo_responses_stream_real.sse` | MiMo | 同上（stream=true） | 真机逐帧录制 | 无 `[DONE]` |
+| `ollama_responses_basic_real.json` | Ollama | 本机 `localhost:11434/v1/responses` 实调（qwen3.5:2b） | 真机直采 | v0.13.3+ 无状态 flavor |
+| `ollama_responses_tools_real.json` | Ollama | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
+| `ollama_responses_stream_real.sse` | Ollama | 同上（stream=true） | 真机逐帧录制 | 事件含 `response.reasoning_summary_text.delta`；无 `[DONE]` |

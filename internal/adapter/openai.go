@@ -200,12 +200,12 @@ func openAIInputExtras(ex map[string]any, res *core.Resolution, itemCount int) {
 	}
 }
 
-// BuildRequest 用 SDK typed 参数构造 /responses 请求（4.3.1 逐字字段；4.2.2 系统提示走顶层
-// instructions；3.5：prompt_cache_key / previous_response_id 始终透传）。
-func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
-	if err := checkPreviousResponseID(true, r); err != nil {
-		return nil, err
-	}
+// responsesBuildParams 把规范 Request 装配为 Responses 形请求参数（4.3.1 逐字字段；4.2.2 系统
+// 提示走顶层 instructions；3.5：prompt_cache_key / previous_response_id 始终透传）。
+// ⚠️ 响应系共享机件（统一 SDD 3.6「响应系共用 openai-go/v3」）：供 OpenAI 兼容族各家适配器
+// 沿用（⛔ 不改签名）；家差字段（prompt_cache_options 等）由调用方 SetExtraFields 叠加，
+// 家差 Extra 透传由调用方 mergeExtraBody 处理。
+func responsesBuildParams(r *core.Request, res *core.Resolution) (responses.ResponseNewParams, error) {
 	p := responses.ResponseNewParams{Model: shared.ResponsesModel(res.Model)}
 	if r.MaxOutputTokens > 0 {
 		p.MaxOutputTokens = param.NewOpt(int64(r.MaxOutputTokens))
@@ -241,7 +241,7 @@ func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *
 	for _, m := range r.Messages {
 		items, sys, err := openAIInputItems(m)
 		if err != nil {
-			return nil, err
+			return responses.ResponseNewParams{}, err
 		}
 		if sys != "" {
 			if instructions == "" {
@@ -274,6 +274,19 @@ func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *
 	openAIInputExtras(ex, res, len(input))
 	if len(ex) > 0 {
 		p.SetExtraFields(ex)
+	}
+	return p, nil
+}
+
+// BuildRequest 构造 POST {base}/responses 出站请求（装配走共享机件 responsesBuildParams；
+// checkPreviousResponseID 按 3.5：OpenAI 支持服务端会话 ⇒ 直通）。
+func (a *openaiAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
+	if err := checkPreviousResponseID(true, r); err != nil {
+		return nil, err
+	}
+	p, err := responsesBuildParams(r, res)
+	if err != nil {
+		return nil, err
 	}
 	raw, err := marshalBody(p)
 	if err != nil {
@@ -352,11 +365,12 @@ type openAIOutputItem struct {
 	ReasoningContent string `json:"reasoning_content"`
 }
 
-// ParseResponse 解析 response 对象 → 规范 Response（4.3.1 响应体关键字段）。
+// parseResponsesBody 解析 response 对象 → 规范 Response（4.3.1 响应体关键字段）。
 // 先经 SDK typed 解析（统一 SDD 3.6：SDK 返回值先序列化再传入）——response.Response 结构化
 // 解析后用 RawJSON 原样送进既有归一逻辑 ⇒ finish_reason / reasoning_content 等兼容端点扩展
 // 随原始字节无损进入，⛔ 不因 SDK 类型裁剪而丢。
-func (a *openaiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
+// ⚠️ 响应系共享机件：usageFn 由各家适配器注入自己的 ParseUsage（⛔ 不改签名）。
+func parseResponsesBody(usageFn func(json.RawMessage) *core.Usage, body []byte) (*core.Response, error) {
 	var sr responses.Response
 	if err := json.Unmarshal(body, &sr); err != nil {
 		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
@@ -395,13 +409,18 @@ func (a *openaiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.
 	}
 	out.FinishReason = deriveResponsesFinish(r.FinishReason, r.Status, incompleteReason(r.IncompleteDetails), hasToolCall)
 	if len(r.Usage) > 0 {
-		out.Usage = a.ParseUsage(r.Usage)
+		out.Usage = usageFn(r.Usage)
 	}
 	if r.Error != nil {
 		out.Status = core.StatusFailed
 		out.Error = gwerrors.New(core.ErrUpstreamError, 0, r.Error.Code, r.Error.Message)
 	}
 	return out, nil
+}
+
+// ParseResponse 解析 response 对象 → 规范 Response（4.3.1；解析共享机件见 parseResponsesBody）。
+func (a *openaiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
+	return parseResponsesBody(a.ParseUsage, body)
 }
 
 // mapOutputItem 把异构 output item 映射到规范 OutputItem（type / id 保留原值）。
@@ -515,8 +534,14 @@ type openAIStreamDecoder struct {
 	toolIDs map[string]string // item_id → call_id（缺 output_item.added 时退回 item_id）
 }
 
+// newResponsesStreamDecoder 构造 Responses 形帧解码器（⚠️ 响应系共享机件：usageFn 由各家
+// 适配器注入自己的 ParseUsage，⛔ 不改签名；decode 的容忍口径见 openAIStreamDecoder）。
+func newResponsesStreamDecoder(usageFn func(json.RawMessage) *core.Usage) *openAIStreamDecoder {
+	return &openAIStreamDecoder{usageFn: usageFn, toolIDs: map[string]string{}}
+}
+
 func (a *openaiAdapter) streamDecoder() *openAIStreamDecoder {
-	return &openAIStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[string]string{}}
+	return newResponsesStreamDecoder(a.ParseUsage)
 }
 
 func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
