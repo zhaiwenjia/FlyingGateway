@@ -87,3 +87,14 @@
 | `ollama_responses_basic_real.json` | Ollama | 本机 `localhost:11434/v1/responses` 实调（qwen3.5:2b） | 真机直采 | v0.13.3+ 无状态 flavor |
 | `ollama_responses_tools_real.json` | Ollama | 同上 | 真机直采 | 扁平工具形出 `function_call` item |
 | `ollama_responses_stream_real.sse` | Ollama | 同上（stream=true） | 真机逐帧录制 | 事件含 `response.reasoning_summary_text.delta`；无 `[DONE]` |
+
+### 2026-11-16 MiniMax 补采（key 恢复后直采，国内站 `api.minimax.cn`，MiniMax-M3.1-Flash）
+
+| 文件 | 供应商 | 来源 | 真实性依据 | 关键事实 |
+|---|---|---|---|---|
+| `minimax_responses_basic_real.json` | MiniMax | `api.minimax.cn/v1/responses` 实调（basic，max_output_tokens 256） | 真机直采 | output[reasoning, message]；usage 204/0/75/279（reasoning 66） |
+| `minimax_responses_tools_real.json` | MiniMax | 同上（扁平工具形，max_output_tokens 1024） | 真机直采 | output[message, function_call]；**cached_tokens 命中 189**（⛔ 非「无缓存字段」） |
+| `minimax_responses_reasoning_real.json` | MiniMax | 同上 | 真机直采 | 缓存命中 197、reasoning_tokens 106 |
+| `minimax_responses_stream_real.sse` | MiniMax | 同上（stream=true） | 真机逐帧录制 | `response.completed` 收口、无 `[DONE]`；usage 204/42/246 |
+
+⚠️ key 绑站：同一把 key 打 `api.minimax.io/v1/models` 返 401（io 站），国内站 200。
