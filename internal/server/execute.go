@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand" // 仅退避抖动用（⛔ 不做路由/限流决策，统一 SDD 24 可复现口径不受影响）
 	"net/http"
 	"strconv"
 	"strings"
@@ -617,6 +618,14 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 		retryable := detail.Category == core.ErrRateLimit || detail.Category == core.ErrTimeout || detail.Category == core.ErrUpstreamError
 		if retryable && detail.Code != codeTokenPoolExhausted && counters.RetryCount < ep.MaxRetries {
 			counters.RecordRetry()
+			// 同端点重试前退避（统一 SDD 7.4）：5xx / 超时无恢复信号 ⇒ 截断指数退避 + 抖动
+			// 给上游喘息、防同步重试风暴；429 ⛔ 不在此退避（Retry-After / 默认冷却已由
+			// 令牌池承载等待，叠加退避 = 同一限流事件双重等待）。等待中被取消 ⇒ 取消收口。
+			if werr := s.waitBeforeRetry(h, ep, detail.Category, counters.RetryCount); werr != nil {
+				s.endEndpointSpan(span, h, nil, gwerrors.New(core.ErrCancelled, 499, "cancelled", "执行已取消"))
+				s.writeOutcome(w, r, h, req, mode, nil, nil, true)
+				return
+			}
 			continue // 同端点重试（级内）
 		}
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
@@ -659,6 +668,24 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 
 // codeTokenPoolExhausted 是「全部自有令牌受限」的对外错误码（本地池闸、非上游回执）。
 const codeTokenPoolExhausted = "token_pool_exhausted"
+
+// waitBeforeRetry 在同端点重试前等待（统一 SDD 7.4 退避口径）：
+//   - 429（rate_limit）⇒ 不退避：Retry-After / 默认冷却已由令牌池承载等待语义
+//     （respect Retry-After 优先于自算退避），⛔ 同一限流事件不叠双重等待；
+//   - timeout / upstream_error ⇒ 截断指数退避 + 抖动（第 attempt 次重试，
+//     min(Base·2^(attempt-1) + U[0,Jitter), Cap)，Google Cloud 推荐算法）。
+//
+// 返回非 nil = 等待期间被取消（ctx done），调用方走取消收口（⛔ 不再重试，SC-5）。
+// 错误分类若将来新增可重试类，⛔ 不默认套退避 —— 先明确其等待语义再进本分支。
+func (s *Server) waitBeforeRetry(h *execHandle, ep *registry.Endpoint, cat core.ErrorCategory, attempt int) error {
+	if cat == core.ErrRateLimit {
+		return nil
+	}
+	wait := s.retryBackoff.Wait(attempt, mrand.Float64)
+	s.logger.Info("同端点重试退避",
+		"endpoint", ep.Name, "retry_attempt", attempt, "wait_ms", wait.Milliseconds(), "error", string(cat))
+	return waitSleep(h.ctx, wait)
+}
 
 // poolSize 返回端点凭据池的令牌数（轮换上界；解析失败 ⇒ 0）。
 func (s *Server) poolSize(credentialRef string) int {

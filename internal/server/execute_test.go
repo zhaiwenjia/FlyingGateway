@@ -611,6 +611,7 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 		Metrics:             telemetry.NewMetrics(),
 		AllowLoopbackEgress: true,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("server.New 失败: %v", err)
@@ -629,6 +630,65 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("上游调用 = %d，期望 2（首试超时 + 重试成功）", got)
+	}
+}
+
+// TestRetryBackoffAppliedOnUpstreamError 钉住「同端点重试前指数退避」（统一 SDD 7.4）：
+// 上游 5xx 两次后成功、max_retries=2 ⇒ 重试前各等 Base·2^(n-1)（50ms + 100ms）、
+// 上游恰好被打 3 次、客户端 200。
+// 错误实现对照：无退避 ⇒ elapsed < 150ms 红；不重试 ⇒ calls != 3 红。
+func TestRetryBackoffAppliedOnUpstreamError(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	const okChunk = "" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
+		"data: [DONE]\n\n"
+	var calls int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, okChunk)
+	}))
+	defer up.Close()
+	reg := writeRegistry(t, []epSpec{{
+		name: "flaky", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 1024, maxRetries: 2, priority: 0, timeoutS: 5,
+	}}, nil)
+	srv, err := New(Options{
+		Registry:            reg,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// Jitter=0 保持确定性：n=1 ⇒ 50ms、n=2 ⇒ 100ms ⇒ 总退避 150ms。
+		RetryBackoff: Backoff{Base: 50 * time.Millisecond, Jitter: 0, Cap: 200 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	start := time.Now()
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("退避重试后应 200，实际 %d：%s", resp.StatusCode, body[:200])
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("上游调用 = %d，期望 3（两次 500 + 重试成功）", got)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("端到端耗时 %v < 150ms —— 重试前未按 50ms+100ms 退避", elapsed)
 	}
 }
 

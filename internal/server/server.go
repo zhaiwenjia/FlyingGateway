@@ -63,6 +63,11 @@ type Options struct {
 	// 超限 ⇒ 429 + Retry-After（⛔ 不排队无界、⛔ 不静默丢弃）。
 	MaxInFlight int64
 
+	// RetryBackoff 是同端点重试的截断指数退避 + 抖动参数（统一 SDD 7.4；429 不走退避，
+	// Retry-After 语义由令牌冷却承载）。整体零值 ⇒ 默认 1s/1s/32s（Google Cloud
+	// truncated exponential backoff 推荐值）；测试注入小值提速。
+	RetryBackoff Backoff
+
 	// ---- 上游自有令牌池与限流轮换 ----
 
 	// UpstreamBucketCapacity / UpstreamBucketRefill 是每自有令牌的本地令牌桶；≤ 0 = 不启用
@@ -111,6 +116,9 @@ type Server struct {
 	// maxInFlight / inFlight 是过载闸（load shedding；≤ 0 = 不启用）。
 	maxInFlight int64
 	inFlight    atomic.Int64
+
+	// retryBackoff 是同端点重试退避（已在 New 补齐默认值）。
+	retryBackoff Backoff
 
 	allowLoopback bool
 	pollInterval  time.Duration
@@ -247,6 +255,7 @@ func New(opts Options) (*Server, error) {
 	}
 	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim)
 	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
+	s.retryBackoff = opts.RetryBackoff.withDefaults()
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
 	}
