@@ -16,11 +16,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
@@ -77,6 +79,12 @@ type Options struct {
 	// UpstreamProbeTimeout 是单次巡检探测超时（默认 3s）。
 	UpstreamProbeTimeout time.Duration
 
+	// RegistryPath / RatesPath 是配置文件路径（热加载数据源，统一 SDD 9.2 / 5.4）。
+	// 非空 ⇒ 支持 SIGHUP 与 POST /admin/reload 热加载（重读该路径、原子替换）；
+	// 空 ⇒ 热加载显式报错（⛔ 不静默无操作）。
+	RegistryPath string
+	RatesPath    string
+
 	// ---- 上游自有令牌池与限流轮换 ----
 
 	// UpstreamBucketCapacity / UpstreamBucketRefill 是每自有令牌的本地令牌桶；≤ 0 = 不启用
@@ -103,12 +111,20 @@ type Options struct {
 	Logger *slog.Logger
 }
 
+// gatewayCfg 是可热加载配置的原子快照（注册表 + 费率表配套替换，⛔ 不出现
+// 新注册表配旧费率表的混合态；对象发布后不可变，统一 SDD 9.2）。
+type gatewayCfg struct {
+	reg   *registry.Registry
+	rates *cost.Rates
+}
+
 // Server 是网关服务（数据面 + 管理面）。
 type Server struct {
-	reg     *registry.Registry
-	rates   *cost.Rates
-	tracer  *telemetry.Tracer
-	metrics *telemetry.Metrics
+	cfg       atomic.Pointer[gatewayCfg]
+	regPath   string // 热加载数据源（空 = 不支持热加载）
+	ratesPath string
+	tracer    *telemetry.Tracer
+	metrics   *telemetry.Metrics
 
 	bucket    *policy.TokenBucket
 	budget    *policy.Budget
@@ -205,8 +221,8 @@ func New(opts Options) (*Server, error) {
 		lg = slog.Default()
 	}
 	s := &Server{
-		reg:           opts.Registry,
-		rates:         opts.Rates,
+		regPath:       opts.RegistryPath,
+		ratesPath:     opts.RatesPath,
 		tracer:        opts.Tracer,
 		metrics:       opts.Metrics,
 		bucket:        opts.TokenBucket,
@@ -219,6 +235,7 @@ func New(opts Options) (*Server, error) {
 		pollInterval:  poll,
 		logger:        lg,
 	}
+	s.cfg.Store(&gatewayCfg{reg: opts.Registry, rates: opts.Rates})
 	// 配额共享组装配（统一 SDD 7.2 锚点分离：限流锚定契约，未登记 ⇒ 不限）：
 	// 同组端点共享同一个 limitGroup 实例（一份桶 + 一个并发计数，⛔ 不按端点各建一份 ——
 	// 共享配额池按端点各计一份会 N 倍超发）。
@@ -330,6 +347,7 @@ func (s *Server) AdminHandler(adminToken string) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/health", s.adminAuth(adminToken, s.handleAdminHealth))
 	mux.HandleFunc("GET /admin/credential-pools", s.adminAuth(adminToken, s.handleAdminCredentialPools))
 	mux.HandleFunc("GET /metrics", s.adminAuth(adminToken, s.handleAdminMetrics))
+	mux.HandleFunc("POST /admin/reload", s.adminAuth(adminToken, s.handleAdminReload))
 	return mux, nil
 }
 
@@ -437,7 +455,7 @@ type modelInfo struct {
 // handleModels 由注册表生成模型列表（GET /v1/models，统一 SDD 2.3 / 9.1）：
 // ⛔ 不做动态模型发现，注册表是唯一真源。
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	eps := s.reg.List()
+	eps := s.curReg().List()
 	data := make([]modelInfo, 0, len(eps))
 	for _, ep := range eps {
 		var m modelInfo
@@ -479,7 +497,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 // handleAdminEndpoints 返回端点注册表全量视图（GET /admin/endpoints）。
 // 注册表只存凭据来源引用、⛔ 不存明文 ⇒ 视图可安全输出（统一 SDD 8.1）。
 func (s *Server) handleAdminEndpoints(w http.ResponseWriter, _ *http.Request) {
-	eps := s.reg.List()
+	eps := s.curReg().List()
 	out := make([]map[string]any, 0, len(eps))
 	for _, ep := range eps {
 		out = append(out, map[string]any{
@@ -520,8 +538,8 @@ func (s *Server) handleAdminHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             "ok",
-		"endpoints":          len(s.reg.List()),
-		"strategy":           s.reg.Strategy,
+		"endpoints":          len(s.curReg().List()),
+		"strategy":           s.curReg().Strategy,
 		"cancel_pending":     s.cancels.pendingCount(),
 		"usage_missing_rate": s.metrics.UsageMissingRate(),
 		"breakers":           breakers,
@@ -535,6 +553,125 @@ func (s *Server) probeSnapshot() any {
 		return "disabled"
 	}
 	return s.prober.Snapshot()
+}
+
+// curReg / curRates 返回当前配置快照（热加载原子切换后新请求见新表；
+// 单请求内经同一 gatewayCfg 读到配套的注册表与费率表）。
+func (s *Server) curReg() *registry.Registry { return s.cfg.Load().reg }
+func (s *Server) curRates() *cost.Rates      { return s.cfg.Load().rates }
+
+// ---- 配置热加载（统一 SDD 9.2：先校验后切换、失败保留旧表）----
+
+// ReloadOutcome 是一次热加载的结果（可观测：成功 / 需重启 / 失败三分，
+// 对齐业界 reloadable vs restart-required 口径）。
+type ReloadOutcome struct {
+	OK              bool     `json:"ok"`
+	RestartRequired []string `json:"restart_required,omitempty"` // 需重启的变更点（显式列出）
+	Error           string   `json:"error,omitempty"`
+}
+
+// Reload 热加载注册表与费率表：重读 → 校验 → 原子替换；任何失败 ⇒ 保留旧表。
+//
+// 可热更：费率表全量；注册表的端点字段（base_url / upstream_model / timeout_s /
+// max_retries / priority / context_window / max_output_tokens / capabilities）与
+// fallback_chains —— 这些只被请求路径按快照读取（每请求重做识别与适配），无运行时组件绑定。
+//
+// ⛔ 需重启（显式拒绝并列出，⛔ 不静默半生效）：端点增删、rate_limit /
+// concurrency_limit / limits_group / breaker / credential_rate_limits /
+// caller_rate_limits 变更 —— 这些在启动时构建运行时组件（令牌池 / 配额组 / 熔断器 /
+// 调用方桶），热换组件会把桶余额、429 冷却、熔断状态一并洗掉或产生半应用态。
+func (s *Server) Reload() ReloadOutcome {
+	if s.regPath == "" {
+		return ReloadOutcome{Error: "server: 未配置注册表路径（RegistryPath），不支持热加载"}
+	}
+	newReg, err := registry.Load(s.regPath)
+	if err != nil {
+		return ReloadOutcome{Error: fmt.Sprintf("注册表重载失败（保留旧表）：%v", err)}
+	}
+	var newRates *cost.Rates
+	if s.ratesPath != "" {
+		newRates, err = cost.LoadRates(s.ratesPath)
+		if err != nil {
+			return ReloadOutcome{Error: fmt.Sprintf("费率表重载失败（保留旧表）：%v", err)}
+		}
+	}
+	old := s.cfg.Load()
+	if rr := restartRequiredDiffs(old.reg, newReg); len(rr) > 0 {
+		return ReloadOutcome{RestartRequired: rr}
+	}
+	s.cfg.Store(&gatewayCfg{reg: newReg, rates: newRates})
+	s.logger.Info("配置热加载完成",
+		"endpoints", len(newReg.List()), "rates_loaded", newRates != nil)
+	return ReloadOutcome{OK: true}
+}
+
+// restartRequiredDiffs 对比新旧注册表，返回需重启的变更点（空 = 可热更）。
+// 判定口径见 Reload 注释：运行时组件绑定的配置变更都归需重启。
+func restartRequiredDiffs(oldReg, newReg *registry.Registry) []string {
+	var rr []string
+	oldEPs := map[string]registry.Endpoint{}
+	for _, ep := range oldReg.List() {
+		oldEPs[ep.Name] = ep
+	}
+	newEPs := map[string]registry.Endpoint{}
+	for _, ep := range newReg.List() {
+		newEPs[ep.Name] = ep
+	}
+	for name := range newEPs {
+		if _, ok := oldEPs[name]; !ok {
+			rr = append(rr, "新增端点 "+name)
+		}
+	}
+	for name := range oldEPs {
+		if _, ok := newEPs[name]; !ok {
+			rr = append(rr, "删除端点 "+name)
+		}
+	}
+	for name, nep := range newEPs {
+		oep, ok := oldEPs[name]
+		if !ok {
+			continue
+		}
+		if !reflect.DeepEqual(oep.RateLimit, nep.RateLimit) {
+			rr = append(rr, "端点 "+name+" 的 rate_limit")
+		}
+		if oep.ConcurrencyLimit != nep.ConcurrencyLimit {
+			rr = append(rr, "端点 "+name+" 的 concurrency_limit")
+		}
+		if oep.LimitsGroup != nep.LimitsGroup {
+			rr = append(rr, "端点 "+name+" 的 limits_group")
+		}
+		if !reflect.DeepEqual(oep.Breaker, nep.Breaker) {
+			rr = append(rr, "端点 "+name+" 的 breaker")
+		}
+	}
+	if !reflect.DeepEqual(oldReg.CredentialRateLimits, newReg.CredentialRateLimits) {
+		rr = append(rr, "credential_rate_limits")
+	}
+	if !reflect.DeepEqual(oldReg.CallerRateLimits, newReg.CallerRateLimits) {
+		rr = append(rr, "caller_rate_limits")
+	}
+	sort.Strings(rr)
+	return rr
+}
+
+// handleAdminReload 触发配置热加载（POST /admin/reload，管理面鉴权）。
+// 响应体 = ReloadOutcome：ok / restart_required（列出需重启的变更点）/ error。
+func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, string(core.ErrInvalidRequest), "method_not_allowed",
+			"热加载仅支持 POST")
+		return
+	}
+	out := s.Reload()
+	status := http.StatusOK
+	if !out.OK {
+		status = http.StatusBadRequest
+		if len(out.RestartRequired) > 0 {
+			status = http.StatusConflict
+		}
+	}
+	writeJSON(w, status, out)
 }
 
 // ---- 错误与 JSON 出口 ----

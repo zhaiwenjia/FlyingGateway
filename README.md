@@ -389,9 +389,16 @@ usage）→ `message_stop`。
 - **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
 - **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
   `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）、
-  `GET /admin/health`（含端点熔断状态 `breakers`）、`GET /admin/credential-pools`
-  与 `GET /metrics`（Prometheus 文本暴露格式 0.0.4：请求/取消/token 计数、断连检测
-  延迟直方图、usage 缺失率、熔断状态 gauge）。⛔ 管理面不绑公网。
+  `GET /admin/health`（含端点熔断状态 `breakers` 与巡检 `probes`）、`GET /admin/credential-pools`、
+  `GET /metrics`（Prometheus 文本暴露格式 0.0.4：请求/取消/token 计数、断连检测
+  延迟直方图、usage 缺失率、熔断状态 gauge）与 `POST /admin/reload`（配置热加载）。
+  ⛔ 管理面不绑公网。
+- **配置热加载**：`SIGHUP` 或 `POST /admin/reload` 重读注册表/费率表，先校验后原子替换、
+  失败保留旧表。可热更：费率表、端点 `base_url`/`upstream_model`/`timeout_s`/`max_retries`/
+  `priority`/`context_window`/`max_output_tokens`/`capabilities`/`fallback_chains`；
+  **需重启**（显式拒绝并列出）：端点增删、`rate_limit`/`concurrency_limit`/`limits_group`/
+  `breaker`/`credential_rate_limits`/`caller_rate_limits`（运行时组件绑定，热换会洗掉
+  桶余额/冷却/熔断状态）。
 
 ## 五、运行参数
 

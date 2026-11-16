@@ -279,8 +279,8 @@ func (s *Server) finalizeExec(h *execHandle, req *core.Request, caller string, s
 			// 预算按**调用方**累计（调用方 key 与上游令牌解耦后的计费口径）。
 			s.budget.Record(caller, u.NormalizedTokens())
 		}
-		if s.rates != nil {
-			rate := s.rates.Lookup(h.upstreamModelName())
+		if s.curRates() != nil {
+			rate := s.curRates().Lookup(h.upstreamModelName())
 			c := cost.CalculateCost(u, rate, startTime)
 			s.logger.Info("upstream 执行计费",
 				"client_request_id", h.id,

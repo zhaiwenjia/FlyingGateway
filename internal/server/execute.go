@@ -132,7 +132,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	defer s.finalizeExec(h, req, caller, startTime)
 
 	// 4. 模型必须在注册表列表内（⛔ 不透传任意模型名，统一 SDD 9.1）。
-	ep, err := s.reg.Lookup(req.Model)
+	ep, err := s.curReg().Lookup(req.Model)
 	if err != nil {
 		s.writeDetail(w, gwerrors.New(core.ErrInvalidRequest, http.StatusNotFound, "model_not_found", security.Redact(err.Error())))
 		return
@@ -533,7 +533,7 @@ func (s *Server) watchClient(r *http.Request, h *execHandle) (stop func()) {
 // handleContextExceeded 处理上下文越界：走 context_window 专用降级链；
 // 无链 / 链内无可用大窗口端点 ⇒ 显式报 400 context_exceeded（⛔ 不静默截断）。
 func (s *Server) handleContextExceeded(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, mode inboundMode, ep *registry.Endpoint, res *core.Resolution, ad adapter.Adapter, ctxErr error) {
-	chain, err := routing.SelectChain(s.reg.FallbackChains, ep.Name, routing.FailContextWindow)
+	chain, err := routing.SelectChain(s.curReg().FallbackChains, ep.Name, routing.FailContextWindow)
 	if err != nil {
 		s.writeDetail(w, gwerrors.New(core.ErrContextExceeded, http.StatusBadRequest, "context_exceeded", security.Redact(ctxErr.Error())))
 		return
@@ -653,7 +653,7 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 		}
 		kind := failureKind(detail.Category)
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
-		chain, err := routing.SelectChain(s.reg.FallbackChains, ep.Name, kind)
+		chain, err := routing.SelectChain(s.curReg().FallbackChains, ep.Name, kind)
 		if err != nil || counters.FallbackCount >= len(chain) {
 			s.endEndpointSpan(span, h, resp, detail)
 			s.writeFinalError(w, h, detail)
@@ -751,7 +751,7 @@ func (s *Server) poolHasUncool(credentialRef string) bool {
 
 // endpointByName 按端点名查注册表（降级链引用的是端点名，非模型别名）。
 func (s *Server) endpointByName(name string) *registry.Endpoint {
-	for _, ep := range s.reg.List() {
+	for _, ep := range s.curReg().List() {
 		if ep.Name == name {
 			e := ep
 			return &e

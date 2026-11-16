@@ -273,6 +273,8 @@ func run(args []string, stdout io.Writer) int {
 	srv, err := server.New(server.Options{
 		Registry:               reg,
 		Rates:                  rates,
+		RegistryPath:           opts.configPath,
+		RatesPath:              opts.ratesPath,
 		Tracer:                 telemetry.NewTracer(&logExporter{logger: logger}),
 		Metrics:                telemetry.NewMetrics(),
 		TokenBucket:            bucket,
@@ -355,6 +357,24 @@ func run(args []string, stdout io.Writer) int {
 			return 1
 		}
 	}
+
+	// 配置热加载（统一 SDD 9.2）：SIGHUP 触发重读注册表/费率表，先校验后原子切换、
+	// 失败保留旧表（与 POST /admin/reload 同一路径）。
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			out := srv.Reload()
+			switch {
+			case out.OK:
+				logger.Info("配置热加载成功")
+			case len(out.RestartRequired) > 0:
+				logger.Warn("配置变更需重启（热加载拒绝，旧表继续生效）", "restart_required", out.RestartRequired)
+			default:
+				logger.Error("配置热加载失败（旧表继续生效）", "err", out.Error)
+			}
+		}
+	}()
 
 	// 优雅关闭：shutdown ⇒ 在途执行以 shutdown 原因立即收口（统一 SDD 6.6 要求 4）。
 	sig := make(chan os.Signal, 1)
