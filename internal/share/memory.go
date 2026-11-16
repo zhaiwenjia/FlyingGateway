@@ -111,3 +111,11 @@ func (m *MemoryStore) CooldownUntil(key string) (time.Time, error) {
 	defer m.mu.Unlock()
 	return m.cools[key], nil
 }
+
+// BucketTokens 返回桶在 now 时刻的余额（refill 后、不扣减）。
+func (m *MemoryStore) BucketTokens(key string, capacity int64, refillPerSec float64, now time.Time) (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// fillLocked 会推进 refill 时间轴 —— 观测也顺带推进（与 TryTake 同口径，无害）。
+	return m.fillLocked(key, capacity, refillPerSec, now), nil
+}

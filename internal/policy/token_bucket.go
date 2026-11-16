@@ -7,6 +7,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 )
 
 // TokenBucket 是 token 级令牌桶限流（统一 SDD 7.2 / 8.3）。
@@ -15,6 +17,10 @@ import (
 // 计数口径：normalized = InputTokens + OutputTokens（缓存命中与写入计入
 // InputTokens 不打折，见 core.Usage.NormalizedTokens）。
 //
+// 双模式（⛔ 不同混用）：内存模式（store == nil，单实例）与**共享模式**（store 非 nil，
+// 桶状态存 share.Store、跨实例一份配额）。共享模式故障口径：存储不可用 ⇒
+// **fail-open 放行**（限流不可用时业务可用性优先）+ onShareError 显式告警，⛔ 不静默。
+//
 // 并发安全：Allow 可并发调用。
 type TokenBucket struct {
 	mu           sync.Mutex
@@ -22,6 +28,11 @@ type TokenBucket struct {
 	refillPerSec float64
 	tokens       float64
 	lastRefill   time.Time
+
+	// 共享模式字段（store 非 nil 时生效；内存字段不再使用）。
+	store        share.Store
+	skey         string
+	onShareError func(error)
 }
 
 // NewTokenBucket 构造令牌桶。
@@ -42,6 +53,27 @@ func NewTokenBucket(capacity int64, refillPerSec float64) *TokenBucket {
 	}
 }
 
+// NewSharedTokenBucket 构造共享模式令牌桶（桶状态存 store，跨实例一份配额）。
+// onShareError 是存储故障回调（warn 告警注入；nil = 不报）。
+func NewSharedTokenBucket(store share.Store, skey string, onShareError func(error), capacity int64, refillPerSec float64) *TokenBucket {
+	if store == nil {
+		panic("policy: NewSharedTokenBucket 的 store 不得为 nil")
+	}
+	if capacity <= 0 {
+		panic("policy: TokenBucket 容量必须 > 0")
+	}
+	if refillPerSec <= 0 {
+		panic("policy: TokenBucket 补充速率必须 > 0")
+	}
+	return &TokenBucket{
+		capacity:     float64(capacity),
+		refillPerSec: refillPerSec,
+		store:        store,
+		skey:         skey,
+		onShareError: onShareError,
+	}
+}
+
 // Allow 尝试扣减 tokens 个归一化 token。
 // 放行 ⇒ ok=true（已扣减）；拒绝 ⇒ ok=false 且 retryAfter 是「还需等多久才够」，
 // 供上层出 `429` + `Retry-After`（统一 SDD 2.3 治理三件套）。
@@ -54,6 +86,9 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	if tokens <= 0 {
 		return false, 0
 	}
+	if b.store != nil {
+		return b.allowShared(tokens)
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -65,8 +100,49 @@ func (b *TokenBucket) Allow(tokens int64) (ok bool, retryAfter time.Duration) {
 	return true, 0
 }
 
+// allowShared 共享模式扣减（桶状态在 share.Store，原子「可付才扣」）。
+// 故障口径：存储不可用 ⇒ fail-open 放行 + onShareError 显式告警（⛔ 不静默）；
+// 拒绝时 retryAfter 给「补足本次需求」的时长上界（共享模式不读余额，估上界安全）。
+func (b *TokenBucket) allowShared(tokens int64) (bool, time.Duration) {
+	if float64(tokens) > b.capacity {
+		return false, b.refillEstimate(tokens) // 超桶深恒拒
+	}
+	ok, err := b.store.TryTake(time.Now(), []share.Take{{
+		Key: b.skey, Capacity: int64(b.capacity), RefillPerSec: b.refillPerSec, Need: tokens,
+	}})
+	if err != nil {
+		if b.onShareError != nil {
+			b.onShareError(err)
+		}
+		return true, 0 // fail-open：限流不可用时业务可用性优先（显式告警已发）
+	}
+	if !ok {
+		return false, b.refillEstimate(tokens)
+	}
+	return true, 0
+}
+
+// refillEstimate 返回补足 need 个 token 的时长（按补充速率的上界估计）。
+func (b *TokenBucket) refillEstimate(need int64) time.Duration {
+	if b.refillPerSec <= 0 {
+		return 0
+	}
+	return time.Duration(float64(need) / b.refillPerSec * float64(time.Second))
+}
+
 // Snapshot 返回桶状态（管理面只读视图）。
+// 共享模式从 store 读余额（Remaining = -1 表示存储不可用，观测显式标未知）。
 func (b *TokenBucket) Snapshot() BucketState {
+	if b.store != nil {
+		tokens, err := b.store.BucketTokens(b.skey, int64(b.capacity), b.refillPerSec, time.Now())
+		if err != nil {
+			if b.onShareError != nil {
+				b.onShareError(err)
+			}
+			return BucketState{Remaining: -1, Capacity: b.capacity, RefillPerSec: b.refillPerSec}
+		}
+		return BucketState{Remaining: tokens, Capacity: b.capacity, RefillPerSec: b.refillPerSec}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.snapshotLocked()
@@ -74,7 +150,19 @@ func (b *TokenBucket) Snapshot() BucketState {
 
 // Has 非扣减探查：tokens 个 token 现在能否放行（含补足等待时长）。
 // 供复合多级限流（RateLimitBuckets 与「共享桶 + 每 key 桶」组合）做「同时可付才扣」的预查。
+//
+// 共享模式：预检**退化**（跨实例无损预检必有竞态窗口）——超桶深恒拒照判，
+// 其余情形由 Allow 的原子扣减兜底判定（探后扣窗口内的过量会被 TryTake 原子拒绝）。
 func (b *TokenBucket) Has(tokens int64) (ok bool, retryAfter time.Duration) {
+	if b.store != nil {
+		if tokens <= 0 {
+			return false, 0
+		}
+		if float64(tokens) > b.capacity {
+			return false, b.refillEstimate(tokens)
+		}
+		return true, 0
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.hasLocked(tokens)

@@ -26,6 +26,7 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
 
@@ -78,6 +79,10 @@ type Options struct {
 	UpstreamProbeInterval time.Duration
 	// UpstreamProbeTimeout 是单次巡检探测超时（默认 3s）。
 	UpstreamProbeTimeout time.Duration
+
+	// Share 是跨实例共享计数存储（统一 SDD 7.2 多实例一致性）；nil = 内存模式（单实例）。
+	// 非 nil ⇒ 限流桶 / 预算 / 上游冷却计数存该存储，多实例共享一份配额（⛔ 不再 N 倍配额）。
+	Share share.Store
 
 	// RegistryPath / RatesPath 是配置文件路径（热加载数据源，统一 SDD 9.2 / 5.4）。
 	// 非空 ⇒ 支持 SIGHUP 与 POST /admin/reload 热加载（重读该路径、原子替换）；
@@ -239,6 +244,10 @@ func New(opts Options) (*Server, error) {
 	// 配额共享组装配（统一 SDD 7.2 锚点分离：限流锚定契约，未登记 ⇒ 不限）：
 	// 同组端点共享同一个 limitGroup 实例（一份桶 + 一个并发计数，⛔ 不按端点各建一份 ——
 	// 共享配额池按端点各计一份会 N 倍超发）。
+	// 共享存储故障口径：fail-open 放行 + 显式告警（⛔ 不静默；详见 policy 双模式注释）。
+	onShareError := func(err error) {
+		lg.Warn("共享计数存储故障（限流/预算 fail-open 放行，恢复后自动回归）", "err", err)
+	}
 	s.limitGroups = make(map[string]*limitGroup)
 	for _, ep := range opts.Registry.List() {
 		if ep.RateLimit == nil && ep.ConcurrencyLimit <= 0 {
@@ -253,7 +262,12 @@ func New(opts Options) (*Server, error) {
 		}
 		g := &limitGroup{maxInFlight: ep.ConcurrencyLimit}
 		if ep.RateLimit != nil {
-			g.buckets = policy.NewRateLimitBuckets(ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			if opts.Share != nil {
+				g.buckets = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:group:"+key, onShareError,
+					ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			} else {
+				g.buckets = policy.NewRateLimitBuckets(ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			}
 		}
 		s.limitGroups[key] = g
 	}
@@ -266,12 +280,17 @@ func New(opts Options) (*Server, error) {
 		if strings.TrimSpace(os.Getenv(crl.KeyRef)) == "" {
 			return nil, fmt.Errorf("server: credential_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
 		}
-		pl := &poolLimits{}
+		pl := &poolLimits{ref: crl.KeyRef, store: opts.Share, onShareError: onShareError}
 		if crl.PerKey != nil {
 			pl.perKey = &rlSpec{tpm: crl.PerKey.TPM, rpm: crl.PerKey.RPM, burstS: crl.PerKey.BurstS}
 		}
 		if crl.Shared != nil {
-			pl.shared = policy.NewRateLimitBuckets(crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			if opts.Share != nil {
+				pl.shared = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:poolc:"+crl.KeyRef, onShareError,
+					crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			} else {
+				pl.shared = policy.NewRateLimitBuckets(crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			}
 		}
 		for _, kl := range crl.KeyLimits {
 			pl.keyLimits = append(pl.keyLimits, &rlSpec{tpm: kl.TPM, rpm: kl.RPM, burstS: kl.BurstS})
@@ -285,10 +304,15 @@ func New(opts Options) (*Server, error) {
 		if key == "" {
 			return nil, fmt.Errorf("server: caller_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
 		}
-		callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
+		if opts.Share != nil {
+			callerRL[key] = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:caller:"+crl.KeyRef, onShareError,
+				crl.TPM, crl.RPM, crl.BurstS)
+		} else {
+			callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
+		}
 	}
-	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim)
-	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
+	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim, opts.Share, onShareError)
+	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL, opts.Share, onShareError)
 	s.retryBackoff = opts.RetryBackoff.withDefaults()
 	// 端点熔断器（统一 SDD 7.3）：逐端点按注册表 breaker 配置构造（缺省 = 默认 5/30s/1）。
 	s.breakers = make(map[string]*EndpointBreaker, len(opts.Registry.List()))

@@ -37,4 +37,7 @@ type Store interface {
 	IncrBy(key string, delta, limit int64) (int64, error)
 	SetCooldown(key string, until time.Time) error
 	CooldownUntil(key string) (time.Time, error)
+	// BucketTokens 返回桶在 now 时刻的余额（refill 后、未扣减；管理面观测用）。
+	// 桶不存在 ⇒ capacity（满桶初始态）。
+	BucketTokens(key string, capacity int64, refillPerSec float64, now time.Time) (float64, error)
 }

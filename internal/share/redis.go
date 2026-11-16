@@ -77,6 +77,27 @@ end
 return {1, v}
 `
 
+// luaBucketTokens：读桶余额（refill 后；顺带推进时间轴，与 TryTake 同口径）。
+// KEYS=[桶键]，ARGV=[capacity, refill_per_sec]。返回余额（浮点字符串）。
+const luaBucketTokens = `
+local t = redis.call('TIME')
+local now_ms = t[1] * 1000 + math.floor(t[2] / 1000)
+local cap = tonumber(ARGV[1])
+local refill = tonumber(ARGV[2])
+local d = redis.call('HMGET', KEYS[1], 'tokens', 'last_ms')
+local tokens = tonumber(d[1])
+local last = tonumber(d[2])
+if tokens == nil then
+  return tostring(cap)
+end
+local elapsed = (now_ms - last) / 1000.0
+if elapsed > 0 then
+  tokens = math.min(cap, tokens + elapsed * refill)
+end
+redis.call('HMSET', KEYS[1], 'tokens', tokens, 'last_ms', now_ms)
+return tostring(tokens)
+`
+
 // luaSetCooldown：冷却截止只增不减（⛔ 重复 429 缩短冷却）。KEYS=[cool键]，
 // ARGV=[until_unix_nano]；now 取 TIME（毫秒）。返回 1 = 已写、0 = 保留旧值。
 // ⚠️ 值存**纳秒**（与 MemoryStore 的 time.Time 精度对齐，⛔ 毫秒截断会让两实现
@@ -181,4 +202,23 @@ func (r *RedisStore) CooldownUntil(key string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("share: 冷却值解析失败 %q：%w", rp.bulk, err)
 	}
 	return time.Unix(0, ns), nil
+}
+
+// BucketTokens 返回桶在 now 时刻的余额（refill 后、不扣减）。
+func (r *RedisStore) BucketTokens(key string, capacity int64, refillPerSec float64, now time.Time) (float64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rp, err := r.c.Do(ctx, "EVAL", luaBucketTokens, "1", key,
+		strconv.FormatInt(capacity, 10), strconv.FormatFloat(refillPerSec, 'f', -1, 64))
+	if err != nil {
+		return 0, err
+	}
+	if rp.kind != '$' || rp.bulk == nil {
+		return 0, fmt.Errorf("share: BucketTokens 回复形状非法")
+	}
+	v, err := strconv.ParseFloat(string(rp.bulk), 64)
+	if err != nil {
+		return 0, fmt.Errorf("share: 桶余额解析失败 %q：%w", rp.bulk, err)
+	}
+	return v, nil
 }

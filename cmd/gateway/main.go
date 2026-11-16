@@ -28,6 +28,7 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/server"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/version"
 )
@@ -77,6 +78,7 @@ type options struct {
 
 	upstreamProbeInterval time.Duration
 	upstreamProbeTimeout  time.Duration
+	redisAddr             string
 
 	guardrailPatterns []string
 	guardrailWebhook  string
@@ -176,6 +178,8 @@ func parseFlags(args []string) (*options, error) {
 	fs.DurationVar(&opts.upstreamProbeInterval, "I", 0, "同 --upstream-probe-interval")
 	fs.DurationVar(&opts.upstreamProbeTimeout, "upstream-probe-timeout", 3*time.Second, "单次上游巡检探测超时")
 	fs.DurationVar(&opts.upstreamProbeTimeout, "T", 3*time.Second, "同 --upstream-probe-timeout")
+	fs.StringVar(&opts.redisAddr, "redis-addr", "", "Redis 地址（host:port；空 = 内存单实例模式）—— 限流/预算/冷却计数跨实例共享；密码走环境变量 GATEWAY_REDIS_PASSWORD")
+	fs.StringVar(&opts.redisAddr, "A", "", "同 --redis-addr")
 
 	var pats multiFlag
 	fs.Var(&pats, "guardrail-pattern", "护栏正则（可重复）")
@@ -252,9 +256,21 @@ func run(args []string, stdout io.Writer) int {
 	if opts.rateCapacity > 0 && opts.rateRefill > 0 {
 		bucket = policy.NewTokenBucket(opts.rateCapacity, opts.rateRefill)
 	}
+	var sharedStore share.Store
+	if opts.redisAddr != "" {
+		sharedStore = share.NewRedisStore(opts.redisAddr,
+			os.Getenv("GATEWAY_REDIS_PASSWORD"), 3*time.Second, 8)
+		logger.Info("共享计数存储已启用（Redis）", "addr", opts.redisAddr)
+	}
 	var budget *policy.Budget
 	if opts.budgetTokens > 0 {
-		budget = policy.NewBudget(opts.budgetTokens)
+		if sharedStore != nil {
+			budget = policy.NewSharedBudget(sharedStore, "fg:budget:",
+				func(err error) { logger.Warn("共享计数存储故障（预算 fail-open 放行）", "err", err) },
+				opts.budgetTokens)
+		} else {
+			budget = policy.NewBudget(opts.budgetTokens)
+		}
 	}
 	var guardrail *policy.Guardrail
 	if len(opts.guardrailPatterns) > 0 || opts.guardrailWebhook != "" {
@@ -275,6 +291,7 @@ func run(args []string, stdout io.Writer) int {
 		Rates:                  rates,
 		RegistryPath:           opts.configPath,
 		RatesPath:              opts.ratesPath,
+		Share:                  sharedStore,
 		Tracer:                 telemetry.NewTracer(&logExporter{logger: logger}),
 		Metrics:                telemetry.NewMetrics(),
 		TokenBucket:            bucket,

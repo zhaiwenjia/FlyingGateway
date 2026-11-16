@@ -11,6 +11,7 @@ import (
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/security"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 )
 
 // 本文件承载上游自有令牌池与限流轮换（⛔ 与调用方 API key 解耦 —— 上游永远用网关
@@ -32,13 +33,33 @@ type tokenSlot struct {
 	// nil = 不限流，锚点分离：配额数字只来自套餐登记）。
 	contract *policy.RateLimitBuckets
 
+	// 共享模式（store 非 nil）：冷却截止存 share.Store（跨实例一份冷却）；
+	// 内存字段 cooldownUntil 仅在 store == nil 时生效。
+	store        share.Store
+	coolKey      string
+	onShareError func(error)
+
 	mu sync.Mutex
 	// cooldownUntil 是上游 429 冷却截止时刻（此前不选该令牌）。
 	cooldownUntil time.Time
 }
 
 // cooling 返回该令牌是否在冷却期（now 时刻），以及剩余冷却时长。
+// 共享模式读 store（存储不可用 ⇒ fail-open 视为不冷却 + 显式告警，⛔ 不静默）。
 func (s *tokenSlot) cooling(now time.Time) (bool, time.Duration) {
+	if s.store != nil {
+		until, err := s.store.CooldownUntil(s.coolKey)
+		if err != nil {
+			if s.onShareError != nil {
+				s.onShareError(err)
+			}
+			return false, 0 // fail-open（告警已发）
+		}
+		if now.Before(until) {
+			return true, until.Sub(now)
+		}
+		return false, 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if now.Before(s.cooldownUntil) {
@@ -47,9 +68,16 @@ func (s *tokenSlot) cooling(now time.Time) (bool, time.Duration) {
 	return false, 0
 }
 
-// markRateLimited 记一次上游限流冷却（取已有截止与新截止的较大者 —— 重复 429 不缩短）。
+// markRateLimited 记一次上游限流冷却（取已有截止与新截止的较大者 —— 重复 429 不缩短；
+// 共享模式「只增不减」由 share.Store.SetCooldown 的原子语义保证）。
 func (s *tokenSlot) markRateLimited(now time.Time, d time.Duration) {
 	if d <= 0 {
+		return
+	}
+	if s.store != nil {
+		if err := s.store.SetCooldown(s.coolKey, now.Add(d)); err != nil && s.onShareError != nil {
+			s.onShareError(err)
+		}
 		return
 	}
 	s.mu.Lock()
@@ -193,6 +221,10 @@ type poolManager struct {
 	defaultCooldown time.Duration
 	// limits 是每池契约配额（credential_rate_limits；未登记的池不限流）。
 	limits map[string]*poolLimits
+	// store 非 nil ⇒ 共享模式（冷却与桶状态跨实例一致；slot 构造时注入）。
+	store share.Store
+	// onShareError 是共享存储故障回调（warn 告警注入；nil = 不报）。
+	onShareError func(error)
 }
 
 // poolLimits 是一个上游令牌池的契约配额（credential_rate_limits 三层，统一 SDD 7.2 锚点分离）。
@@ -206,6 +238,11 @@ type poolLimits struct {
 	shared *policy.RateLimitBuckets
 	// keyLimits 是逐 key 覆盖模板（按池内 key 顺序；nil 项用 perKey）。
 	keyLimits []*rlSpec
+
+	// ref 是 credential_ref 名（共享键拼装用）；store 非 nil ⇒ 共享模式。
+	ref          string
+	store        share.Store
+	onShareError func(error)
 }
 
 // rlSpec 是契约桶参数模板（登记值；每 key 装配时各建一份桶）。
@@ -216,6 +253,11 @@ type rlSpec struct {
 // build 构造一份桶实例（每 key 独立实例 —— ⛔ 不跨 key 共享，共享语义只走 shared 层）。
 func (s *rlSpec) build() *policy.RateLimitBuckets {
 	return policy.NewRateLimitBuckets(s.tpm, s.rpm, s.burstS)
+}
+
+// buildShared 构造共享模式桶（状态存 store，跨实例一份配额）。
+func (s *rlSpec) buildShared(store share.Store, skey string, onShareError func(error)) *policy.RateLimitBuckets {
+	return policy.NewSharedRateLimitBuckets(store, skey, onShareError, s.tpm, s.rpm, s.burstS)
 }
 
 // bucketsFor 为槽 i 构造契约桶（key_limits 按槽序覆盖优先，缺省用 perKey 模板）。
@@ -230,11 +272,14 @@ func (l *poolLimits) bucketsFor(i int) *policy.RateLimitBuckets {
 	if spec == nil {
 		return nil
 	}
+	if l.store != nil {
+		return spec.buildShared(l.store, fmt.Sprintf("fg:rl:poolkey:%s:%d", l.ref, i), l.onShareError)
+	}
 	return spec.build()
 }
 
 // newPoolManager 构造池管理器。
-func newPoolManager(bucketCapacity int64, bucketRefill float64, defaultCooldown time.Duration, limits map[string]*poolLimits) *poolManager {
+func newPoolManager(bucketCapacity int64, bucketRefill float64, defaultCooldown time.Duration, limits map[string]*poolLimits, store share.Store, onShareError func(error)) *poolManager {
 	if defaultCooldown <= 0 {
 		defaultCooldown = 30 * time.Second
 	}
@@ -247,6 +292,8 @@ func newPoolManager(bucketCapacity int64, bucketRefill float64, defaultCooldown 
 		bucketRefill:    bucketRefill,
 		defaultCooldown: defaultCooldown,
 		limits:          limits,
+		store:           store,
+		onShareError:    onShareError,
 	}
 }
 
@@ -290,9 +337,15 @@ func (m *poolManager) PoolFor(credentialRef string) (*tokenPool, error) {
 		p.shared = lim.shared
 	}
 	for i, tok := range tokens {
-		slot := &tokenSlot{token: tok}
+		slot := &tokenSlot{token: tok, store: m.store, onShareError: m.onShareError,
+			coolKey: fmt.Sprintf("fg:cool:%s:%d", credentialRef, i)}
 		if m.bucketCapacity > 0 && m.bucketRefill > 0 {
-			slot.bucket = policy.NewTokenBucket(m.bucketCapacity, m.bucketRefill)
+			if m.store != nil {
+				slot.bucket = policy.NewSharedTokenBucket(m.store,
+					fmt.Sprintf("fg:rl:pool:%s:%d:g", credentialRef, i), m.onShareError, m.bucketCapacity, m.bucketRefill)
+			} else {
+				slot.bucket = policy.NewTokenBucket(m.bucketCapacity, m.bucketRefill)
+			}
 		}
 		slot.contract = lim.bucketsFor(i)
 		p.slots = append(p.slots, slot)

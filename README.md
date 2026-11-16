@@ -399,6 +399,9 @@ usage）→ `message_stop`。
   **需重启**（显式拒绝并列出）：端点增删、`rate_limit`/`concurrency_limit`/`limits_group`/
   `breaker`/`credential_rate_limits`/`caller_rate_limits`（运行时组件绑定，热换会洗掉
   桶余额/冷却/熔断状态）。
+- **多实例部署**：`-redis-addr` 接 Redis 后限流/预算/上游 429 冷却计数**跨实例一份配额**
+  （Lua 原子扣减 + `TIME` 统一时钟；不设 = 内存单实例模式）；Redis 故障时限流/预算
+  fail-open 放行 + warn 告警（业务可用性优先，恢复自动回归）。
 
 ## 五、运行参数
 
@@ -427,6 +430,7 @@ usage）→ `message_stop`。
 | `--max-in-flight`            | `-i` | 过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After） | `0`                           |
 | `--upstream-probe-interval`  | `-I` | 上游周期巡检间隔（HTTP 可达性巡检、⛔ 不发模型调用；0 = 不启用）              | `0`                           |
 | `--upstream-probe-timeout`   | `-T` | 单次上游巡检探测超时                                                          | `3s`                          |
+| `--redis-addr`               | `-A` | Redis 地址（空 = 内存单实例模式）：限流/预算/冷却计数跨实例共享；密码走 `GATEWAY_REDIS_PASSWORD` | —                             |
 | `--guardrail-pattern`        | `-P` | 护栏正则（可重复）                                                              | —                              |
 | `--guardrail-webhook`        | `-W` | 护栏 Webhook URL（空 = 只做正则）                                               | —                              |
 | `--version`                  | —     | 打印版本号后退出                                                                | —                              |
