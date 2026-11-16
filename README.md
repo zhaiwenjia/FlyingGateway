@@ -448,8 +448,10 @@ go test -race ./...   # 全量测试（含竞态检测）
 
 ## 试用与反馈
 
-测试是不完整的，这点说在前面：适配了 11 家供应商，但只有手头有 key 的 5 家打过真实调用
-（另有 3 个 key 因区域封锁 / 未开通等原因无效），其余家只过了单元测试与文档口径核对；
+测试是不完整的，这点说在前面：适配了 11 家供应商，其中 8 家打过真实调用
+（OpenAI、DeepSeek、Kimi、Qwen、智谱、MiMo、MiniMax、Ollama；Responses 形四项电池
+basic / tools / reasoning / stream，真实响应样本 30 份入 `internal/adapter/testdata/real/`），
+其余 3 家（Grok、Gemini、Claude）只过了单元测试与文档口径核对；
 所有功能测试与压测都在单机上跑，真实网络下的表现会有出入，没覆盖到的组合还有很多。
 
 欢迎试用。遇到问题、发现 bug、或者对设计有不同看法，[提 issue](https://github.com/zhaiwenjia/FlyingGateway/issues) 就好。
