@@ -137,67 +137,81 @@ func TestMiniMaxBuildRequestContract(t *testing.T) {
 	}
 }
 
-// TestMiniMaxResponsesParseResponse 钉住 Responses 形响应解析（构造 wire 断言）：
-// output[] 异构 item（reasoning / message / function_call）、encrypted_content 保留、
-// finish 推导（completed + function_call ⇒ tool_calls；incomplete + max_output_tokens ⇒ length）、
-// usage 注入（Responses 树 input_tokens_details.cached_tokens）。
-// ⚠️ 无真实样本（无可用 key）⇒ 构造响应断言、待 key 补采；样本字段取自官方 Create Response
-// OpenAPI 示例（https://platform.minimax.io/docs/api-reference/responses-create）。
-// 错误实现会红：丢 encrypted_content / summary ⇒ item 断言红；finish 推导错 ⇒ 断言红。
+// TestMiniMaxResponsesParseResponse 钉住 Responses 形响应解析（官方 Create Response 响应示例
+// 逐字，出处 platform.minimax.io/docs/api-reference/responses-create 与国内站 .md 同源）：
+// output[] 异构 item（reasoning / message / function_call）、finish 推导（completed + function_call
+// ⇒ tool_calls；incomplete + max_output_tokens ⇒ length）、usage 注入（Responses 树
+// input_tokens_details.cached_tokens / output_tokens_details.reasoning_tokens）。
+// ①「工具调用」响应例逐字（id 07229fa4f6440a49153da1b91f2204b1，usage 465/42/507、cached 175）；
+// ②「深度思考」响应例逐字（id 07229fa4ff19f5b74ad4581cad3af46c，usage 216/107/323、cached 189、
+//
+//	reasoning 75）；③ incomplete / error 为构造（incomplete_details.reason 取官方 schema enum 逐字值）；
+//
+// ④ encrypted_content 保留（构造；真实 wire 会出现——第三方实打样本 reasoning item 带该字段而官方
+//
+//	schema 未列，见 docs/20261116-MiniMax-调研-Responses回复形态.md）。
+//
+// ⚠️ 无 key 直采样本（2026-11-14 key 鉴权拒绝）⇒ 官方文档示例断言，真机直采待 key 补采。
+// 错误实现会红：丢 encrypted_content / reasoning_text 映射错 ⇒ item 断言红；finish 推导错 ⇒ 断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestMiniMaxResponsesParseResponse -v
 func TestMiniMaxResponsesParseResponse(t *testing.T) {
 	a := NewMiniMax(http.DefaultClient)
-	const okBody = `{
-		"id": "resp_mm_1", "object": "response", "status": "completed", "model": "MiniMax-M3.1-Flash",
-		"output": [
-			{"id":"rs_1","type":"reasoning","status":"completed",
-			 "summary":[{"type":"summary_text","text":"先查天气"}],
-			 "content":[{"type":"reasoning_text","text":"用户要看旧金山天气"}],
-			 "encrypted_content":"enc-mm-1"},
-			{"id":"msg_1","type":"message","status":"completed","role":"assistant",
-			 "content":[{"type":"output_text","text":"旧金山现在晴。","annotations":[]}]},
-			{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_mm_1",
-			 "name":"get_weather","arguments":"{\"location\":\"San Francisco\"}"}
-		],
-		"output_text": "旧金山现在晴。",
-		"usage": {"input_tokens":465,"output_tokens":42,"total_tokens":507,"input_tokens_details":{"cached_tokens":175}}
-	}`
-	out, err := a.ParseResponse(newMiniMaxResolution(""), []byte(okBody))
+	// ① 官方「工具调用」响应例逐字。
+	const toolsBody = `{"id":"07229fa4f6440a49153da1b91f2204b1","object":"response","created_at":1792240804,"model":"MiniMax-M3.1-Flash","status":"completed","output":[{"id":"07229fa4f6440a49153da1b91f2204b1_msg","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I'll check the current weather in San Francisco for you.","annotations":[]}]},{"id":"07229fa4f6440a49153da1b91f2204b1_fc_0","type":"function_call","status":"completed","call_id":"call_function_2uih32x750pd_1","name":"get_weather","arguments":"{\"location\": \"San Francisco, US\"}"}],"output_text":"I'll check the current weather in San Francisco for you.","usage":{"input_tokens":465,"output_tokens":42,"total_tokens":507,"input_tokens_details":{"cached_tokens":175}}}`
+	out, err := a.ParseResponse(newMiniMaxResolution(""), []byte(toolsBody))
 	if err != nil {
-		t.Fatalf("ParseResponse 报错: %v", err)
+		t.Fatalf("ParseResponse(工具调用例) 报错: %v", err)
 	}
-	if out.Text != "旧金山现在晴。" || out.Status != core.StatusCompleted {
+	if out.Text != "I'll check the current weather in San Francisco for you." || out.Status != core.StatusCompleted {
 		t.Fatalf("Text/Status = %q/%q", out.Text, out.Status)
 	}
-	if len(out.OutputItems) != 3 {
-		t.Fatalf("OutputItems = %+v，期望 3 项（reasoning/message/function_call）", out.OutputItems)
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "message" {
+		t.Fatalf("OutputItems = %+v，期望 [message, function_call]", out.OutputItems)
 	}
-	rs := out.OutputItems[0]
-	if rs.Type != "reasoning" || rs.EncryptedContent != "enc-mm-1" || rs.ReasoningText != "用户要看旧金山天气" {
-		t.Fatalf("reasoning item = %+v，期望 encrypted_content/推理正文保留（4.2.5）", rs)
-	}
-	if len(rs.Summary) != 1 || rs.Summary[0].Text != "先查天气" {
-		t.Fatalf("reasoning summary 丢失: %+v", rs)
-	}
-	if out.OutputItems[1].Type != "message" || out.OutputItems[1].Content[0].Text != "旧金山现在晴。" {
-		t.Fatalf("message item = %+v", out.OutputItems[1])
-	}
-	fc := out.OutputItems[2]
-	if fc.Type != "function_call" || fc.CallID != "call_mm_1" || fc.Name != "get_weather" || fc.Arguments != `{"location":"San Francisco"}` {
-		t.Fatalf("function_call item = %+v", fc)
+	fc := out.OutputItems[1]
+	if fc.Type != "function_call" || fc.CallID != "call_function_2uih32x750pd_1" || fc.Name != "get_weather" ||
+		fc.Arguments != `{"location": "San Francisco, US"}` {
+		t.Fatalf("function_call item = %+v，期望官方例逐字", fc)
 	}
 	if out.FinishReason != core.FinishToolCalls {
 		t.Fatalf("FinishReason = %q，期望 tool_calls（completed + function_call 推导）", out.FinishReason)
 	}
 	u := out.Usage
 	if u.InputTokens != 465 || u.CacheReadTokens != 175 || u.CacheWriteTokens != 0 || u.OutputTokens != 42 || u.TotalTokens != 507 {
-		t.Fatalf("usage 归一 = In%d/Read%d/Write%d/Out%d/Total%d，期望 465/175/0/42/507（Responses 树逐字）",
+		t.Fatalf("usage 归一 = In%d/Read%d/Write%d/Out%d/Total%d，期望 465/175/0/42/507（官方例逐字）",
 			u.InputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.OutputTokens, u.TotalTokens)
 	}
 	if u.InputTokensUncached != 290 {
 		t.Fatalf("Uncached = %d，期望 290 = 465−175−0", u.InputTokensUncached)
 	}
-	// incomplete + max_output_tokens ⇒ length（4.5.2）。
+	// ② 官方「深度思考」响应例逐字（reasoning item 的 content.reasoning_text 进推理正文位）。
+	const thinkBody = `{"id":"07229fa4ff19f5b74ad4581cad3af46c","object":"response","created_at":1792240804,"model":"MiniMax-M3.1-Flash","status":"completed","output":[{"id":"07229fa4ff19f5b74ad4581cad3af46c_rs","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"We need answer Chinese. Need determine 9.11 vs 9.9. Decimal comparison: 9.9 = 9.90 > 9.11. User asks which larger. Need concise maybe explain. Ensure not date ambiguity? They ask 9.11 and 9.9 likely decimals. Answer 9.9 larger. Chinese."}]},{"id":"07229fa4ff19f5b74ad4581cad3af46c_msg","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"9.9 更大。\n\n因为把小数位补齐：9.9 = 9.90，而 9.90 > 9.11。","annotations":[]}]}],"output_text":"9.9 更大。\n\n因为把小数位补齐：9.9 = 9.90，而 9.90 > 9.11。","usage":{"input_tokens":216,"output_tokens":107,"total_tokens":323,"input_tokens_details":{"cached_tokens":189},"output_tokens_details":{"reasoning_tokens":75}}}`
+	out, err = a.ParseResponse(newMiniMaxResolution(""), []byte(thinkBody))
+	if err != nil {
+		t.Fatalf("ParseResponse(深度思考例) 报错: %v", err)
+	}
+	if out.Text != "9.9 更大。\n\n因为把小数位补齐：9.9 = 9.90，而 9.90 > 9.11。" {
+		t.Fatalf("Text = %q，期望官方例逐字", out.Text)
+	}
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "reasoning" || out.OutputItems[1].Type != "message" {
+		t.Fatalf("OutputItems = %+v，期望 [reasoning, message]", out.OutputItems)
+	}
+	rs := out.OutputItems[0]
+	if rs.ReasoningText != "We need answer Chinese. Need determine 9.11 vs 9.9. Decimal comparison: 9.9 = 9.90 > 9.11. User asks which larger. Need concise maybe explain. Ensure not date ambiguity? They ask 9.11 and 9.9 likely decimals. Answer 9.9 larger. Chinese." {
+		t.Fatalf("reasoning_text 未进推理正文位: %q", rs.ReasoningText)
+	}
+	if out.FinishReason != core.FinishStop {
+		t.Fatalf("FinishReason = %q，期望 stop", out.FinishReason)
+	}
+	u = out.Usage
+	if u.InputTokens != 216 || u.CacheReadTokens != 189 || u.OutputTokens != 107 || u.TotalTokens != 323 || u.ReasoningTokens != 75 {
+		t.Fatalf("usage 归一 = In%d/Read%d/Out%d/Total%d/Reason%d，期望 216/189/107/323/75（官方例逐字）",
+			u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.TotalTokens, u.ReasoningTokens)
+	}
+	if u.InputTokensUncached != 27 {
+		t.Fatalf("Uncached = %d，期望 27 = 216−189−0", u.InputTokensUncached)
+	}
+	// ③ incomplete + max_output_tokens ⇒ length（4.5.2；reason 取官方 schema enum 逐字值）。
 	const incBody = `{"id":"resp_mm_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
 		"output":[{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"output_text","text":"截断"}]}]}`
 	out, err = a.ParseResponse(newMiniMaxResolution(""), []byte(incBody))
@@ -207,7 +221,7 @@ func TestMiniMaxResponsesParseResponse(t *testing.T) {
 	if out.FinishReason != core.FinishLength || out.Status != core.StatusIncomplete {
 		t.Fatalf("incomplete 解析 = %q/%q，期望 length/incomplete", out.FinishReason, out.Status)
 	}
-	// error 对象 ⇒ failed。
+	// error 对象 ⇒ failed（官方 schema：error 仅在 status=failed 时返回）。
 	const errBody = `{"id":"resp_mm_3","status":"failed","error":{"code":"server_error","message":"内部错误"}}`
 	out, err = a.ParseResponse(newMiniMaxResolution(""), []byte(errBody))
 	if err != nil {
@@ -215,6 +229,15 @@ func TestMiniMaxResponsesParseResponse(t *testing.T) {
 	}
 	if out.Status != core.StatusFailed || out.Error == nil {
 		t.Fatalf("error 对象未判错: %+v", out)
+	}
+	// ④ encrypted_content 保留（4.2.5 ⛔ 必须保留；构造——真实 wire 会出现，出处见注释头）。
+	const encBody = `{"id":"resp_mm_4","status":"completed","output":[{"id":"rs_4","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"想"}],"encrypted_content":"enc-mm-1"}]}`
+	out, err = a.ParseResponse(newMiniMaxResolution(""), []byte(encBody))
+	if err != nil {
+		t.Fatalf("ParseResponse(encrypted) 报错: %v", err)
+	}
+	if len(out.OutputItems) != 1 || out.OutputItems[0].EncryptedContent != "enc-mm-1" {
+		t.Fatalf("encrypted_content 丢失: %+v（4.2.5 ⛔ 必须保留）", out.OutputItems)
 	}
 }
 

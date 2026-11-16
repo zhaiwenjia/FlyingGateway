@@ -38,9 +38,9 @@ import (
 //    ② input_tokens 是残值（同 Claude）。
 //   - finish_reason 取值 stop / length / content_filter / tool_calls（流式 chunk 与非流式同一枚举口径）。
 //
-// previous_response_id：① /responses 按不支持处理（官方 Create Response 响应示例 store:false /
-// previous_response_id:null、未见会话态文档 ⇒ 统一 SDD 3.5 保守、显式报错）；③ 支持 = true（3.5 表）；
-// ② 的 wire 无此字段 ⇒ 按不支持处理（⛔ 不静默丢弃）。
+// previous_response_id：① /responses 按不支持处理（官方 Create Response schema 明言「请求中暂不支持
+// 该参数，传入后将被忽略，响应中固定返回 null」——上游静默吞参 ⇒ 统一 SDD 3.5 显式报错）；
+// ③ 支持 = true（3.5 表）；② 的 wire 无此字段 ⇒ 按不支持处理（⛔ 不静默丢弃）。
 
 // ---- 共享：base_resp 与 thinking 拆包 ----
 
@@ -164,8 +164,9 @@ func NewMiniMax(hc *http.Client) Adapter { return &minimaxAdapter{hc: hc} }
 func (a *minimaxAdapter) Provider() core.Provider      { return core.ProviderMiniMax }
 func (a *minimaxAdapter) OutboundShape() OutboundShape { return ShapeResponses }
 
-// SupportsPreviousResponseID=false：/responses 无会话态（官方响应示例 store:false /
-// previous_response_id:null、未见会话态文档 ⇒ 3.5 保守口径，⛔ 不静默丢弃）。
+// SupportsPreviousResponseID=false：官方 Create Response schema 明言 previous_response_id
+// 「请求中暂不支持该参数，传入后将被忽略，响应中固定返回 null」（上游静默吞参）⇒ 3.5：
+// 按不支持处理、显式报错（⛔ 不静默丢弃；出处 platform.minimax.cn/docs/api-reference/responses-create）。
 func (a *minimaxAdapter) SupportsPreviousResponseID() bool { return false }
 
 // AuthScheme 按 4.3.11：仅 Authorization: Bearer（⛔ 无 GroupId）。
@@ -247,12 +248,13 @@ func (p *minimaxBaseRespProbe) baseRespOf() *minimaxBaseResp {
 
 // BuildRequestWithDegradations 构造 POST {base}/responses 请求并返回降级记录。
 // 装配走共享机件 responsesBuildParams（3.6：响应系共用 openai-go/v3）；家差：
-//   - tool_choice 仅 auto（4.3.11）：非 auto 降为 auto 并记降级（⛔ 不静默）；
+//   - tool_choice 仅 auto（官方 Create Response schema `enum: [auto]`；4.3.11 chat 形同口径）：
+//     非 auto 降为 auto 并记降级（⛔ 不静默）；
 //   - thinking.type / reasoning_split / service_tier 等特异参数经 Extra 透传（mergeExtraBody），
 //     ⛔ temperature / top_p / GroupId 已被 Extra 黑名单剔除（4.3.11 不支持 / 旧版遗留）。
 func (a *minimaxAdapter) BuildRequestWithDegradations(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, []core.Degradation, error) {
-	// previous_response_id：官方 Create Response 响应示例 store:false / previous_response_id:null、
-	// 未见会话态文档 ⇒ 按不支持处理（统一 SDD 3.5：保守、显式报错，⛔ 不静默丢弃）。
+	// previous_response_id：官方 Create Response schema 明言「请求中暂不支持该参数，传入后将被
+	// 忽略，响应中固定返回 null」（上游静默吞参）⇒ 统一 SDD 3.5：显式报错（⛔ 不静默丢弃）。
 	if err := checkPreviousResponseID(false, r); err != nil {
 		return nil, nil, err
 	}
@@ -262,7 +264,8 @@ func (a *minimaxAdapter) BuildRequestWithDegradations(ctx context.Context, r *co
 	}
 	var degs []core.Degradation
 	if r.ToolChoice != nil {
-		// 4.3.11：tool_choice 仅 auto ⇒ 非 auto 降为 auto 并记降级（⛔ 不静默）。
+		// tool_choice 仅 auto（官方 Create Response schema enum 仅 auto；4.3.11 chat 形同口径）
+		// ⇒ 非 auto 降为 auto 并记降级（⛔ 不静默）。
 		if r.ToolChoice.Mode != "auto" {
 			degs = append(degs, core.Degradation{
 				Field:  "tool_choice",
