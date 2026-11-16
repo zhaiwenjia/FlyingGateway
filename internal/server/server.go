@@ -3,7 +3,8 @@
 
 // Package server 是服务装配层（统一 SDD 2.1 ① 入口层）：
 // 数据面双入口（/v1/chat/completions、/v1/responses）+ /v1/models + /health + /v1/cancel，
-// 管理面（/admin/endpoints、/admin/health）默认关闭、显式开启 + 强制鉴权 + 只绑内网。
+// 管理面（/admin/endpoints、/admin/health、/admin/credential-pools、/metrics）默认关闭、
+// 显式开启 + 强制鉴权 + 只绑内网。
 // 执行与取消见 execute.go / cancel.go。
 package server
 
@@ -15,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -299,7 +301,30 @@ func (s *Server) AdminHandler(adminToken string) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/endpoints", s.adminAuth(adminToken, s.handleAdminEndpoints))
 	mux.HandleFunc("GET /admin/health", s.adminAuth(adminToken, s.handleAdminHealth))
 	mux.HandleFunc("GET /admin/credential-pools", s.adminAuth(adminToken, s.handleAdminCredentialPools))
+	mux.HandleFunc("GET /metrics", s.adminAuth(adminToken, s.handleAdminMetrics))
 	return mux, nil
+}
+
+// handleAdminMetrics 输出 Prometheus 文本暴露格式 0.0.4 指标（GET /metrics，管理面鉴权）：
+// telemetry 指标（SDD 6.4）+ 端点熔断状态 gauge（closed=0 / half_open=1 / open=2）。
+// Content-Type 逐字按官方口径 `text/plain; version=0.0.4; charset=utf-8`（Prometheus 3.0
+// 起抓取端校验 Content-Type，缺失/不受支持 ⇒ 抓取失败）。
+func (s *Server) handleAdminMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.metrics.WritePrometheus(w)
+	// 端点熔断状态（统一 SDD 7.3 可观测：⛔ 静默熔断是谜之故障）。
+	if len(s.breakers) > 0 {
+		names := make([]string, 0, len(s.breakers))
+		for name := range s.breakers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintln(w, "# HELP gateway_endpoint_breaker_state 端点熔断状态（0=closed 1=half_open 2=open，SDD 7.3）。")
+		fmt.Fprintln(w, "# TYPE gateway_endpoint_breaker_state gauge")
+		for _, name := range names {
+			fmt.Fprintf(w, "gateway_endpoint_breaker_state{endpoint=%q} %d\n", name, s.breakers[name].StateCode())
+		}
+	}
 }
 
 // adminAuth 是管理面强制鉴权（Bearer token，常量时间比较；鉴权失败 401）。

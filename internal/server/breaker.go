@@ -191,3 +191,10 @@ func (b *EndpointBreaker) State() string {
 	defer b.mu.Unlock()
 	return b.state.String()
 }
+
+// StateCode 返回状态数值（Prometheus gauge 取值：closed=0 / half_open=1 / open=2）。
+func (b *EndpointBreaker) StateCode() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return int(b.state)
+}

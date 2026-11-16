@@ -456,6 +456,16 @@ func readBody(t *testing.T, resp *http.Response) map[string]any {
 	return m
 }
 
+// readBodyText 读文本响应体（不关 Body，收口归调用方）。
+func readBodyText(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读响应体失败: %v", err)
+	}
+	return string(raw)
+}
+
 // errorFields 取错误响应的 error 对象字段。
 func errorFields(t *testing.T, m map[string]any) (typ, code, msg string) {
 	t.Helper()
@@ -782,5 +792,48 @@ func TestLimitGroupNoHalfCharge(t *testing.T) {
 	g.release()
 	if got := g.inFlight.Load(); got != 0 {
 		t.Fatalf("release 后 inFlight = %d，期望 0", got)
+	}
+}
+
+// TestAdminMetrics 断言 GET /metrics（管理面鉴权）输出 Prometheus 文本暴露格式 0.0.4：
+// 无凭据 401；Content-Type 逐字 `text/plain; version=0.0.4; charset=utf-8`（Prometheus 3.0
+// 起抓取端校验它）；body 含熔断状态 gauge 行（SDD 7.3 可观测）与 usage gauge。
+func TestAdminMetrics(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil)
+	admin, err := e.srv.AdminHandler("adm-token")
+	if err != nil {
+		t.Fatalf("AdminHandler 报错: %v", err)
+	}
+	ts := httptest.NewServer(admin)
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/metrics")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("无凭据 = %d，期望 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer adm-token")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d，期望 200", resp2.StatusCode)
+	}
+	if ct := resp2.Header.Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("Content-Type = %q，期望逐字 text/plain; version=0.0.4; charset=utf-8", ct)
+	}
+	body := readBodyText(t, resp2)
+	for _, want := range []string{
+		"# TYPE gateway_endpoint_breaker_state gauge",
+		`gateway_endpoint_breaker_state{endpoint="primary"} 0`,
+		"# TYPE gateway_usage_missing_rate gauge",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/metrics 缺 %q：\n%s", want, body)
+		}
 	}
 }

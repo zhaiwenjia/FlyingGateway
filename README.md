@@ -387,8 +387,10 @@ usage）→ `message_stop`。
   usage 逐家归一后计量费用（费率表）。
 - **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
 - **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
-  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）与
-  `GET /admin/health`。⛔ 管理面不绑公网。
+  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）、
+  `GET /admin/health`（含端点熔断状态 `breakers`）、`GET /admin/credential-pools`
+  与 `GET /metrics`（Prometheus 文本暴露格式 0.0.4：请求/取消/token 计数、断连检测
+  延迟直方图、usage 缺失率、熔断状态 gauge）。⛔ 管理面不绑公网。
 
 ## 五、运行参数
 
