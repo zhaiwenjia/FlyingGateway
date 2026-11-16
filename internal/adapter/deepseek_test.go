@@ -1,4 +1,4 @@
-// 日期: 2026-11-14 16:38:51.651
+// 日期: 2026-11-16 16:02:19.256
 // 作者: Zhai Wenjia
 
 package adapter
@@ -7,17 +7,22 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 )
 
-// 本文件覆盖 DeepSeek 适配器（统一 SDD 4.3.4；出站 Chat Completions）：
-// BuildRequest（POST {base}/chat/completions、messages[] / max_tokens chat 形、
-// previous_response_id 无 wire 载体 ⇒ 显式报错）、ParseResponse（chat.completion，
-// finish_reason 独有取值超集原值）、ParseUsage（命中/未命中双字段：同值取其一 ⛔ 不累加）、
-// 真实流样本直喂（testdata/real/deepseek_stream_real.sse，帧序列逐字）。
+// 本文件覆盖 DeepSeek 适配器（统一 SDD 4.3.4；出站 Responses）：
+// BuildRequest（POST {base}/responses、input[] / instructions 顶层 / tools 扁平形、
+// previous_response_id 不支持 ⇒ 显式报错、Extra 透传）、ParseResponse（真实样本直喂
+// testdata/real/deepseek_responses_{basic,tools}_real.json；finish_reason 超集原值）、
+// ParseUsage（chat 树命中/未命中双字段：同值取其一 ⛔ 不累加）、真实流样本直喂解码器
+// （testdata/real/deepseek_responses_stream_real.sse）。
+// feedSSEFile 是 W1 三家共用的「直喂解码器」小工具（⛔ 不经 HTTP 层）。
 
 func newDeepSeekResolution(base string) *core.Resolution {
 	return &core.Resolution{
@@ -28,12 +33,38 @@ func newDeepSeekResolution(base string) *core.Resolution {
 	}
 }
 
-// TestDeepSeekBuildRequestPath 钉住 chat 形请求（2026-11-14 改形）：
-// ① POST {base}/chat/completions；② messages[]（Instructions 并为首个 system 消息、
-// reasoning_content 回放、工具结果 role=tool）+ max_tokens + prompt_cache_key 透传（3.5）；
-// ③ tool_choice 命名形态是 chat 标准 {"type":"function","function":{"name":...}}；
-// ④ previous_response_id 无 wire 载体 ⇒ 按不支持处理、显式 400 unsupported_capability（⛔ 不静默丢弃）。
-// 错误实现会红：错发 /responses ⇒ URL 断言红；reasoning_content 不回放 ⇒ 字段断言红；
+// feedSSEFile 把真实 SSE 样本逐帧喂给解码器（「直喂解码器」口径）并收集全部帧；
+// 解码器报错即红（容忍口径下不应报错）。W1 三家真实流样本直喂共用。
+func feedSSEFile(t *testing.T, decode func(stream.SSEEvent) ([]stream.Frame, bool, error), rel string) []stream.Frame {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", rel))
+	if err != nil {
+		t.Fatalf("打开真实样本失败: %v", err)
+	}
+	defer f.Close()
+	sc := stream.NewSSEScanner(f)
+	var frames []stream.Frame
+	for sc.Scan() {
+		fs, done, err := decode(sc.Event())
+		if err != nil {
+			t.Fatalf("decode 出错: %v", err)
+		}
+		frames = append(frames, fs...)
+		if done {
+			break
+		}
+	}
+	return frames
+}
+
+// TestDeepSeekBuildRequestPath 钉住 Responses 形请求（2026-11-16 出站 Responses 化）：
+// ① POST {base}/responses；② input[] 异构 item（system 并入顶层 instructions、
+// assistant 拆 reasoning + message + function_call、工具结果 function_call_output）
+// + max_output_tokens + prompt_cache_key 透传（3.5）；
+// ③ tools 扁平形 {type:"function",name,...}、tool_choice 命名形态 {type:"function",name}；
+// ④ previous_response_id 不支持（官方「该 API 是无状态的:服务端不存储响应与会话」）
+// ⇒ 显式 400 unsupported_capability（⛔ 不静默丢弃）；⑤ Extra 透传（enable_thinking）。
+// 错误实现会红：错发 /chat/completions ⇒ URL 断言红；system 不并 instructions ⇒ 断言红；
 // previous_response_id 被静默吞掉 ⇒ 显式报错断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekBuildRequestPath -v
 func TestDeepSeekBuildRequestPath(t *testing.T) {
@@ -55,61 +86,80 @@ func TestDeepSeekBuildRequestPath(t *testing.T) {
 		ToolChoice:      &core.ToolChoice{Mode: "function", Name: "get_weather"},
 		MaxOutputTokens: 1024,
 		PromptCacheKey:  "pk-1",
+		Extra:           map[string]any{"enable_thinking": true},
 	}
 	res := newDeepSeekResolution("https://api.deepseek.com")
 	out, err := a.BuildRequest(context.Background(), r, res)
 	if err != nil {
 		t.Fatalf("BuildRequest 报错: %v", err)
 	}
-	if out.Method != "POST" || out.URL != "https://api.deepseek.com/chat/completions" {
-		t.Fatalf("URL/方法不对: %s %s（chat 形：POST /chat/completions）", out.Method, out.URL)
+	if out.Method != "POST" || out.URL != "https://api.deepseek.com/responses" {
+		t.Fatalf("URL/方法不对: %s %s（Responses 形：POST /responses）", out.Method, out.URL)
 	}
 	m := bodyMap(t, out)
-	// messages[]（chat 形）：Instructions 并为首个 system 消息，原 system 消息原样保留。
-	msgs := mustSlice(t, m, "messages")
-	roles := []string{"system", "system", "user", "assistant", "tool"}
-	if len(msgs) != len(roles) {
-		t.Fatalf("messages 数 = %d，期望 %d：%v", len(msgs), len(roles), msgs)
+	if mustString(t, m, "model") != "deepseek-reasoner" {
+		t.Fatalf("model = %v，期望 res.Model", m["model"])
 	}
-	for i, want := range roles {
-		if got := mustString(t, msgs[i].(map[string]any), "role"); got != want {
-			t.Fatalf("messages[%d].role = %q，期望 %q", i, got, want)
+	// instructions 顶层（4.2.2）：core.Instructions + system 消息并入。
+	if got := mustString(t, m, "instructions"); got != "主指令\n系统提示" {
+		t.Fatalf("instructions = %q，期望 %q", got, "主指令\n系统提示")
+	}
+	// input[] 异构 item（4.2.3：一条 assistant message ⇒ reasoning + message + function_call 多 item）。
+	items := mustSlice(t, m, "input")
+	wantTypes := []string{"message", "reasoning", "message", "function_call", "function_call_output"}
+	if len(items) != len(wantTypes) {
+		t.Fatalf("input item 数 = %d，期望 %d：%v", len(items), len(wantTypes), items)
+	}
+	for i, wt := range wantTypes {
+		it := items[i].(map[string]any)
+		if it["type"] != wt {
+			t.Fatalf("input[%d].type = %v，期望 %s", i, it["type"], wt)
 		}
 	}
-	if mustString(t, msgs[0].(map[string]any), "content") != "主指令" {
-		t.Fatalf("messages[0].content = %v，期望主指令（Instructions 并为首个 system 消息）", msgs[0])
+	// user 消息 part 用 input_text；assistant 文本 part 用 output_text（4.3.1 item 内部结构）。
+	up := items[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if up["type"] != "input_text" || up["text"] != "你好" {
+		t.Fatalf("input[0].content[0] = %v，期望 input_text/你好", up)
 	}
-	// reasoning_content 回放（DeepSeek 扩展名逐字）。
-	as := msgs[3].(map[string]any)
-	if mustString(t, as, "reasoning_content") != "想" {
-		t.Fatalf("assistant reasoning_content 未回放: %v", as)
+	// reasoning item：ReasoningContent 回放为 reasoning_text part（4.2.5 语义字段）。
+	rs := items[1].(map[string]any)
+	rc := rs["content"].([]any)[0].(map[string]any)
+	if rc["type"] != "reasoning_text" || rc["text"] != "想" {
+		t.Fatalf("reasoning item content = %v，期望 reasoning_text/想", rc)
 	}
-	// 工具调用与工具结果（chat 形 tool_calls / role=tool）。
-	tc := mustAt(t, as, "tool_calls").([]any)[0].(map[string]any)
-	if mustString(t, tc, "id") != "call_1" || mustString(t, tc, "function", "name") != "get_weather" {
-		t.Fatalf("tool_calls[0] = %v", tc)
+	// function_call（工具调用）与 function_call_output（工具结果是独立 item，4.2.2）。
+	fc := items[3].(map[string]any)
+	if fc["call_id"] != "call_1" || fc["name"] != "get_weather" {
+		t.Fatalf("function_call = %v", fc)
 	}
-	toolMsg := msgs[4].(map[string]any)
-	if mustString(t, toolMsg, "tool_call_id") != "call_1" || mustString(t, toolMsg, "content") != "结果" {
-		t.Fatalf("tool 消息 = %v", toolMsg)
+	fo := items[4].(map[string]any)
+	if fo["call_id"] != "call_1" || fo["output"] != "结果" {
+		t.Fatalf("function_call_output = %v", fo)
 	}
-	if mustNumber(t, m, "max_tokens") != 1024 {
-		t.Fatalf("max_tokens = %v，期望 1024（chat 形普通字段）", m["max_tokens"])
+	if mustNumber(t, m, "max_output_tokens") != 1024 {
+		t.Fatalf("max_output_tokens = %v，期望 1024（Responses 形字段）", m["max_output_tokens"])
 	}
+	assertNoKey(t, m, "max_tokens") // ⛔ chat 形字段名
 	if mustString(t, m, "prompt_cache_key") != "pk-1" {
 		t.Fatalf("prompt_cache_key 未透传: %v", m["prompt_cache_key"])
 	}
-	// tool_choice 命名形态（chat 标准：function 对象内嵌 name）。
-	if mustString(t, m, "tool_choice", "function", "name") != "get_weather" {
-		t.Fatalf("tool_choice = %v，期望 {type:function,function:{name:get_weather}}", m["tool_choice"])
-	}
+	// tools 扁平形（4.3.1：FunctionToolParam{name,...}，⛔ 非 chat 形 function 内嵌对象）。
 	t0 := mustSlice(t, m, "tools")[0].(map[string]any)
-	if mustString(t, t0, "type") != "function" || mustString(t, t0, "function", "name") != "get_weather" {
-		t.Fatalf("tools[0] = %v，期望 chat 形 function 对象", t0)
+	if t0["type"] != "function" || t0["name"] != "get_weather" {
+		t.Fatalf("tools[0] = %v，期望扁平形 {type:function,name:get_weather}", t0)
 	}
-	// previous_response_id：chat 形 wire 无此字段 ⇒ 显式报错（⛔ 不静默丢弃，3.5）。
+	// tool_choice 命名形态（Responses 标准：{type:"function",name}）。
+	tc := mustAt(t, m, "tool_choice").(map[string]any)
+	if tc["type"] != "function" || tc["name"] != "get_weather" {
+		t.Fatalf("tool_choice = %v，期望 {type:function,name:get_weather}", tc)
+	}
+	// Extra 透传（enable_thinking 等特异参数，3.1）。
+	if m["enable_thinking"] != true {
+		t.Fatalf("enable_thinking 未透传: %v", m["enable_thinking"])
+	}
+	// previous_response_id：不支持 ⇒ 显式报错（⛔ 不静默丢弃，3.5）。
 	if a.SupportsPreviousResponseID() {
-		t.Fatalf("DeepSeek chat 形不支持 previous_response_id（wire 无此字段）")
+		t.Fatalf("DeepSeek 不支持 previous_response_id（官方：API 无状态、不存储响应与会话）")
 	}
 	_, err = a.BuildRequest(context.Background(), &core.Request{PreviousResponseID: "resp_prev"}, res)
 	requireDetailErr(t, err, "unsupported_capability")
@@ -120,13 +170,70 @@ func TestDeepSeekBuildRequestPath(t *testing.T) {
 	}
 }
 
+// TestDeepSeekParseResponseRealSample 钉住真实样本直喂（2026-11-16 上游直采，
+// 来源见 testdata/real/README.md）：
+// basic：output[] 异构（reasoning→message，⛔ 不假设 output[0] 是 message）、
+// reasoning_text ⇒ 推理正文位、encrypted_content 保留（4.2.5）、usage Responses 树归一；
+// tools：function_call item（call_id/name/arguments 逐字）+ finish 推导 tool_calls。
+// 错误实现会红：只取 output[0] 当 message ⇒ Text 断言红；丢 encrypted_content ⇒ 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekParseResponseRealSample -v
+func TestDeepSeekParseResponseRealSample(t *testing.T) {
+	a := NewDeepSeek(http.DefaultClient)
+	out, err := a.ParseResponse(newDeepSeekResolution(""), loadFixture(t, "real/deepseek_responses_basic_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse 报错: %v", err)
+	}
+	if out.Text != "好，我在。请说。" {
+		t.Fatalf("Text = %q，期望 %q", out.Text, "好，我在。请说。")
+	}
+	if len(out.OutputItems) != 2 || out.OutputItems[0].Type != "reasoning" {
+		t.Fatalf("OutputItems 顺序/类型不对: %+v（⛔ 不假设 output[0] 是 message）", out.OutputItems)
+	}
+	if out.OutputItems[0].EncryptedContent != "8fe8302f-08b8-4554-beba-cc40898622c4-0" {
+		t.Fatalf("encrypted_content 丢失: %+v（4.2.5 ⛔ 必须保留）", out.OutputItems[0])
+	}
+	if got := out.OutputItems[0].ReasoningText; !strings.HasPrefix(got, "We need answer to") {
+		t.Fatalf("reasoning_text 未进推理正文位（前缀逐字 We need answer to）: %.30q", got)
+	}
+	if out.OutputItems[1].Type != "message" || out.OutputItems[1].Content[0].Text != "好，我在。请说。" {
+		t.Fatalf("message item 解析不对: %+v", out.OutputItems[1])
+	}
+	if out.FinishReason != core.FinishStop || out.Status != core.StatusCompleted {
+		t.Fatalf("FinishReason=%q Status=%q，期望 stop/completed（status 推导）", out.FinishReason, out.Status)
+	}
+	// usage Responses 树归一（样本逐字：in 32 / cached 0 / out 243 / reasoning 235 / total 275）。
+	if out.Usage.InputTokens != 32 || out.Usage.CacheReadTokens != 0 || out.Usage.OutputTokens != 243 ||
+		out.Usage.ReasoningTokens != 235 || out.Usage.TotalTokens != 275 {
+		t.Fatalf("usage 归一 = In%d/Read%d/Out%d/Reas%d/Total%d，期望 32/0/243/235/275",
+			out.Usage.InputTokens, out.Usage.CacheReadTokens, out.Usage.OutputTokens, out.Usage.ReasoningTokens, out.Usage.TotalTokens)
+	}
+	out, err = a.ParseResponse(newDeepSeekResolution(""), loadFixture(t, "real/deepseek_responses_tools_real.json"))
+	if err != nil {
+		t.Fatalf("ParseResponse(tools) 报错: %v", err)
+	}
+	if out.FinishReason != core.FinishToolCalls {
+		t.Fatalf("FinishReason = %q，期望 tool_calls（hasToolCall 推导）", out.FinishReason)
+	}
+	fc := out.OutputItems[1]
+	if fc.Type != "function_call" || fc.CallID != "call_00_jA9ZGY83r7ioyS5ZSRun3520" ||
+		fc.Name != "get_weather" || fc.Arguments != `{"city": "北京"}` {
+		t.Fatalf("function_call item 不对: %+v（call_id/name/arguments 逐字）", fc)
+	}
+	if out.Usage.InputTokens != 293 || out.Usage.CacheReadTokens != 128 || out.Usage.OutputTokens != 53 || out.Usage.TotalTokens != 346 {
+		t.Fatalf("usage 归一 = In%d/Read%d/Out%d/Total%d，期望 293/128/53/346（cached_tokens=128 逐字）",
+			out.Usage.InputTokens, out.Usage.CacheReadTokens, out.Usage.OutputTokens, out.Usage.TotalTokens)
+	}
+}
+
 // TestDeepSeekParseResponseFinishSuperset 钉住 DeepSeek 独有 finish_reason（4.5.1 / 4.5.2）：
-// aborted / insufficient_system_resource ⇒ 超集原值（⛔ 不得当作未知值丢弃）。
+// aborted / insufficient_system_resource ⇒ 显式 finish_reason 回落字段超集原值
+// （共享 deriveResponsesFinish 的 explicit 优先分支，⛔ 不得当作未知值丢弃）。
 // 错误实现会红：被归并成 unknown ⇒ 原值断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekParseResponseFinishSuperset -v
 func TestDeepSeekParseResponseFinishSuperset(t *testing.T) {
 	a := NewDeepSeek(http.DefaultClient)
-	out, err := a.ParseResponse(newDeepSeekResolution(""), loadFixture(t, "deepseek_response.json"))
+	body := `{"id":"r","object":"response","status":"completed","finish_reason":"aborted","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成"}]}],"usage":{"input_tokens":7,"output_tokens":11,"total_tokens":18}}`
+	out, err := a.ParseResponse(newDeepSeekResolution(""), []byte(body))
 	if err != nil {
 		t.Fatalf("ParseResponse 报错: %v", err)
 	}
@@ -136,12 +243,7 @@ func TestDeepSeekParseResponseFinishSuperset(t *testing.T) {
 	if out.Text != "完成" || out.Usage.InputTokens != 7 {
 		t.Fatalf("解析不对：Text=%q Usage.In=%d", out.Text, out.Usage.InputTokens)
 	}
-	// reasoning_content（扩展字段）⇒ 推理正文位。
-	if len(out.OutputItems) == 0 || out.OutputItems[0].ReasoningText != "推理正文" {
-		t.Fatalf("reasoning_content 未进推理正文位: %+v", out.OutputItems)
-	}
-	// insufficient_system_resource 同为 DeepSeek 独有值。
-	body := `{"id":"r","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"insufficient_system_resource"}]}`
+	body = `{"id":"r","object":"response","status":"completed","finish_reason":"insufficient_system_resource","output":[]}`
 	out, err = a.ParseResponse(newDeepSeekResolution(""), []byte(body))
 	if err != nil {
 		t.Fatalf("ParseResponse(insufficient) 报错: %v", err)
@@ -176,64 +278,81 @@ func TestDeepSeekParseUsageHitMiss(t *testing.T) {
 	}
 }
 
-// TestDeepSeekStreamRealSample 钉住真实流样本直喂（2026-11-14 改形验收点）：
-// testdata/real/deepseek_stream_real.sse（官方文档完整逐帧示例）经 StreamStart 直喂 ⇒
-// 帧序列与样本逐字一致：10 个文本增量（首块 content 空串不出帧）+ 末帧 usage（hit/miss 归一）
-// + done（finish_reason=stop 超集原值）。
-// 错误实现会红：文本增量串不对 ⇒ 逐帧断言红；usage 缺失或归一口径错 ⇒ usage 断言红。
+// TestDeepSeekStreamRealSample 钉住真实流样本直喂解码器（2026-11-16 上游直采）：
+// testdata/real/deepseek_responses_stream_real.sse ⇒ 帧序列与样本逐字一致：
+// lifecycle×2（created / in_progress）+ 推理增量×111（response.reasoning_text.delta，
+// DeepSeek 扩展事件名）+ 文本增量×10（逐字清单）+ usage（32/0/122/154）+ done(completed)。
+// 错误实现会红：文本增量串不对 ⇒ 逐帧断言红；usage 缺失或归一错 ⇒ usage 断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekStreamRealSample -v
 func TestDeepSeekStreamRealSample(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(loadFixture(t, "real/deepseek_stream_real.sse"))
-	}))
-	defer srv.Close()
-
-	a := NewDeepSeek(srv.Client())
-	it, err := a.StreamStart(context.Background(), &core.Request{}, newDeepSeekResolution(srv.URL))
-	if err != nil {
-		t.Fatalf("StreamStart 报错: %v", err)
+	a := NewDeepSeek(http.DefaultClient)
+	frames := feedSSEFile(t, a.(*deepseekAdapter).streamDecoder().decode, "real/deepseek_responses_stream_real.sse")
+	const nReason, nText = 111, 10
+	if len(frames) != 2+nReason+nText+2 {
+		t.Fatalf("帧数 = %d，期望 %d（lifecycle×2 + 推理×%d + 文本×%d + usage + done）：%+v",
+			len(frames), 2+nReason+nText+2, nReason, nText, frames)
 	}
-	frames, cerr := collectFrames(t, it)
-	if cerr != nil {
-		t.Fatalf("流式终态错误: %v", cerr)
+	if frames[0].Kind != stream.FrameLifecycle || frames[0].Status != "response.created" ||
+		frames[1].Kind != stream.FrameLifecycle || frames[1].Status != "response.in_progress" {
+		t.Fatalf("帧[0..1] = %+v / %+v，期望 lifecycle created / in_progress", frames[0], frames[1])
 	}
-	wantText := []string{"Hello", "!", " 👋", " How", " can", " I", " help", " you", " today", "?"}
-	if len(frames) != len(wantText)+2 {
-		t.Fatalf("帧数 = %d，期望 %d（文本 + usage + done）：%+v", len(frames), len(wantText)+2, frames)
+	// 推理增量（response.reasoning_text.delta）：数量、首尾逐字、拼接全文逐字（样本原文）。
+	var rb []string
+	for _, f := range frames[2 : 2+nReason] {
+		if f.Kind != stream.FrameReasoningDelta {
+			t.Fatalf("帧类型 = %+v，期望推理增量", f)
+		}
+		rb = append(rb, f.Reasoning)
 	}
+	const wantReason = `We need answer to user "说好" which in Chinese means "Okay" / "Deal" / "Agreed". They just said "说好" maybe typo? Could be "说好" as in "agreed". Need respond appropriately in Chinese, likely acknowledge. Maybe ask what they want to agree on? The context absent. Need be helpful. We can say "好的，说定了。需要我帮你做什么？" Or if they meant "说好" maybe "好，说定了！". We need final concise.`
+	if rb[0] != "We" || rb[nReason-1] != "." || joinAll(rb) != wantReason {
+		t.Fatalf("推理增量首尾/拼接 = %.3q / %.3q / %.60q，期望 We / . / 样本拼接全文（逐字）", rb[0], rb[nReason-1], joinAll(rb))
+	}
+	// 文本增量逐字清单。
+	wantText := []string{"好", "，", "说", "定了", "！", "需要", "我", "帮你", "做什么", "？"}
 	for i, want := range wantText {
-		if frames[i].Kind != stream.FrameTextDelta || frames[i].Text != want {
-			t.Fatalf("帧[%d] = %+v，期望文本增量 %q（样本逐字）", i, frames[i], want)
+		f := frames[2+nReason+i]
+		if f.Kind != stream.FrameTextDelta || f.Text != want {
+			t.Fatalf("帧[%d] = %+v，期望文本增量 %q（样本逐字）", 2+nReason+i, f, want)
 		}
 	}
-	u := frames[len(wantText)]
-	if u.Kind != stream.FrameUsage {
-		t.Fatalf("帧[%d] = %+v，期望 usage", len(wantText), u)
+	// usage（response.completed 自带，⛔ 无需 stream_options）：样本逐字 32/0/122/154。
+	u := frames[2+nReason+nText]
+	if u.Kind != stream.FrameUsage || u.Usage.InputTokens != 32 || u.Usage.CacheReadTokens != 0 ||
+		u.Usage.OutputTokens != 122 || u.Usage.ReasoningTokens != 111 || u.Usage.TotalTokens != 154 {
+		t.Fatalf("usage 帧 = %+v，期望 In32/Read0/Out122/Reas111/Total154（样本逐字）", u)
 	}
-	// hit/miss 双字段：命中 0、未命中 7（4.3.4 取其一 ⛔ 不累加）。
-	if u.Usage.InputTokens != 7 || u.Usage.OutputTokens != 11 || u.Usage.CacheReadTokens != 0 || u.Usage.InputTokensUncached != 7 {
-		t.Fatalf("usage 归一 = In=%d(7) Out=%d(11) Read=%d(0) Uncached=%d(7)",
-			u.Usage.InputTokens, u.Usage.OutputTokens, u.Usage.CacheReadTokens, u.Usage.InputTokensUncached)
-	}
-	d := frames[len(wantText)+1]
-	if d.Kind != stream.FrameDone || d.Status != "stop" {
-		t.Fatalf("帧[%d] = %+v，期望 done stop（finish_reason 超集原值）", len(wantText)+1, d)
+	d := frames[len(frames)-1]
+	if d.Kind != stream.FrameDone || d.Status != core.StatusCompleted {
+		t.Fatalf("末帧 = %+v，期望 done completed（usage 帧先于 done 帧）", d)
 	}
 }
 
-// TestDeepSeekStreamToolCallName 钉住 chat chunk 的工具帧与推理增量（帧承载约定：
-// FrameToolCallArgsDelta.Text 载函数名、ToolCallID 载调用 id）：首块带名进补名帧、
-// 后续块按 index 对齐同一调用 id 传参数增量、delta.reasoning_content（扩展名逐字）进推理帧。
-// 错误实现会红：不发补名帧 ⇒ named=0 ⇒ 红；index 不对齐 ⇒ 参数帧 ToolCallID 断言红。
+// joinAll 拼接增量文本（帧序列断言的辅助统计）。
+func joinAll(parts []string) string {
+	var b []byte
+	for _, p := range parts {
+		b = append(b, p...)
+	}
+	return string(b)
+}
+
+// TestDeepSeekStreamToolCallName 钉住 Responses 流的工具帧与推理增量（帧承载约定：
+// FrameToolCallArgsDelta.Text 载函数名、ToolCallID 载调用 id、Arguments 载 partial_json 增量）：
+// output_item.added 带名进补名帧、function_call_arguments.delta 传参数增量、
+// response.reasoning_text.delta（DeepSeek 扩展事件名逐字）进推理帧；缺 [DONE] 不丢终止帧。
+// 错误实现会红：不发补名帧 ⇒ named=0 ⇒ 红；partial_json 不解 ⇒ 参数帧断言红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekStreamToolCallName -v
 func TestDeepSeekStreamToolCallName(t *testing.T) {
 	const sse = "" +
-		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":1}\"}}]},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"想一想\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"cmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
-		"data: [DONE]\n\n"
+		"event: response.output_item.added\n" +
+		"data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"search\"}}\n\n" +
+		"event: response.function_call_arguments.delta\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":1,\"item_id\":\"fc_1\",\"partial_json\":\"{\\\"q\\\":1}\"}\n\n" +
+		"event: response.reasoning_text.delta\n" +
+		"data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":2,\"delta\":\"想一想\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"sequence_number\":3}\n\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(sse))
@@ -247,7 +366,7 @@ func TestDeepSeekStreamToolCallName(t *testing.T) {
 	}
 	frames, cerr := collectFrames(t, it)
 	if cerr != nil {
-		t.Fatalf("流式终态错误: %v", cerr)
+		t.Fatalf("流式终态错误: %v（缺 [DONE] 必须容忍）", cerr)
 	}
 	var named, args, reasoning int
 	var doneStatus string
@@ -271,13 +390,13 @@ func TestDeepSeekStreamToolCallName(t *testing.T) {
 		t.Fatalf("缺补名帧（ToolCallID=call_abc 且 Text=search）：%+v", frames)
 	}
 	if args == 0 {
-		t.Fatalf("参数帧缺失（后续块按 index 对齐 call_abc 且 Arguments={\"q\":1}）：%+v", frames)
+		t.Fatalf("参数帧缺失（partial_json={\"q\":1}）：%+v", frames)
 	}
 	if reasoning == 0 {
-		t.Fatalf("delta.reasoning_content 未进推理帧：%+v", frames)
+		t.Fatalf("response.reasoning_text.delta 未进推理帧：%+v", frames)
 	}
-	if doneStatus != "tool_calls" {
-		t.Fatalf("done 状态 = %q，期望 tool_calls（finish_reason 超集原值）", doneStatus)
+	if doneStatus != core.StatusCompleted {
+		t.Fatalf("done 状态 = %q，期望 completed", doneStatus)
 	}
 }
 
