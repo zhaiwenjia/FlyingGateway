@@ -896,3 +896,94 @@ func TestIngressProtocolMismatch(t *testing.T) {
 	}
 	readBody(t, resp4)
 }
+
+// TestBreakerTripsAndSkipsToFallback 钉住「熔断期间跳过该端点转降级链」（统一 SDD 7.3）：
+// 主端点连续失败达阈值（threshold=1）⇒ 熔断打开；后续请求⛔ 不再打主上游（调用数冻结）、
+// 直接走降级链到 backup；两请求客户端均 200。
+// 错误实现对照：熔断后仍打主上游 ⇒ 第 2 次断言主计数红；跳过后不降级 ⇒ 第 2 请求非 200。
+func TestBreakerTripsAndSkipsToFallback(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	const okChunk = "" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
+		"data: [DONE]\n\n"
+	var primaryCalls, backupCalls int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&primaryCalls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&backupCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, okChunk)
+	}))
+	defer backup.Close()
+	reg := writeRegistry(t, []epSpec{
+		{
+			name: "primary", base: primary.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+			breaker: map[string]any{"failure_threshold": 1, "cooldown_s": 30},
+		},
+		{
+			name: "backup", base: backup.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 1, timeoutS: 5,
+		},
+	}, map[string][]string{
+		"general":        {"backup"},
+		"upstream_error": {"backup"},
+	})
+	srv, err := New(Options{
+		Registry:            reg,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	post := func() *http.Response {
+		t.Helper()
+		resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		return resp
+	}
+
+	// 请求 1：主 500（阈值 1 ⇒ 熔断开）⇒ 降级 backup 200。
+	resp1 := post()
+	if resp1.StatusCode != 200 {
+		body, _ := io.ReadAll(resp1.Body)
+		t.Fatalf("请求 1 = %d，期望 200（降级成功）：%s", resp1.StatusCode, body[:200])
+	}
+	resp1.Body.Close()
+	if got := atomic.LoadInt32(&primaryCalls); got != 1 {
+		t.Fatalf("请求 1 后主上游调用 = %d，期望 1", got)
+	}
+	// 请求 2：主已熔断 ⇒ ⛔ 不打主上游、直接降级 backup。
+	resp2 := post()
+	if resp2.StatusCode != 200 {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("请求 2 = %d，期望 200（熔断跳过后降级成功）：%s", resp2.StatusCode, body[:200])
+	}
+	resp2.Body.Close()
+	if got := atomic.LoadInt32(&primaryCalls); got != 1 {
+		t.Fatalf("请求 2 后主上游调用 = %d，期望 1（熔断后冻结，⛔ 不再打）", got)
+	}
+	if got := atomic.LoadInt32(&backupCalls); got != 2 {
+		t.Fatalf("backup 调用 = %d，期望 2", got)
+	}
+	if st := srv.breakerFor("primary").State(); st != "open" {
+		t.Fatalf("primary 熔断状态 = %s，期望 open", st)
+	}
+}

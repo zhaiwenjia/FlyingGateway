@@ -289,6 +289,7 @@ type epSpec struct {
 	rateLimit        map[string]any
 	concurrencyLimit int64
 	limitsGroup      string
+	breaker          map[string]any
 }
 
 // toWire 转注册表配置行（⛔ 缺任何必备字段 —— 与 9.2 启动校验一致）。
@@ -319,6 +320,9 @@ func (e epSpec) toWire() map[string]any {
 	}
 	if e.limitsGroup != "" {
 		m["limits_group"] = e.limitsGroup
+	}
+	if e.breaker != nil {
+		m["breaker"] = e.breaker
 	}
 	return m
 }

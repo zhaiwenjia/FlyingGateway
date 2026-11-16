@@ -77,6 +77,17 @@ type Endpoint struct {
 	// 计数（同供应商多模型 / 多 key / 多部署共享一个配额池的情形，如项目级配额）。
 	// 缺省（空）⇒ 该端点自成一组。同组各端点的配额声明必须逐字一致，否则启动报错。
 	LimitsGroup string `json:"limits_group,omitempty"`
+	// Breaker 是端点熔断配置（统一 SDD 7.3；缺键 ⇒ 默认 5 / 30s / 1）。
+	Breaker *BreakerConfig `json:"breaker,omitempty"`
+}
+
+// BreakerConfig 是端点熔断三态配置（统一 SDD 7.3）：连续可归因失败达阈值 ⇒ 熔断打开、
+// 冷却期满转半开放行探测、探测成功闭合 / 失败重新计冷却。零值字段取默认
+// （FailureThreshold=5、CooldownS=30、Probe=1）；负数 ⇒ 加载报错（⛔ 不静默按默认处理）。
+type BreakerConfig struct {
+	FailureThreshold int     `json:"failure_threshold"` // 连续可归因失败阈值（默认 5）
+	CooldownS        float64 `json:"cooldown_s"`        // 熔断打开时长秒（默认 30）
+	Probe            int     `json:"probe"`             // 半开同时放行的探测请求数（默认 1）
 }
 
 // RateLimit 是端点的上游套餐配额（tokens/min、requests/min 与突发桶深）。
@@ -361,6 +372,17 @@ func validateEndpoint(path string, ordinal int, ep Endpoint) error {
 		if err := validateRateLimitShape(path, fmt.Sprintf("端点 %q 的 rate_limit", ep.Name),
 			ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS); err != nil {
 			return err
+		}
+	}
+	if ep.Breaker != nil {
+		if ep.Breaker.FailureThreshold < 0 {
+			return fmt.Errorf("%s：%q 的 breaker.failure_threshold = %d 不得为负（0 = 默认 5）", prefix, ep.Name, ep.Breaker.FailureThreshold)
+		}
+		if ep.Breaker.CooldownS < 0 {
+			return fmt.Errorf("%s：%q 的 breaker.cooldown_s = %v 不得为负（0 = 默认 30）", prefix, ep.Name, ep.Breaker.CooldownS)
+		}
+		if ep.Breaker.Probe < 0 {
+			return fmt.Errorf("%s：%q 的 breaker.probe = %d 不得为负（0 = 默认 1）", prefix, ep.Name, ep.Breaker.Probe)
 		}
 	}
 	return nil

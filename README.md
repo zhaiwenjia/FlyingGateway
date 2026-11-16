@@ -25,7 +25,8 @@
 - **路由与降级** —— `priority`（显式有序降级链）/ `round_robin` 两种策略；
   路由决策可复现（同输入 + 同注册表 + 同配置 ⇒ 同一决策），降级目标不可用时显式报错、
   不静默换端点。
-- **治理语义** —— 错误九分类与可重试性、重试与降级分账（同端点重试前截断指数退避 + 抖动）、token 级限流与预算、
+- **治理语义** —— 错误九分类与可重试性、重试与降级分账（同端点重试前截断指数退避 + 抖动）、
+  端点熔断三态（连续失败熔断冷却、半开探测、熔断期间跳过转降级链）、token 级限流与预算、
   超时 / 取消 / 上游错误三分、流式逐帧转发与断连检测、显式取消（`/v1/cancel`）。
 - **安全** —— 凭据只从环境变量读（注册表只存来源引用）、日志与轨迹统一脱敏
   （`[REDACTED:<类型>]`）、出网目标校验（默认禁内网，环回需显式放行）。
@@ -336,6 +337,7 @@ usage）→ `message_stop`。
 | 500 | `credential_unresolved` | `credential_ref` 环境变量解析失败 |
 | 500 | `auth_scheme_missing` | 适配器未声明鉴权头 |
 | 502 | `upstream_error` | 上游 5xx / 错误体 / 响应解析失败（对内诊断子码：`response_parse_failed`、`encode_failed`、`stream_encode_failed`、`stream_finish_failed`、`request_build_failed`、`request_marshal_failed` 等） |
+| 502 | `endpoint_cooling` | 端点熔断冷却中被跳过（降级链上无可用端点时的最终报错；状态见 `/admin/health`） |
 | 504 | `timeout` | 单次上游调用超时（端点 `timeout_s` 预算） |
 
 **可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限；
@@ -364,6 +366,7 @@ usage）→ `message_stop`。
 | `rate_limit`        | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值                                             |
 | `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口）                                                              |
 | `limits_group`      | 可选，配额共享组名：同组端点共享一份 `rate_limit` / `concurrency_limit` 计数（同供应商多模型 / 多 key / 多部署共享配额池的语义）；空 = 自成一组，同组声明必须逐字一致 |
+| `breaker`           | 可选，端点熔断三态配置 `{failure_threshold, cooldown_s, probe}`（连续可归因失败阈值 / 冷却秒数 / 半开同时放行探测数）；缺省 = `5 / 30 / 1` |
 
 - **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
   不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。

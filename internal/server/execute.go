@@ -583,6 +583,7 @@ func (s *Server) handleContextExceeded(w http.ResponseWriter, r *http.Request, h
 func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, mode inboundMode, ep *registry.Endpoint, res *core.Resolution, ad adapter.Adapter, est int64) {
 	var counters routing.AttemptCounters
 	var rotations int
+	brk := s.breakerFor(ep.Name)
 	span := s.startEndpointSpan(ep, res, req, ad)
 	for {
 		if h.isCancelled() {
@@ -590,7 +591,27 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 			s.writeOutcome(w, r, h, req, mode, nil, nil, true)
 			return
 		}
-		resp, degs, detail := s.runEndpoint(w, r, h, req, mode, ep, res, ad, est)
+		// 熔断闸（统一 SDD 7.3）：OPEN 冷却中 / HALF-OPEN 探测满 ⇒ 跳过该端点（⛔ 不打网络），
+		// 按 upstream_error 走降级链顺延；放行的尝试按「成功 / 可归因失败 / 非可归因」
+		// 三分类收口记入熔断器（429 / 取消 / 内容策略等不算端点故障）。
+		now := time.Now()
+		var resp *core.Response
+		var degs []core.Degradation
+		var detail *core.ErrorDetail
+		if brk.Allow(now) {
+			resp, degs, detail = s.runEndpoint(w, r, h, req, mode, ep, res, ad, est)
+			switch {
+			case detail == nil:
+				brk.RecordSuccess(time.Now())
+			case detail.Category == core.ErrUpstreamError || detail.Category == core.ErrTimeout:
+				brk.RecordFailure(time.Now())
+			default:
+				brk.RecordNeutral(time.Now())
+			}
+		} else {
+			detail = gwerrors.New(core.ErrUpstreamError, http.StatusBadGateway, codeEndpointCooling,
+				fmt.Sprintf("端点 %q 熔断冷却中，跳过本次尝试转降级链（状态见 /admin/health）", ep.Name))
+		}
 		if detail == nil {
 			s.endEndpointSpan(span, h, resp, nil)
 			s.writeOutcome(w, r, h, req, mode, resp, degs, false)
@@ -607,27 +628,30 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 			s.endEndpointSpan(span, h, resp, detail)
 			return
 		}
-		// 令牌轮换（同端点换自有令牌）：上游 429 且池内仍有未冷却令牌 ⇒ 直接换令牌重打。
-		// token_pool_exhausted 是本地池闸（无令牌可换）⇒ 不轮换、不重试。
-		if detail.Category == core.ErrRateLimit && detail.Code != codeTokenPoolExhausted &&
-			rotations < s.poolSize(ep.CredentialRef) && s.poolHasUncool(ep.CredentialRef) {
-			rotations++
-			continue
+		// 熔断跳过的尝试 ⛔ 不轮换、⛔ 不重试（端点在冷却中，同端点重打没有意义），直接走降级。
+		if detail.Code != codeEndpointCooling {
+			// 令牌轮换（同端点换自有令牌）：上游 429 且池内仍有未冷却令牌 ⇒ 直接换令牌重打。
+			// token_pool_exhausted 是本地池闸（无令牌可换）⇒ 不轮换、不重试。
+			if detail.Category == core.ErrRateLimit && detail.Code != codeTokenPoolExhausted &&
+				rotations < s.poolSize(ep.CredentialRef) && s.poolHasUncool(ep.CredentialRef) {
+				rotations++
+				continue
+			}
+			retryable := detail.Category == core.ErrRateLimit || detail.Category == core.ErrTimeout || detail.Category == core.ErrUpstreamError
+			if retryable && detail.Code != codeTokenPoolExhausted && counters.RetryCount < ep.MaxRetries {
+				counters.RecordRetry()
+				// 同端点重试前退避（统一 SDD 7.4）：5xx / 超时无恢复信号 ⇒ 截断指数退避 + 抖动
+				// 给上游喘息、防同步重试风暴；429 ⛔ 不在此退避（Retry-After / 默认冷却已由
+				// 令牌池承载等待，叠加退避 = 同一限流事件双重等待）。等待中被取消 ⇒ 取消收口。
+				if werr := s.waitBeforeRetry(h, ep, detail.Category, counters.RetryCount); werr != nil {
+					s.endEndpointSpan(span, h, nil, gwerrors.New(core.ErrCancelled, 499, "cancelled", "执行已取消"))
+					s.writeOutcome(w, r, h, req, mode, nil, nil, true)
+					return
+				}
+				continue // 同端点重试（级内）
+			}
 		}
 		kind := failureKind(detail.Category)
-		retryable := detail.Category == core.ErrRateLimit || detail.Category == core.ErrTimeout || detail.Category == core.ErrUpstreamError
-		if retryable && detail.Code != codeTokenPoolExhausted && counters.RetryCount < ep.MaxRetries {
-			counters.RecordRetry()
-			// 同端点重试前退避（统一 SDD 7.4）：5xx / 超时无恢复信号 ⇒ 截断指数退避 + 抖动
-			// 给上游喘息、防同步重试风暴；429 ⛔ 不在此退避（Retry-After / 默认冷却已由
-			// 令牌池承载等待，叠加退避 = 同一限流事件双重等待）。等待中被取消 ⇒ 取消收口。
-			if werr := s.waitBeforeRetry(h, ep, detail.Category, counters.RetryCount); werr != nil {
-				s.endEndpointSpan(span, h, nil, gwerrors.New(core.ErrCancelled, 499, "cancelled", "执行已取消"))
-				s.writeOutcome(w, r, h, req, mode, nil, nil, true)
-				return
-			}
-			continue // 同端点重试（级内）
-		}
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
 		chain, err := routing.SelectChain(s.reg.FallbackChains, ep.Name, kind)
 		if err != nil || counters.FallbackCount >= len(chain) {
@@ -662,12 +686,26 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 		*res = nres
 		ad = nad
 		rotations = 0 // 新端点的令牌池独立轮换
+		brk = s.breakerFor(ep.Name)
 		span = s.startEndpointSpan(ep, res, req, ad)
 	}
 }
 
 // codeTokenPoolExhausted 是「全部自有令牌受限」的对外错误码（本地池闸、非上游回执）。
 const codeTokenPoolExhausted = "token_pool_exhausted"
+
+// codeEndpointCooling 是「端点熔断冷却中被跳过」的对外错误码（本地熔断闸、非上游回执）。
+// 分类为 upstream_error（502）⇒ 按该类走降级链顺延；⛔ 不重试不轮换（端点在冷却中）。
+const codeEndpointCooling = "endpoint_cooling"
+
+// breakerFor 返回端点的熔断器（注册表每端点一个，New 时构造）。
+// 防御：未知端点名 ⇒ 现造一个默认熔断器（⛔ 不返回 nil 让调用方炸）。
+func (s *Server) breakerFor(name string) *EndpointBreaker {
+	if b, ok := s.breakers[name]; ok {
+		return b
+	}
+	return NewEndpointBreaker(name, 0, 0, 0, s.logger)
+}
 
 // waitBeforeRetry 在同端点重试前等待（统一 SDD 7.4 退避口径）：
 //   - 429（rate_limit）⇒ 不退避：Retry-After / 默认冷却已由令牌池承载等待语义

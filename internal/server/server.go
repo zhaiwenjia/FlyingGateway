@@ -120,6 +120,9 @@ type Server struct {
 	// retryBackoff 是同端点重试退避（已在 New 补齐默认值）。
 	retryBackoff Backoff
 
+	// breakers 是端点熔断器（键 = 端点名，统一 SDD 7.3 三态；注册表每端点一个）。
+	breakers map[string]*EndpointBreaker
+
 	allowLoopback bool
 	pollInterval  time.Duration
 	cancels       *cancelRegistry
@@ -256,6 +259,15 @@ func New(opts Options) (*Server, error) {
 	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim)
 	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
 	s.retryBackoff = opts.RetryBackoff.withDefaults()
+	// 端点熔断器（统一 SDD 7.3）：逐端点按注册表 breaker 配置构造（缺省 = 默认 5/30s/1）。
+	s.breakers = make(map[string]*EndpointBreaker, len(opts.Registry.List()))
+	for _, ep := range opts.Registry.List() {
+		th, cd, pb := 0, time.Duration(0), 0
+		if ep.Breaker != nil {
+			th, cd, pb = ep.Breaker.FailureThreshold, time.Duration(ep.Breaker.CooldownS*float64(time.Second)), ep.Breaker.Probe
+		}
+		s.breakers[ep.Name] = NewEndpointBreaker(ep.Name, th, cd, pb, s.logger)
+	}
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
 	}
@@ -444,12 +456,18 @@ func (s *Server) handleAdminCredentialPools(w http.ResponseWriter, _ *http.Reque
 
 // handleAdminHealth 返回管理面健康视图（GET /admin/health）。
 func (s *Server) handleAdminHealth(w http.ResponseWriter, _ *http.Request) {
+	// 熔断状态（统一 SDD 7.3 可观测要求：⛔ 静默熔断是谜之故障）。
+	breakers := make(map[string]string, len(s.breakers))
+	for name, b := range s.breakers {
+		breakers[name] = b.State()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             "ok",
 		"endpoints":          len(s.reg.List()),
 		"strategy":           s.reg.Strategy,
 		"cancel_pending":     s.cancels.pendingCount(),
 		"usage_missing_rate": s.metrics.UsageMissingRate(),
+		"breakers":           breakers,
 	})
 }
 
