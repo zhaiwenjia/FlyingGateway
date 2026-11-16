@@ -10,28 +10,26 @@ import (
 	"strconv"
 	"strings"
 
-	openai "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/shared"
-
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
-	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 	"github.com/zhaiwenjia/FlyingGateway/internal/usage"
 )
 
 // 智谱 GLM / BigModel 适配器（统一 SDD 4.3.8）：
-// 出站 Chat Completions：POST {base}/chat/completions（真实流见 testdata/real/zhipu_stream_docs_example.txt）。
+// 出站 Responses：POST {base}/responses（出站方法口径「除 Claude 外优先 OpenAI SDK Response API」，
+// 2026-11-16 真实实测 4/4 全通：basic / tools / reasoning / stream，样本见
+// testdata/real/zhipu_responses_*_real.*，glm-5.3-flash 普通 key 直采）。
+// ⚠️ URL 特殊：Responses 端点是 https://open.bigmodel.cn/api/v1/responses，而注册 base 是
+// chat 形 base https://open.bigmodel.cn/api/paas/v4（其下 /responses 实测 4×404）
+// ⇒ BuildRequest 对 base 做后缀重写（见 zhipuResponsesURL）。
 // AuthScheme: Authorization + "Bearer "。
-// ⚠️ 流式请求参数是 stream_options.chunk_include_usage（⛔ 不是 include_usage，4.3.8 逐字：
-// 照搬 include_usage 会静默拿不到 usage）；chunk_include_usage 开启后逐块返回**累计** usage（⛔ 不可相加）。
-// reasoning_effort 是智谱的推理档位顶层字段（4.3.8 取值 max/xhigh/high/medium/low/minimal/none）；
-// thinking.type / thinking.clear_thinking 经 core.Request.Extra 透传。
-// previous_response_id：chat 形 wire 无此字段 ⇒ 按不支持处理（3.5：⛔ 不静默丢弃，显式报错）。
-// finish_reason 含 sensitive / network_error / model_context_window_exceeded（智谱独有 / 非标准取值）
-// ⇒ core.FinishReason 超集原值（4.5.1 ⛔ 不得当作未知值丢弃）。
-// 构造 / 解析 / 流事件解析走 openai-go/v3 typed 结构（统一 SDD 3.6 / 10.3；body []byte 签名不变）；
-// 流式 HTTP 执行保留 streamRequest（Tier 2 兜底，见交付报告）。
+// previous_response_id：支持 = true（官方「创建 Response」：服务端会话 store=true、保留 7 天）⇒ 直通。
+// tool_choice：官方 enum 仅 none/auto ⇒ required / 指定函数名按降级处理（降为 auto 并记
+// Degradation，⛔ 不静默丢弃无标记）；thinking.type / thinking.clear_thinking 经 core.Request.Extra 透传。
+// 请求构造走共享机件 responsesBuildParams（openai-go/v3 typed 参数，统一 SDD 3.6 / 10.3）；
+// 响应解析走共享机件 parseResponsesBody（output[] 异构联合；finish_reason 非标准取值
+// sensitive / network_error / model_context_window_exceeded ⇒ 超集原值，4.5.1 ⛔ 不丢弃）；
+// 流式走共享机件 newResponsesStreamDecoder（response.* 事件、usage 在 completed/incomplete 帧）。
 
 type zhipuAdapter struct {
 	hc *http.Client
@@ -41,174 +39,57 @@ type zhipuAdapter struct {
 func NewZhipu(hc *http.Client) Adapter { return &zhipuAdapter{hc: hc} }
 
 func (a *zhipuAdapter) Provider() core.Provider          { return core.ProviderZhipu }
-func (a *zhipuAdapter) OutboundShape() OutboundShape     { return ShapeChatCompletions }
-func (a *zhipuAdapter) SupportsPreviousResponseID() bool { return false }
+func (a *zhipuAdapter) OutboundShape() OutboundShape     { return ShapeResponses }
+func (a *zhipuAdapter) SupportsPreviousResponseID() bool { return true }
 
 // AuthScheme 按 4.3.8：Authorization: Bearer。
 func (a *zhipuAdapter) AuthScheme() AuthScheme {
 	return AuthScheme{HeaderName: "Authorization", Prefix: "Bearer "}
 }
 
-// ParseUsage 委托 usage.Normalize（4.4.2 智谱行：命中单列、无写入、completion 含 reasoning）。
+// ParseUsage 委托 usage.Normalize（4.4.2 智谱行：命中单列、无写入、completion/output 含 reasoning）。
 func (a *zhipuAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderZhipu, usageTreeShape(raw), raw)
 }
 
-// ---- 请求体（Chat 形状 + 智谱特异字段）----
+// ---- 请求体（Responses 形状 + 智谱 URL 后缀重写）----
 
-// zhipuChatMessages 映射 chat 形消息序列（角色分派与 reasoning_content 回放口径同 deepseek）。
-func zhipuChatMessages(r *core.Request) []openai.ChatCompletionMessageParamUnion {
-	var out []openai.ChatCompletionMessageParamUnion
-	if r.Instructions != "" {
-		out = append(out, openai.ChatCompletionMessageParamUnion{
-			OfSystem: &openai.ChatCompletionSystemMessageParam{
-				Content: openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(r.Instructions)},
-			},
-		})
+// zhipuResponsesURL 拼智谱 Responses 端点：注册 base 是 chat 形 base
+// （https://open.bigmodel.cn/api/paas/v4，其下 /responses 实测 4×404）
+// ⇒ 以 /api/paas/v4 结尾的 base 重写为 /api/v1 再拼 /responses；其它 base 原样拼接。
+// 出处：2026-11-16 真实实测 —— 同一把普通 key，/api/v1/responses 4/4 全通、
+// /api/paas/v4/responses 404；官方「创建 Response」API 参考亦载 /api/v1。
+func zhipuResponsesURL(base string) string {
+	b := strings.TrimRight(base, "/")
+	if strings.HasSuffix(b, "/api/paas/v4") {
+		b = strings.TrimSuffix(b, "/api/paas/v4") + "/api/v1"
 	}
-	for _, m := range r.Messages {
-		out = append(out, zhipuChatMessage(m))
-	}
-	return out
+	return joinURL(b, "/responses")
 }
 
-// zhipuChatMessage 映射单条规范消息（system / developer 角色原样保留；
-// EncryptedContent 是 OpenAI 加密推理链（Responses 专属载体）⇒ chat 形无对应物，不发）。
-func zhipuChatMessage(m core.Message) openai.ChatCompletionMessageParamUnion {
-	switch m.Role {
-	case "tool":
-		return openai.ChatCompletionMessageParamUnion{
-			OfTool: &openai.ChatCompletionToolMessageParam{
-				ToolCallID: m.ToolCallID,
-				Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
-			},
-		}
-	case "system", "developer":
-		if m.Role == "developer" {
-			return openai.ChatCompletionMessageParamUnion{
-				OfDeveloper: &openai.ChatCompletionDeveloperMessageParam{
-					Content: openai.ChatCompletionDeveloperMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
-				},
-			}
-		}
-		return openai.ChatCompletionMessageParamUnion{
-			OfSystem: &openai.ChatCompletionSystemMessageParam{
-				Content: openai.ChatCompletionSystemMessageParamContentUnion{OfString: param.NewOpt(contentText(m.Content))},
-			},
-		}
-	case "assistant":
-		am := openai.ChatCompletionAssistantMessageParam{}
-		if text := contentText(m.Content); text != "" {
-			am.Content.OfString = param.NewOpt(text)
-		}
-		if m.ReasoningContent != "" {
-			// reasoning_content 是智谱思考承载扩展名（逐字）⇒ SDK 类型无此字段，走 extras。
-			am.SetExtraFields(map[string]any{"reasoning_content": m.ReasoningContent})
-		}
-		for _, tc := range m.ToolCalls {
-			id := tc.CallID
-			if id == "" {
-				id = tc.ID
-			}
-			am.ToolCalls = append(am.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
-				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-					ID: id,
-					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-						Name: tc.Name, Arguments: tc.Arguments,
-					},
-				},
-			})
-		}
-		return openai.ChatCompletionMessageParamUnion{OfAssistant: &am}
-	default:
-		um := openai.ChatCompletionUserMessageParam{}
-		var parts []openai.ChatCompletionContentPartUnionParam
-		for _, p := range m.Content {
-			switch {
-			case p.ImageURL != "":
-				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
-					OfImageURL: &openai.ChatCompletionContentPartImageParam{
-						ImageURL: openai.ChatCompletionContentPartImageImageURLParam{URL: p.ImageURL},
-					},
-				})
-			case p.Text != "":
-				parts = append(parts, openai.ChatCompletionContentPartUnionParam{
-					OfText: &openai.ChatCompletionContentPartTextParam{Text: p.Text},
-				})
-			}
-		}
-		if len(parts) == 0 {
-			um.Content.OfString = param.NewOpt("")
-		} else if len(parts) == 1 && parts[0].OfText != nil {
-			um.Content.OfString = param.NewOpt(parts[0].OfText.Text)
-		} else {
-			um.Content.OfArrayOfContentParts = parts
-		}
-		return openai.ChatCompletionMessageParamUnion{OfUser: &um}
-	}
-}
-
-// zhipuChatTools 映射工具声明（chat 形 function 对象；parameters 原文透传）。
-func zhipuChatTools(r *core.Request) []openai.ChatCompletionToolUnionParam {
-	var out []openai.ChatCompletionToolUnionParam
-	for _, t := range r.Tools {
-		fd := shared.FunctionDefinitionParam{Name: t.Name}
-		if t.Description != "" {
-			fd.Description = param.NewOpt(t.Description)
-		}
-		if len(t.Parameters) > 0 {
-			fd.SetExtraFields(map[string]any{"parameters": json.RawMessage(t.Parameters)})
-		}
-		out = append(out, openai.ChatCompletionToolUnionParam{
-			OfFunction: &openai.ChatCompletionFunctionToolParam{Function: fd},
-		})
-	}
-	return out
-}
-
-// BuildRequestWithDegradations 构造 /chat/completions 请求并返回降级记录（4.3.8 关键字段逐字）。
-// ⚠️ 2026-11-14 修复：tool_choice 非 auto 被降为 auto 原先未记 degradation（静默降级，
-// 违反 1.4.2 不静默降级三则之二）——现象：请求带 tool_choice=required 实际发出 auto，
-// 响应无任何标记；根因：只实现了降级动作没接降级记录通道（minimax 同类降级有记，可对照）；
-// 为什么不改成拒绝请求：4.3.8 明文「tool_choice 仅 auto」，降为 auto 是能力边界内的
-// 既有口径，问题只在「丢意图不可见」⇒ 补 DegradationAware 通道（BuildRequestWithDegradations）；
-// 不修会怎样：调用方以为 required 生效，工具未被强制调用，排查方向从一开始就跑偏。
+// BuildRequestWithDegradations 构造 /responses 请求并返回降级记录（4.3.8 关键字段逐字）。
+// tool_choice 降级：智谱 Responses 官方 enum 仅 none/auto ⇒ required / 指定函数名 / 其它
+// 非 none-auto 取值降为 auto（保持 chat 形时代降级语义）并记 degradation（1.4.2 不静默降级，
+// ⛔ 不静默丢弃无标记）。
 func (a *zhipuAdapter) BuildRequestWithDegradations(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, []core.Degradation, error) {
-	if err := checkPreviousResponseID(false, r); err != nil {
+	if err := checkPreviousResponseID(true, r); err != nil {
 		return nil, nil, err
 	}
-	p := openai.ChatCompletionNewParams{
-		Model:    shared.ChatModel(res.Model),
-		Messages: zhipuChatMessages(r),
-	}
-	if r.MaxOutputTokens > 0 {
-		p.MaxTokens = param.NewOpt(int64(r.MaxOutputTokens))
-	}
-	if r.Reasoning != nil && r.Reasoning.Effort != "" {
-		// reasoning_effort 是智谱的推理档位顶层字段（4.3.8：max/xhigh/high/medium/low/minimal/none）。
-		p.ReasoningEffort = shared.ReasoningEffort(r.Reasoning.Effort)
-	}
-	p.Tools = zhipuChatTools(r)
+	rc := *r
 	var degs []core.Degradation
-	if r.ToolChoice != nil {
-		// 4.3.8：tool_choice 仅 auto ⇒ 非 auto 一律降为 auto 并记 degradation（⛔ 不静默）。
-		if r.ToolChoice.Mode != "auto" {
-			degs = append(degs, core.Degradation{
-				Field:  "tool_choice",
-				Reason: core.DegradationCapabilityUnsupported,
-				Detail: "智谱 GLM 仅支持 tool_choice=auto，已降为 auto",
-			})
-		}
-		p.ToolChoice.OfAuto = param.NewOpt("auto")
+	if tc := r.ToolChoice; tc != nil && tc.Mode != "auto" && tc.Mode != "none" {
+		// 智谱 Responses 仅支持 tool_choice=none/auto（官方 enum）⇒ required / 指定函数名
+		// （及未知取值）降为 auto 并记 degradation（与 chat 形时代降级语义、标记一致）。
+		degs = append(degs, core.Degradation{
+			Field:  "tool_choice",
+			Reason: core.DegradationCapabilityUnsupported,
+			Detail: "智谱 GLM Responses 仅支持 tool_choice=none/auto，required/指定函数名已降为 auto",
+		})
+		rc.ToolChoice = &core.ToolChoice{Mode: "auto"}
 	}
-	ex := map[string]any{}
-	if r.Stream {
-		// ⚠️ chunk_include_usage（⛔ 不是 include_usage）：逐块返回累计 usage（4.3.8）。
-		ex["stream"] = true
-		ex["stream_options"] = map[string]any{"chunk_include_usage": true}
-	}
-	if len(ex) > 0 {
-		p.SetExtraFields(ex)
+	p, err := responsesBuildParams(&rc, res)
+	if err != nil {
+		return nil, nil, err
 	}
 	raw, err := marshalBody(p)
 	if err != nil {
@@ -221,7 +102,7 @@ func (a *zhipuAdapter) BuildRequestWithDegradations(ctx context.Context, r *core
 	}
 	return &Outbound{
 		Method:  "POST",
-		URL:     joinURL(res.BaseURL, "/chat/completions"),
+		URL:     zhipuResponsesURL(res.BaseURL),
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    raw,
 	}, degs, nil
@@ -233,57 +114,24 @@ func (a *zhipuAdapter) BuildRequest(ctx context.Context, r *core.Request, res *c
 	return out, err
 }
 
-// ---- 响应体（chat.completion；智谱 finish_reason 非标准取值）----
+// ---- 响应体（Responses 对象；解析共享机件见 parseResponsesBody）----
 
-// ParseResponse 解析 chat.completion 响应：SDK typed 解析（openai.ChatCompletion，3.6）；
-// finish_reason 非标准取值 ⇒ 超集原值（sensitive / network_error /
-// model_context_window_exceeded，4.5.1）；reasoning_content ⇒ 推理正文位。
+// ParseResponse 解析 Responses 对象 → 规范 Response：finish_reason 非标准取值（sensitive /
+// network_error / model_context_window_exceeded）经共享机件的显式 finish_reason 通道
+// 超集原值保留（4.5.1）；output[] 异构 item（reasoning / message / function_call）逐项映射。
 func (a *zhipuAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var c openai.ChatCompletion
-	if err := json.Unmarshal(body, &c); err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
-	}
-	out := &core.Response{ID: c.ID, Model: c.Model, Status: core.StatusCompleted}
-	if len(c.Choices) > 0 {
-		ch := c.Choices[0]
-		out.FinishReason = ch.FinishReason
-		if out.FinishReason == "" {
-			out.FinishReason = core.FinishUnknown
-		}
-		if out.FinishReason == core.FinishLength {
-			out.Status = core.StatusIncomplete
-		}
-		var mq struct {
-			ReasoningContent string `json:"reasoning_content"`
-		}
-		_ = json.Unmarshal([]byte(ch.Message.RawJSON()), &mq) // RawJSON 是已解析过的 JSON，仅取扩展字段
-		oi := core.OutputItem{Type: "message", Role: "assistant", ReasoningText: mq.ReasoningContent}
-		if ch.Message.Content != "" {
-			oi.Content = []core.ContentPart{{Type: "text", Text: ch.Message.Content}}
-		}
-		out.OutputItems = append(out.OutputItems, oi)
-		out.Text = ch.Message.Content
-		for _, tc := range ch.Message.ToolCalls {
-			out.OutputItems = append(out.OutputItems, core.OutputItem{
-				Type: "function_call", ID: tc.ID, CallID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
-			})
-		}
-	} else {
-		out.FinishReason = core.FinishUnknown
-	}
-	if raw := c.JSON.Usage.Raw(); raw != "" && raw != "null" {
-		out.Usage = a.ParseUsage(json.RawMessage(raw))
-	}
-	return out, nil
+	return parseResponsesBody(a.ParseUsage, body)
 }
 
-// ---- 流式（chat.completion.chunk；真实样本 testdata/real/zhipu_stream_docs_example.txt 可直喂）----
+// ---- 流式（Responses SSE；真实样本 testdata/real/zhipu_responses_stream_real.sse 可直喂）----
 
-// zhipuChatStreamDecoder 是智谱的 chat chunk 帧解码器（3.7：每家一个帧解码器）：
+// zhipuChatStreamDecoder 是 chat chunk 帧解码器（3.7：每家一个帧解码器）：
 // delta.content ⇒ 文本增量；delta.reasoning_content（智谱扩展名逐字）⇒ 推理增量；
 // delta.tool_calls ⇒ 工具帧（帧承载约定：Text 载函数名、ToolCallID 载调用 id、Arguments 载参数增量）；
-// finish_reason 超集原值收口。chunk_include_usage 开启后逐块返回**累计** usage（⛔ 不可相加，
-// 消费端取最后一次快照）⇒ 每块带 usage 就发 usage 帧。
+// finish_reason 超集原值收口。
+// ⚠️ 出站流式已改 Responses 事件形（StreamStart 走 newResponsesStreamDecoder）；
+// 本解码器保留作 chatchunk.go 共享机件的测试 / 基准载体（chatchunk_test.go 直接引用
+// zhipuAdapter.streamDecoder().decodeOne，⛔ 不可删）。
 type zhipuChatStreamDecoder struct {
 	usageFn func(json.RawMessage) *core.Usage
 	toolIDs map[int64]string // chunk tool_call.index → 调用 id（id 只在首块出现，后续块按 index 对齐）
@@ -291,37 +139,13 @@ type zhipuChatStreamDecoder struct {
 	pendingDone string
 }
 
+// streamDecoder 返回 chat chunk 解码器（⚠️ 仅供 chatchunk_test.go 共享机件测试 / 基准载体，
+// 出站流式不走它）。
 func (a *zhipuAdapter) streamDecoder() *zhipuChatStreamDecoder {
 	return &zhipuChatStreamDecoder{usageFn: a.ParseUsage, toolIDs: map[int64]string{}}
 }
 
-func (d *zhipuChatStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
-	data := strings.TrimSpace(ev.Data)
-	if data == "" {
-		return nil, false, nil
-	}
-	if !json.Valid([]byte(data)) && strings.Contains(data, "\n") {
-		// 紧凑样本分流：厂商文档流示例常是「一行一个 chunk、行间无空行」形（如
-		// testdata/real/zhipu_stream_docs_example.txt），SSE 规范会把多行 data 拼成一个负载
-		// ⇒ 整负载非 JSON 时按行拆分逐行解，真实样本可直喂（2026-11-14 改形验收点）。
-		var frames []stream.Frame
-		for _, line := range strings.Split(data, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			fs, done, err := d.decodeOne(line)
-			frames = append(frames, fs...)
-			if err != nil || done {
-				return frames, done, err
-			}
-		}
-		return frames, false, nil
-	}
-	return d.decodeOne(data)
-}
-
-// decodeOne 解码单个 chunk 负载（[DONE] 哨兵 / 非 JSON 帧容忍）。
+// decodeOne 解码单个 chat chunk 负载（[DONE] 哨兵 / 非 JSON 帧容忍）。
 func (d *zhipuChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, bool, error) {
 	data := strings.TrimSpace(payload)
 	if data == "" {
@@ -357,12 +181,9 @@ func (d *zhipuChatStreamDecoder) decodeOne(payload string) ([]stream.Frame, bool
 			})
 		}
 		if ch.FinishReason != "" {
-			// ⚠️ 2026-11-14 真实样本实测修复：finish 帧不立即收口——
-			// 现象：MiMo 真实流的独立 usage 帧（choices:[] + usage）在 finish 帧之后、[DONE] 之前
-			//（mimo_stream_real.sse），finish 即收口会把它丢掉 ⇒ usage 缺失被置 Estimated 估算；
-			// 根因：文档说「末帧同帧带 usage」，真实 wire 是 finish(usage:null) ⇒ 独立 usage 帧两拍；
-			// 为什么不改回同帧假设：Kimi 又是同帧形态（kimi_stream_real.sse）⇒ 延后收口两形态通吃；
-			// 不修会怎样：usage 计量缺尾、成本审计对不上账。
+			// 延后收口：finish 帧不立即收口——usage 可能在其后独立成帧（真实 wire 两拍形态），
+			// finish 即收口会把它丢掉 ⇒ usage 缺失被置 Estimated 估算；同帧带 usage 的形态
+			// 由 usageOf 的同帧分支收口，两形态通吃。
 			d.pendingDone = ch.FinishReason
 		}
 	}
@@ -402,8 +223,8 @@ func (d *zhipuChatStreamDecoder) usageOf(c chatChunk) *core.Usage {
 	return d.usageFn(raw)
 }
 
-// StreamStart：强制 stream=true（请求体带 stream_options.chunk_include_usage）⇒ 真实 HTTP ⇒
-// chat chunk SSE 解码。
+// StreamStart：强制 stream=true ⇒ 真实 HTTP ⇒ Responses 事件 SSE 解码（共享机件
+// newResponsesStreamDecoder；usage 由 response.completed / response.incomplete 自带）。
 func (a *zhipuAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
 	rc := *r
 	rc.Stream = true
@@ -415,5 +236,5 @@ func (a *zhipuAdapter) StreamStart(ctx context.Context, r *core.Request, res *co
 	if err != nil {
 		return nil, err
 	}
-	return newSSEIter(ctx, resp.Body, a.streamDecoder().decode, nil), nil
+	return newSSEIter(ctx, resp.Body, newResponsesStreamDecoder(a.ParseUsage).decode, nil), nil
 }
