@@ -68,11 +68,6 @@ type Options struct {
 	// 超限 ⇒ 429 + Retry-After（⛔ 不排队无界、⛔ 不静默丢弃）。
 	MaxInFlight int64
 
-	// RetryBackoff 是同端点重试的截断指数退避 + 抖动参数（统一 SDD 7.4；429 不走退避，
-	// Retry-After 语义由令牌冷却承载）。整体零值 ⇒ 默认 1s/1s/32s（Google Cloud
-	// truncated exponential backoff 推荐值）；测试注入小值提速。
-	RetryBackoff Backoff
-
 	// UpstreamProbeInterval 是上游周期巡检间隔（统一 SDD 2.8：主动巡检是预防）；
 	// 0 = 不启用（默认关、显式开）。探测为 HTTP 可达性巡检（⛔ 不发模型调用、不花配额），
 	// 结果进 /admin/health 的 probes 视图并与熔断器联动（不可达 ⇒ 主动熔断）。
@@ -146,9 +141,6 @@ type Server struct {
 	// maxInFlight / inFlight 是过载闸（load shedding；≤ 0 = 不启用）。
 	maxInFlight int64
 	inFlight    atomic.Int64
-
-	// retryBackoff 是同端点重试退避（已在 New 补齐默认值）。
-	retryBackoff Backoff
 
 	// breakers 是端点熔断器（键 = 端点名，统一 SDD 7.3 三态；注册表每端点一个）。
 	breakers map[string]*EndpointBreaker
@@ -313,7 +305,6 @@ func New(opts Options) (*Server, error) {
 	}
 	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim, opts.Share, onShareError)
 	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL, opts.Share, onShareError)
-	s.retryBackoff = opts.RetryBackoff.withDefaults()
 	// 端点熔断器（统一 SDD 7.3）：逐端点按注册表 breaker 配置构造（缺省 = 默认 5/30s/1）。
 	s.breakers = make(map[string]*EndpointBreaker, len(opts.Registry.List()))
 	for _, ep := range opts.Registry.List() {
@@ -539,7 +530,6 @@ func (s *Server) handleAdminEndpoints(w http.ResponseWriter, _ *http.Request) {
 			},
 			"credential_ref": ep.CredentialRef,
 			"timeout_s":      ep.TimeoutS,
-			"max_retries":    ep.MaxRetries,
 			"priority":       ep.Priority,
 		})
 	}
@@ -597,7 +587,7 @@ type ReloadOutcome struct {
 // Reload 热加载注册表与费率表：重读 → 校验 → 原子替换；任何失败 ⇒ 保留旧表。
 //
 // 可热更：费率表全量；注册表的端点字段（base_url / upstream_model / timeout_s /
-// max_retries / priority / context_window / max_output_tokens / capabilities）与
+// priority / context_window / max_output_tokens / capabilities）与
 // fallback_chains —— 这些只被请求路径按快照读取（每请求重做识别与适配），无运行时组件绑定。
 //
 // ⛔ 需重启（显式拒绝并列出，⛔ 不静默半生效）：端点增删、rate_limit /

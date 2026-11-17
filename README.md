@@ -25,7 +25,7 @@
 - **路由与降级** —— `priority`（显式有序降级链）/ `round_robin` 两种策略；
   路由决策可复现（同输入 + 同注册表 + 同配置 ⇒ 同一决策），降级目标不可用时显式报错、
   不静默换端点。
-- **治理语义** —— 错误九分类与可重试性、重试与降级分账（同端点重试前截断指数退避 + 抖动）、
+- **治理语义** —— 错误九分类与可重试性、降级分账（⛔ 网关不重试，模型调用重试由 harness 系统控制）、
   端点熔断三态（连续失败熔断冷却、半开探测、熔断期间跳过转降级链）、token 级限流与预算、
   超时 / 取消 / 上游错误三分、流式逐帧转发与断连检测、显式取消（`/v1/cancel`）。
 - **安全** —— 凭据只从环境变量读（注册表只存来源引用）、日志与轨迹统一脱敏
@@ -341,9 +341,10 @@ usage）→ `message_stop`。
 | 502 | `endpoint_cooling` | 端点熔断冷却中被跳过（降级链上无可用端点时的最终报错；状态见 `/admin/health`） |
 | 504 | `timeout` | 单次上游调用超时（端点 `timeout_s` 预算） |
 
-**可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限；
-`502` / `504` 重试前截断指数退避 + 抖动，`429` 由令牌冷却尊重上游 `Retry-After`、不叠退避）；
-`499` 不重试（取消后抑制重试）；其余 4xx 为请求问题，不重试。
+**可重试性**：网关 ⛔ 不做模型调用重试 —— 重试由 harness / 调用方系统控制，失败原样返回
+（上游 HTTP 状态码透传、`429` 一律带 `Retry-After` 供调用方尊重等待）。对调用方而言
+`429` / `502` / `504` 可重试；`499` 取消后抑制令牌轮换与降级（⛔ 不再打上游）；
+其余 4xx 为请求问题，不值得重试。
 
 ### 4.4 出口（网关 → 上游）
 
@@ -362,7 +363,6 @@ usage）→ `message_stop`。
 | `capabilities`      | 能力标记：`supports_tools` / `supports_stream` / `supports_vision`                                                                                                  |
 | `credential_ref`    | **凭据来源引用**（环境变量名，⛔ 不是凭据本身）                                                                                                                     |
 | `timeout_s`         | 单次上游调用超时（秒）                                                                                                                                                    |
-| `max_retries`       | 重试上限（重试打同一端点，与降级分开计数）                                                                                                                                |
 | `priority`          | 降级优先级（`strategy=priority` 时数值小者先）                                                                                                                          |
 | `rate_limit`        | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值                                             |
 | `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口）                                                              |
@@ -394,7 +394,7 @@ usage）→ `message_stop`。
   延迟直方图、usage 缺失率、熔断状态 gauge）与 `POST /admin/reload`（配置热加载）。
   ⛔ 管理面不绑公网。
 - **配置热加载**：`SIGHUP` 或 `POST /admin/reload` 重读注册表/费率表，先校验后原子替换、
-  失败保留旧表。可热更：费率表、端点 `base_url`/`upstream_model`/`timeout_s`/`max_retries`/
+  失败保留旧表。可热更：费率表、端点 `base_url`/`upstream_model`/`timeout_s`/
   `priority`/`context_window`/`max_output_tokens`/`capabilities`/`fallback_chains`；
   **需重启**（显式拒绝并列出）：端点增删、`rate_limit`/`concurrency_limit`/`limits_group`/
   `breaker`/`credential_rate_limits`/`caller_rate_limits`（运行时组件绑定，热换会洗掉

@@ -283,7 +283,7 @@ func (f *fakeUpstream) close() { f.srv.Close() }
 // epSpec 是注册表端点项的构造参数（字段名与 registry.Endpoint 的 JSON tag 逐字一致）。
 type epSpec struct {
 	name, base, model, upstreamModel, provider, credRef string
-	ctxWindow, maxOut, maxRetries, priority             int
+	ctxWindow, maxOut, priority                         int
 	timeoutS                                            float64
 	// 以下为可选配额声明（rate_limit / concurrency_limit / limits_group）。
 	rateLimit        map[string]any
@@ -309,7 +309,6 @@ func (e epSpec) toWire() map[string]any {
 		},
 		"credential_ref": e.credRef,
 		"timeout_s":      e.timeoutS,
-		"max_retries":    e.maxRetries,
 		"priority":       e.priority,
 	}
 	if e.rateLimit != nil {
@@ -332,7 +331,7 @@ func primaryEP(base string) epSpec {
 	return epSpec{
 		name: "primary", base: base, model: "gpt-4o-mini", upstreamModel: "gpt-4o-mini",
 		provider: "openai", credRef: "TEST_KEY_OPENAI",
-		ctxWindow: 128000, maxOut: 4096, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 4096, priority: 0, timeoutS: 5,
 	}
 }
 

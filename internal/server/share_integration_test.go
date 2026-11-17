@@ -76,7 +76,7 @@ func TestSharedCallerLimitAcrossServers(t *testing.T) {
 	reg := writeRegistry(t, []epSpec{{
 		name: "primary", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}}, nil, map[string]any{
 		"caller_rate_limits": []map[string]any{
 			{"key_ref": "TEST_CALLER_RL_" + uniq, "tpm": 0, "rpm": 60, "burst_s": 1},

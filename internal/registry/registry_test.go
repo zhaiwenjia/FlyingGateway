@@ -39,7 +39,6 @@ const validOne = `{
       "capabilities": {"supports_tools": true, "supports_stream": true, "supports_vision": true},
       "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 30,
-      "max_retries": 2,
       "priority": 0
     }
   ]
@@ -50,13 +49,13 @@ const validOne = `{
 // 对照点：实现对缺失字段落零值继续跑 ⇒ 对应子例红。
 func TestLoadRejectsMissingRequiredFields(t *testing.T) {
 	cases := []struct{ name, raw string }{
-		{"缺 upstream_model", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 capabilities", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 credential_ref", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 name", `{"strategy":"priority","endpoints":[{"base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 base_url", `{"strategy":"priority","endpoints":[{"name":"a","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 model", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
-		{"缺 provider_name", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
+		{"缺 upstream_model", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
+		{"缺 capabilities", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
+		{"缺 credential_ref", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"timeout_s":30,"priority":0}]}`},
+		{"缺 name", `{"strategy":"priority","endpoints":[{"base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
+		{"缺 base_url", `{"strategy":"priority","endpoints":[{"name":"a","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
+		{"缺 model", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
+		{"缺 provider_name", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,9 +74,9 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 		// ⚠️ 顶层未知键子例必须带合法端点，让唯一报错源就是未知键本身——
 		// 写成 endpoints:[] 会被「endpoints 为空」自检兜住，变异下仍绿（恒真断言，
 		// 2026-11-14 变异自检实测发现并修正，统一 SDD 11.5）。
-		{"顶层未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}],"bogus":1}`},
-		{"端点未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0,"api_key":"sk-x"}]}`},
-		{"capabilities 未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{"tools":true},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`},
+		{"顶层未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}],"bogus":1}`},
+		{"端点未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0,"api_key":"sk-x"}]}`},
+		{"capabilities 未知键", `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{"tools":true},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,7 +92,7 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 // 对照点：不做形态检查 ⇒ sk- 子例红；正常环境变量名被误杀 ⇒ 正例子例红。
 func TestLoadRejectsPlaintextCredential(t *testing.T) {
 	withRef := func(ref string) string {
-		return `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"` + ref + `","timeout_s":30,"max_retries":1,"priority":0}]}`
+		return `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"` + ref + `","timeout_s":30,"priority":0}]}`
 	}
 	if _, err := Load(writeConfig(t, withRef("sk-abcdef1234567890"))); err == nil {
 		t.Errorf("credential_ref=sk-… 期望报错，实际 nil（⛔ 不存明文）")
@@ -106,8 +105,8 @@ func TestLoadRejectsPlaintextCredential(t *testing.T) {
 // TestLoadRejectsInvalidStrategy 断言 strategy 缺失 / 未知 ⇒ 报错（统一 SDD 9.2）。
 func TestLoadRejectsInvalidStrategy(t *testing.T) {
 	for _, raw := range []string{
-		`{"endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`,
-		`{"strategy":"random","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}]}`,
+		`{"endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`,
+		`{"strategy":"random","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}]}`,
 	} {
 		if _, err := Load(writeConfig(t, raw)); err == nil {
 			t.Errorf("strategy 缺失/未知 期望报错，实际 nil")
@@ -119,7 +118,7 @@ func TestLoadRejectsInvalidStrategy(t *testing.T) {
 // （统一 SDD 7.4 链须显式有序且引用真实端点；实现计划偏差 4）。
 // 对照点：不做引用校验 ⇒ 坏引用子例红；不做键校验 ⇒ 未知键子例红。
 func TestLoadRejectsBadFallbackChains(t *testing.T) {
-	endpoint := `{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}`
+	endpoint := `{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}`
 	withChains := func(chains string) string {
 		return `{"strategy":"priority","endpoints":[` + endpoint + `],"fallback_chains":` + chains + `}`
 	}
@@ -149,7 +148,7 @@ func TestLoadRejectsBadFallbackChains(t *testing.T) {
 
 // TestLoadRejectsDuplicateEndpointName 断言端点名全局唯一（统一 SDD 9.1）。
 func TestLoadRejectsDuplicateEndpointName(t *testing.T) {
-	ep := `{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0}`
+	ep := `{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}`
 	raw := `{"strategy":"priority","endpoints":[` + ep + `,` + ep + `]}`
 	if _, err := Load(writeConfig(t, raw)); err == nil {
 		t.Fatalf("重复端点名期望报错，实际 nil")
@@ -159,14 +158,13 @@ func TestLoadRejectsDuplicateEndpointName(t *testing.T) {
 // TestLoadRejectsBadFieldValues 断言数值 / URL 边界非法 ⇒ 报错（不许拿非法值绕过判定）。
 func TestLoadRejectsBadFieldValues(t *testing.T) {
 	mutate := func(field, value string) string {
-		return `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":1,"priority":0,` +
+		return `{"strategy":"priority","endpoints":[{"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"m","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0,` +
 			`"` + field + `":` + value + `}]}`
 	}
 	cases := []struct{ name, raw string }{
 		{"context_window 非正", mutate("context_window", "0")},
 		{"max_output_tokens 为负", mutate("max_output_tokens", "-1")},
 		{"timeout_s 非正", mutate("timeout_s", "0")},
-		{"max_retries 为负", mutate("max_retries", "-1")},
 		{"base_url 无 scheme", mutate("base_url", `"api.openai.com"`)},
 		{"endpoints 为空", `{"strategy":"priority","endpoints":[]}`},
 	}
@@ -184,8 +182,8 @@ func TestLoadValidConfig(t *testing.T) {
 	const raw = `{
   "strategy": "round_robin",
   "endpoints": [
-    {"name":"backup","base_url":"https://api.deepseek.com/v1","model":"gpt-4o-mini","upstream_model":"deepseek-chat","provider_name":"deepseek","context_window":64000,"max_output_tokens":8192,"capabilities":{"supports_tools":true,"supports_stream":true,"supports_vision":false},"credential_ref":"DEEPSEEK_API_KEY","timeout_s":45,"max_retries":1,"priority":1},
-    {"name":"primary","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"gpt-4o-mini","provider_name":"openai","context_window":128000,"max_output_tokens":16384,"capabilities":{"supports_tools":true,"supports_stream":true,"supports_vision":true},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"max_retries":2,"priority":0}
+    {"name":"backup","base_url":"https://api.deepseek.com/v1","model":"gpt-4o-mini","upstream_model":"deepseek-chat","provider_name":"deepseek","context_window":64000,"max_output_tokens":8192,"capabilities":{"supports_tools":true,"supports_stream":true,"supports_vision":false},"credential_ref":"DEEPSEEK_API_KEY","timeout_s":45,"priority":1},
+    {"name":"primary","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"gpt-4o-mini","provider_name":"openai","context_window":128000,"max_output_tokens":16384,"capabilities":{"supports_tools":true,"supports_stream":true,"supports_vision":true},"credential_ref":"OPENAI_API_KEY","timeout_s":30,"priority":0}
   ],
   "fallback_chains": {"general":["backup"],"rate_limit":["backup"]}
 }`
@@ -208,7 +206,7 @@ func TestLoadValidConfig(t *testing.T) {
 	if p.UpstreamModel != "gpt-4o-mini" || p.ProviderName != "openai" || p.Model != "gpt-4o-mini" {
 		t.Errorf("两层模型语义 / provider 落位不符: %+v", p)
 	}
-	if p.MaxOutputTokens != 16384 || p.ContextWindow != 128000 || p.TimeoutS != 30 || p.MaxRetries != 2 {
+	if p.MaxOutputTokens != 16384 || p.ContextWindow != 128000 || p.TimeoutS != 30 {
 		t.Errorf("数值字段落位不符: %+v", p)
 	}
 	if p.Capabilities == nil || !p.Capabilities.SupportsTools || !p.Capabilities.SupportsStream || !p.Capabilities.SupportsVision {
@@ -229,9 +227,9 @@ func TestLookupPriority(t *testing.T) {
 	const raw = `{
   "strategy": "priority",
   "endpoints": [
-    {"name":"beta","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m2","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"max_retries":1,"priority":2},
-    {"name":"alpha","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m3","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"max_retries":1,"priority":2},
-    {"name":"primary","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m1","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"max_retries":1,"priority":0}
+    {"name":"beta","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m2","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"priority":2},
+    {"name":"alpha","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m3","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"priority":2},
+    {"name":"primary","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","upstream_model":"m1","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"priority":0}
   ]
 }`
 	r, err := Load(writeConfig(t, raw))
@@ -297,9 +295,9 @@ func TestLookupRoundRobin(t *testing.T) {
 	const raw = `{
   "strategy": "round_robin",
   "endpoints": [
-    {"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"ma","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"max_retries":1,"priority":0},
-    {"name":"b","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"mb","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"max_retries":1,"priority":1},
-    {"name":"c","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"mc","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"max_retries":1,"priority":2}
+    {"name":"a","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"ma","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"priority":0},
+    {"name":"b","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"mb","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"priority":1},
+    {"name":"c","base_url":"https://api.openai.com/v1","model":"m","upstream_model":"mc","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"priority":2}
   ]
 }`
 	r, err := Load(writeConfig(t, raw))
@@ -324,9 +322,9 @@ func TestListDeterministic(t *testing.T) {
 	const raw = `{
   "strategy": "priority",
   "endpoints": [
-    {"name":"c","base_url":"https://api.openai.com/v1","model":"mc","upstream_model":"mc","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"max_retries":1,"priority":1},
-    {"name":"a","base_url":"https://api.openai.com/v1","model":"ma","upstream_model":"ma","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"max_retries":1,"priority":0},
-    {"name":"b","base_url":"https://api.openai.com/v1","model":"mb","upstream_model":"mb","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"max_retries":1,"priority":1}
+    {"name":"c","base_url":"https://api.openai.com/v1","model":"mc","upstream_model":"mc","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K1","timeout_s":30,"priority":1},
+    {"name":"a","base_url":"https://api.openai.com/v1","model":"ma","upstream_model":"ma","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K2","timeout_s":30,"priority":0},
+    {"name":"b","base_url":"https://api.openai.com/v1","model":"mb","upstream_model":"mb","provider_name":"openai","context_window":1000,"max_output_tokens":100,"capabilities":{},"credential_ref":"K3","timeout_s":30,"priority":1}
   ]
 }`
 	r, err := Load(writeConfig(t, raw))
@@ -407,7 +405,6 @@ func epJSON(name, extra string) string {
       "capabilities": {"supports_tools": true, "supports_stream": true, "supports_vision": false},
       "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 30,
-      "max_retries": 1,
       "priority": 0` + extra + `
     }`
 }

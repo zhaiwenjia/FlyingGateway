@@ -60,8 +60,6 @@ type Endpoint struct {
 	CredentialRef string `json:"credential_ref"`
 	// TimeoutS 是默认超时（秒）。
 	TimeoutS float64 `json:"timeout_s"`
-	// MaxRetries 是重试次数上限（⛔ 与降级次数分开计，统一 SDD 7.4）。
-	MaxRetries int `json:"max_retries"`
 	// Priority 是优先级，数值越小越优先。
 	Priority int `json:"priority"`
 	// RateLimit 是该端点的上游套餐配额（限流锚点，统一 SDD 7.2 锚点分离）。
@@ -173,7 +171,7 @@ func (e *ModelNotFoundError) Unwrap() error { return ErrModelNotFound }
 //     credential_ref 非空、capabilities 键出现，缺失 ⇒ 启动报错（⛔ 不用默认值静默补齐）；
 //   - credential_ref 是来源引用，明文密钥形态（sk- 开头）⇒ 报错（⛔ 不存明文）；
 //   - name 全局唯一（9.1）；context_window > 0（与 routing.CheckContext 契约一致）；
-//     timeout_s > 0、max_output_tokens ≥ 0、max_retries ≥ 0（负数 / 零超时无语义）；
+//     timeout_s > 0、max_output_tokens ≥ 0（负数 / 零超时无语义）；
 //   - fallback_chains（可选）：键 = 七类失败类型之一，值 = 有序端点名数组，
 //     引用不存在端点或空数组 ⇒ 报错。
 func Load(path string) (*Registry, error) {
@@ -356,9 +354,6 @@ func validateEndpoint(path string, ordinal int, ep Endpoint) error {
 	}
 	if ep.TimeoutS <= 0 {
 		return fmt.Errorf("%s：%q 的 timeout_s = %v 必须为正（默认超时无零值语义）", prefix, ep.Name, ep.TimeoutS)
-	}
-	if ep.MaxRetries < 0 {
-		return fmt.Errorf("%s：%q 的 max_retries = %d 不得为负", prefix, ep.Name, ep.MaxRetries)
 	}
 	if ep.ConcurrencyLimit < 0 {
 		return fmt.Errorf("%s：%q 的 concurrency_limit = %d 不得为负（0 = 不限）", prefix, ep.Name, ep.ConcurrencyLimit)

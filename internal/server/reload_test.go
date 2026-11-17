@@ -70,7 +70,7 @@ func TestReloadSwapsConfig(t *testing.T) {
 	srv := reloadEnv(t, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}})
 	if got := srv.curReg().List()[0].TimeoutS; got != 5 {
 		t.Fatalf("初始 timeout_s = %v，期望 5", got)
@@ -79,7 +79,7 @@ func TestReloadSwapsConfig(t *testing.T) {
 	writeRegistryFile(t, srv.regPath, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 9,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 9,
 	}}, map[string][]string{"general": {"primary"}})
 	out := srv.Reload()
 	if !out.OK {
@@ -98,7 +98,7 @@ func TestReloadKeepsOldOnBadConfig(t *testing.T) {
 	srv := reloadEnv(t, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}})
 	if err := os.WriteFile(srv.regPath, []byte("{不是合法 JSON"), 0o600); err != nil {
 		t.Fatalf("写坏文件失败: %v", err)
@@ -118,20 +118,20 @@ func TestReloadRestartRequired(t *testing.T) {
 	srv := reloadEnv(t, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}})
 	// 变更 1：加一个端点 + 给 primary 加 rate_limit。
 	writeRegistryFile(t, srv.regPath, []epSpec{
 		{
 			name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 			rateLimit: map[string]any{"tpm": 1000, "rpm": 10, "burst_s": 5},
 		},
 		{
 			name: "backup", base: "http://127.0.0.1:18002/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 1, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 1, timeoutS: 5,
 		},
 	}, nil)
 	out := srv.Reload()
@@ -158,7 +158,7 @@ func TestReloadKeepsBreakerState(t *testing.T) {
 	srv := reloadEnv(t, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}})
 	brk := srv.breakerFor("primary")
 	brk.RecordFailure(time.Now()) // threshold 默认 5 还差 4 次——改用 Trip 直接开闸
@@ -169,7 +169,7 @@ func TestReloadKeepsBreakerState(t *testing.T) {
 	writeRegistryFile(t, srv.regPath, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 7,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 7,
 	}}, nil)
 	if out := srv.Reload(); !out.OK {
 		t.Fatalf("可热更变更应成功：%+v", out)
@@ -184,7 +184,7 @@ func TestAdminReloadEndpoint(t *testing.T) {
 	srv := reloadEnv(t, []epSpec{{
 		name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}})
 	admin, err := srv.AdminHandler("adm-token")
 	if err != nil {
@@ -206,12 +206,12 @@ func TestAdminReloadEndpoint(t *testing.T) {
 		{
 			name: "primary", base: "http://127.0.0.1:18001/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 		},
 		{
 			name: "backup", base: "http://127.0.0.1:18002/v1", model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 1, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 1, timeoutS: 5,
 		},
 	}, nil)
 	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/reload", nil)
