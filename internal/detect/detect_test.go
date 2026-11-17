@@ -34,7 +34,7 @@ func TestDetectHostRules(t *testing.T) {
 		{"xiaomi-batch", "https://batch-api-cn.xiaomimimo.com/v1", core.ProviderXiaomi},
 		{"xiaomi-tokenplan", "https://token-plan-cn.xiaomimimo.com/v1", core.ProviderXiaomi},
 		// 第 6 行 MiniMax。
-		{"minimax", "https://api.minimax.io/v1", core.ProviderMiniMax},
+		{"minimax", "https://api.minimax.cn/v1", core.ProviderMiniMax},
 		// 第 7 行 OpenAI。
 		{"openai", "https://api.openai.com/v1", core.ProviderOpenAI},
 		// 第 8 行 Claude。
@@ -241,10 +241,8 @@ func TestDetectShapeFromPath(t *testing.T) {
 		{"chat-completions", "https://api.deepseek.com/v1/chat/completions", core.APIShapeOpenAIChat},
 		{"responses", "https://api.openai.com/v1/responses", core.APIShapeOpenAIResponses},
 		{"messages", "https://api.anthropic.com/v1/messages", core.APIShapeAnthropicMessages},
-		{"minimax-native-v2", "https://api.minimax.io/v1/text/chatcompletion_v2", core.APIShapeMiniMaxNativeV2},
 		{"gemini-generate", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent", core.APIShapeGeminiNative},
 		{"gemini-stream", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent", core.APIShapeGeminiNative},
-		{"ollama-native", "http://localhost:11434/api/chat", core.APIShapeOllamaNative},
 		// path 无信号 ⇒ 按 host 默认形状（3.3 Shape 列：Anthropic=Messages、Gemini=原生、其余=OpenAIChat）。
 		{"anthropic-default", "https://api.anthropic.com/v1", core.APIShapeAnthropicMessages},
 		{"gemini-default", "https://generativelanguage.googleapis.com/v1beta", core.APIShapeGeminiNative},

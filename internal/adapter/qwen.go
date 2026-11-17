@@ -11,14 +11,12 @@ import (
 	"strings"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
-	gwerrors "github.com/zhaiwenjia/FlyingGateway/internal/errors"
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 	"github.com/zhaiwenjia/FlyingGateway/internal/usage"
 )
 
-// Qwen / DashScope 适配器（统一 SDD 4.3.7，两形态按 core.Resolution.Shape 选）：
-//
-// ① 兼容层（APIShapeOpenAIChat / APIShapeOpenAIResponses 同一适配器）：POST {base}/responses；
+// Qwen / DashScope 适配器（统一 SDD 4.3.7，单形态：国内供应商统一 OpenAI Responses 通道，
+// APIShapeOpenAIChat / APIShapeOpenAIResponses 两个登记键归同一适配器）：POST {base}/responses；
 //    AuthScheme: Authorization + "Bearer "。出站走 OpenAI Responses（出站方法口径「除 Claude 外
 //    优先 OpenAI SDK Response API」，2026-11-16 真实实测 4/4 全通：basic / tools / reasoning /
 //    stream，样本见 testdata/real/qwen_responses_*_real.*，qwen3.8-flash 直采）；
@@ -29,12 +27,8 @@ import (
 //    指定函数名均直通）；usage 的 cache_creation_input_tokens 归 usage.Normalize（4.4.2 Qwen 兼容行）。
 //    previous_response_id：支持 = true（官方「创建响应」：服务端会话保留 7 天）⇒ 直通。
 //
-// ② 原生 text-generation（APIShapeQwenNative）：POST {base}/api/v1/services/aigc/text-generation/generation；
-//    ⚠️ 流式必须加头 X-DashScope-SSE: enable（3.6 坑 1）；帧格式 `data:{json}`（冒号后**无空格**）、
-//    **每帧自带 usage**、**无 [DONE] 哨兵**；usage 字段是 input_tokens / output_tokens（⛔ 与兼容模式
-//    的 prompt_tokens / completion_tokens 不同，4.3.7）。
-//
 // ⚠️ API Key 与地域强绑定（北京 Key 调弗吉尼亚 endpoint 401）——base URL 由注册表决定，适配器只拼路径。
+// ⛔ 无原生 text-generation 形态（APIShapeQwenNative 已移除）——国内供应商出站统一 OpenAI Responses 通道。
 
 type qwenAdapter struct {
 	hc *http.Client
@@ -209,215 +203,4 @@ func (a *qwenAdapter) StreamStart(ctx context.Context, r *core.Request, res *cor
 		return nil, err
 	}
 	return newSSEIter(ctx, resp.Body, newResponsesStreamDecoder(a.ParseUsage).decode, nil), nil
-}
-
-// =====================================================================
-// 原生 text-generation 形态（APIShapeQwenNative）
-// =====================================================================
-
-type qwenNativeAdapter struct {
-	hc *http.Client
-}
-
-// NewQwenNative 构造 Qwen 原生 text-generation 适配器。
-func NewQwenNative(hc *http.Client) Adapter { return &qwenNativeAdapter{hc: hc} }
-
-func (a *qwenNativeAdapter) Provider() core.Provider          { return core.ProviderQwen }
-func (a *qwenNativeAdapter) OutboundShape() OutboundShape     { return ShapeQwenNative }
-func (a *qwenNativeAdapter) SupportsPreviousResponseID() bool { return true }
-
-// AuthScheme 按 4.1.1：Authorization: Bearer（原生与兼容层同一把 key）。
-func (a *qwenNativeAdapter) AuthScheme() AuthScheme {
-	return AuthScheme{HeaderName: "Authorization", Prefix: "Bearer "}
-}
-
-// ParseUsage 委托 usage.Normalize（shape=APIShapeQwenNative，4.3.7：usage 字段 input_tokens /
-// output_tokens，⛔ 与兼容模式字段名不同；无缓存明细 ⇒ 读写记 0）。
-func (a *qwenNativeAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
-	return usage.Normalize(core.ProviderQwen, core.APIShapeQwenNative, raw)
-}
-
-// ---- 原生请求体（⚠️ SDD 未逐字给字段名 ⇒ 按 DashScope text-generation 通用形状构造：
-// model / input.messages / parameters；流式须加头 X-DashScope-SSE: enable，3.6 坑 1）----
-
-type qwenNativeReq struct {
-	Model      string           `json:"model"`
-	Input      qwenNativeInput  `json:"input"`
-	Parameters qwenNativeParams `json:"parameters,omitempty"`
-}
-
-type qwenNativeInput struct {
-	Messages []qwenNativeMessage `json:"messages"`
-}
-
-type qwenNativeMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type qwenNativeParams struct {
-	ResultFormat   string   `json:"result_format,omitempty"`
-	Stream         bool     `json:"stream,omitempty"`
-	MaxTokens      int      `json:"max_tokens,omitempty"`
-	Temperature    *float64 `json:"temperature,omitempty"`
-	TopP           *float64 `json:"top_p,omitempty"`
-	Stop           []string `json:"stop,omitempty"`
-	EnableThinking *bool    `json:"enable_thinking,omitempty"`
-	EnableSearch   any      `json:"enable_search,omitempty"`
-}
-
-// BuildRequest 构造原生 text-generation 请求。
-func (a *qwenNativeAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
-	if err := checkPreviousResponseID(true, r); err != nil {
-		return nil, err
-	}
-	body := qwenNativeReq{
-		Model: res.Model,
-		Input: qwenNativeInput{},
-		Parameters: qwenNativeParams{
-			ResultFormat: "message",
-			Stream:       r.Stream,
-			MaxTokens:    r.MaxOutputTokens,
-			Temperature:  r.Temperature,
-			TopP:         r.TopP,
-			Stop:         r.Stop,
-		},
-	}
-	for _, m := range r.Messages {
-		text := contentText(m.Content)
-		switch m.Role {
-		case "system":
-			body.Input.Messages = append(body.Input.Messages, qwenNativeMessage{Role: "system", Content: text})
-		case "assistant":
-			body.Input.Messages = append(body.Input.Messages, qwenNativeMessage{Role: "assistant", Content: text})
-		default:
-			body.Input.Messages = append(body.Input.Messages, qwenNativeMessage{Role: "user", Content: text})
-		}
-	}
-	raw, err := marshalBody(body)
-	if err != nil {
-		return nil, err
-	}
-	raw, err = mergeExtraBody(raw, r.Extra)
-	if err != nil {
-		return nil, err
-	}
-	headers := map[string]string{"Content-Type": "application/json"}
-	if r.Stream {
-		// ⚠️ 原生流式必须加头 X-DashScope-SSE: enable（3.6 坑 1 / 4.3.7）。
-		headers["X-DashScope-SSE"] = "enable"
-	}
-	return &Outbound{
-		Method:  "POST",
-		URL:     joinURL(res.BaseURL, "/api/v1/services/aigc/text-generation/generation"),
-		Headers: headers,
-		Body:    raw,
-	}, nil
-}
-
-// ---- 原生响应体（output.text / output.finish_reason / usage.input_tokens|output_tokens）----
-
-type qwenNativeResp struct {
-	Output struct {
-		Text         string `json:"text"`
-		FinishReason string `json:"finish_reason"`
-		Choices      []struct {
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	} `json:"output"`
-	Usage     json.RawMessage `json:"usage"`
-	RequestID string          `json:"request_id"`
-	Code      string          `json:"code"`
-	Message   string          `json:"message"`
-}
-
-// ParseResponse 解析原生响应（4.3.7：usage 字段 input_tokens / output_tokens）。
-func (a *qwenNativeAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.Response, error) {
-	var r qwenNativeResp
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, &DetailError{Detail: gwerrors.New(core.ErrInvalidRequest, 502, "response_parse_failed", err.Error())}
-	}
-	if r.Code != "" {
-		// DashScope 业务错误（code/message 形态）。
-		return &core.Response{
-			Status: core.StatusFailed,
-			Error:  gwerrors.New(core.ErrUpstreamError, 200, r.Code, r.Message),
-		}, nil
-	}
-	out := &core.Response{Status: core.StatusCompleted}
-	text := r.Output.Text
-	finish := r.Output.FinishReason
-	if len(r.Output.Choices) > 0 {
-		text = r.Output.Choices[0].Message.Content
-		if finish == "" {
-			finish = r.Output.Choices[0].FinishReason
-		}
-	}
-	out.Text = text
-	out.OutputItems = []core.OutputItem{{
-		Type: "message", Role: "assistant", Content: []core.ContentPart{{Type: "text", Text: text}},
-	}}
-	out.FinishReason = finish
-	if out.FinishReason == "" {
-		out.FinishReason = core.FinishUnknown
-	}
-	if len(r.Usage) > 0 {
-		out.Usage = a.ParseUsage(r.Usage)
-	}
-	return out, nil
-}
-
-// ---- 原生流式（SSE 帧 `data:{json}` 冒号无空格、每帧自带 usage、⛔ 无 [DONE]）----
-
-type qwenNativeStreamDecoder struct {
-	usageFn func(json.RawMessage) *core.Usage
-}
-
-func (a *qwenNativeAdapter) streamDecoder() *qwenNativeStreamDecoder {
-	return &qwenNativeStreamDecoder{usageFn: a.ParseUsage}
-}
-
-func (d *qwenNativeStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, error) {
-	data := strings.TrimSpace(ev.Data)
-	if data == "" {
-		return nil, false, nil
-	}
-	// ⛔ 无 [DONE] 哨兵（4.3.7）；以 output.finish_reason 判终态。
-	var r qwenNativeResp
-	if err := json.Unmarshal([]byte(data), &r); err != nil {
-		return nil, false, nil
-	}
-	var frames []stream.Frame
-	text := r.Output.Text
-	if text != "" {
-		frames = append(frames, stream.Frame{Kind: stream.FrameTextDelta, Text: text})
-	}
-	// 每帧自带 usage（4.3.7）。
-	if len(r.Usage) > 0 {
-		frames = append(frames, stream.Frame{Kind: stream.FrameUsage, Usage: d.usageFn(r.Usage)})
-	}
-	if r.Output.FinishReason != "" {
-		frames = append(frames, stream.Frame{Kind: stream.FrameDone, Status: r.Output.FinishReason})
-		return frames, true, nil
-	}
-	return frames, false, nil
-}
-
-// StreamStart（原生）：强制 stream=true（请求体 stream + 头 X-DashScope-SSE: enable）⇒ SSE 解码。
-func (a *qwenNativeAdapter) StreamStart(ctx context.Context, r *core.Request, res *core.Resolution) (stream.FrameIterator, error) {
-	rc := *r
-	rc.Stream = true
-	out, err := a.BuildRequest(ctx, &rc, res)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := streamRequest(ctx, a.hc, a.Provider(), out)
-	if err != nil {
-		return nil, err
-	}
-	return newSSEIter(ctx, resp.Body, a.streamDecoder().decode, nil), nil
 }

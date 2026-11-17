@@ -144,13 +144,9 @@ func TestForShapeDispatch(t *testing.T) {
 		{core.ProviderZhipu, core.APIShapeOpenAIResponses, "*adapter.zhipuAdapter"},
 		{core.ProviderQwen, core.APIShapeOpenAIChat, "*adapter.qwenAdapter"},
 		{core.ProviderQwen, core.APIShapeOpenAIResponses, "*adapter.qwenAdapter"},
-		{core.ProviderQwen, core.APIShapeQwenNative, "*adapter.qwenNativeAdapter"},
 		{core.ProviderMiniMax, core.APIShapeOpenAIChat, "*adapter.minimaxAdapter"},
 		{core.ProviderMiniMax, core.APIShapeOpenAIResponses, "*adapter.minimaxAdapter"},
-		{core.ProviderMiniMax, core.APIShapeAnthropicMessages, "*adapter.minimaxAnthropicAdapter"},
-		{core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2, "*adapter.minimaxV2Adapter"},
 		{core.ProviderXiaomi, core.APIShapeOpenAIResponses, "*adapter.xiaomiAdapter"},
-		{core.ProviderOllama, core.APIShapeOllamaNative, "*adapter.ollamaAdapter"},
 		{core.ProviderOllama, core.APIShapeOpenAIChat, "*adapter.ollamaCompatAdapter"},
 		{core.ProviderOllama, core.APIShapeOpenAIResponses, "*adapter.ollamaCompatAdapter"},
 	}

@@ -24,15 +24,6 @@ import (
 //    ParseResponse / 流式用真实样本直喂（testdata/real/ollama_responses_*_real.json / .sse，
 //    response.completed 收口、无 [DONE]）。
 
-func newOllamaResolution(base string) *core.Resolution {
-	return &core.Resolution{
-		Provider: core.ProviderOllama,
-		Shape:    core.APIShapeOllamaNative,
-		BaseURL:  base,
-		Model:    "qwen3:8b",
-	}
-}
-
 func newOllamaCompatResolution(base string) *core.Resolution {
 	return &core.Resolution{
 		Provider: core.ProviderOllama,
@@ -41,64 +32,6 @@ func newOllamaCompatResolution(base string) *core.Resolution {
 		Model:    "qwen3:8b",
 	}
 }
-
-// TestOllamaNativeBuildRequest 钉住原生请求（4.3.6 请求体关键字段）：
-// /api/chat；think 参数（effort 原值 / 其余非空 ⇒ true / none 空 ⇒ 不发）；
-// temperature 等进 options（num_predict）。
-// 错误实现会红：think 映射错档 ⇒ 断言红；参数放顶层 ⇒ options 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaNativeBuildRequest -v
-func TestOllamaNativeBuildRequest(t *testing.T) {
-	a := NewOllama(http.DefaultClient)
-	temp, topP := 0.7, 0.9
-	r := &core.Request{
-		Messages:        []core.Message{{Role: "user", Content: []core.ContentPart{{Text: "你好"}}}},
-		Temperature:     &temp,
-		TopP:            &topP,
-		MaxOutputTokens: 100,
-		Reasoning:       &core.ReasoningConfig{Effort: "high"},
-	}
-	out, err := a.BuildRequest(context.Background(), r, newOllamaResolution("http://127.0.0.1:11434"))
-	if err != nil {
-		t.Fatalf("BuildRequest 报错: %v", err)
-	}
-	if out.URL != "http://127.0.0.1:11434/api/chat" {
-		t.Fatalf("URL = %s，期望 {base}/api/chat（4.3.6 原生）", out.URL)
-	}
-	m := bodyMap(t, out)
-	if mustAt(t, m, "think") != "high" {
-		t.Fatalf("think = %v，期望 \"high\"（effort 原值，4.3.6：think 是 bool 或 low/medium/high/max）", m["think"])
-	}
-	opts := mustAt(t, m, "options").(map[string]any)
-	if opts["temperature"] != 0.7 || opts["top_p"] != 0.9 || opts["num_predict"] != float64(100) {
-		t.Fatalf("options = %v，期望 temperature/top_p/num_predict 进 options", opts)
-	}
-	// effort 非枚举值 ⇒ true；none/空 ⇒ 不发。
-	r.Reasoning = &core.ReasoningConfig{Effort: "xhigh"}
-	out, _ = a.BuildRequest(context.Background(), r, newOllamaResolution("http://127.0.0.1:11434"))
-	if mustAt(t, bodyMap(t, out), "think") != true {
-		t.Fatalf("think = %v，期望 true（非枚举 effort）", bodyMap(t, out)["think"])
-	}
-	r.Reasoning = &core.ReasoningConfig{Effort: "none"}
-	out, _ = a.BuildRequest(context.Background(), r, newOllamaResolution("http://127.0.0.1:11434"))
-	assertNoKey(t, bodyMap(t, out), "think")
-	// 鉴权：本地进程无鉴权（4.3.6）⇒ AuthScheme 空。
-	if sch := a.AuthScheme(); sch.HeaderName != "" {
-		t.Fatalf("AuthScheme = %+v，期望空（本地无鉴权）", sch)
-	}
-}
-
-// TestOllamaCompatBuildRequest 钉住 /v1 兼容层 Responses 形请求（4.3.6 家差 + 3.5/3.6）：
-// ① URL {base}/v1/responses；② 请求体 Responses 形（input 数组 / instructions 顶层 / tools 扁平形）；
-// ③ ⛔ 不发 tool_choice / n / user / logit_bias（4.3.6 已知偏差；官方 Supported features 仅
-//
-//	Streaming / Tools (function calling) / Reasoning summaries）⇒ tool_choice 出站剔除，
-//	非 auto（none/required/指定函数名）记降级、**auto 不记**（语义无损失，口径同 zhipu/moonshot）
-//	（DegradationAware，⛔ 不静默丢弃无标记）；
-//
-// ④ stream:true（Responses 形 usage 随 response.completed，⛔ 无 stream_options）；
-// ⑤ Extra 透传（mergeExtraBody 黑名单口径）。
-// 错误实现会红：tool_choice 漏进 body ⇒ assertNoKey 红；降级不记 ⇒ degs 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaCompatBuildRequest -v
 func TestOllamaCompatBuildRequest(t *testing.T) {
 	a := NewOllamaCompat(http.DefaultClient)
 	r := &core.Request{
@@ -166,61 +99,16 @@ func TestOllamaCompatBuildRequest(t *testing.T) {
 	}
 }
 
-// TestOllamaPreviousResponseIDRejected 钉住 3.5：Ollama 两形态都不支持服务端会话 ⇒ 显式报错
+// TestOllamaPreviousResponseIDRejected 钉住 3.5：Ollama 不支持服务端会话 ⇒ 显式报错
 // （/v1/responses 仅无状态 flavor，4.3.6）。
 // 错误实现会红：静默丢弃 ⇒ err==nil ⇒ 红。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaPreviousResponseIDRejected -v
 func TestOllamaPreviousResponseIDRejected(t *testing.T) {
-	for _, a := range []Adapter{NewOllama(http.DefaultClient), NewOllamaCompat(http.DefaultClient)} {
-		_, err := a.BuildRequest(context.Background(),
-			&core.Request{PreviousResponseID: "resp_prev"}, newOllamaResolution("http://127.0.0.1:11434"))
-		requireDetailErr(t, err, "unsupported_capability")
-	}
+	a := NewOllamaCompat(http.DefaultClient)
+	_, err := a.BuildRequest(context.Background(),
+		&core.Request{PreviousResponseID: "resp_prev"}, newOllamaCompatResolution("http://127.0.0.1:11434"))
+	requireDetailErr(t, err, "unsupported_capability")
 }
-
-// TestOllamaParseResponseNative 钉住原生响应解析与平铺 usage（4.3.6 / 4.4.2 / 11.1「Ollama 平铺」）：
-// prompt_eval_count=26 是总输入（含命中）、prompt_eval_cached_count=13 ⇒ 缓存读、
-// Uncached = 26−13 = 13（⛔ 不能拿 26 当未缓存量）；done_reason 三值超集原值、空且 done ⇒ stop。
-// 错误实现会红：Uncached 取 prompt_eval_count ⇒ 26 ⇒ 红；done_reason 被并入 OpenAI 枚举 ⇒ 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaParseResponseNative -v
-func TestOllamaParseResponseNative(t *testing.T) {
-	a := NewOllama(http.DefaultClient)
-	out, err := a.ParseResponse(newOllamaResolution(""), loadFixture(t, "ollama_response.json"))
-	if err != nil {
-		t.Fatalf("ParseResponse 报错: %v", err)
-	}
-	if out.Text != "你好" || out.FinishReason != core.FinishStop {
-		t.Fatalf("解析不对：Text=%q Finish=%q", out.Text, out.FinishReason)
-	}
-	u := out.Usage
-	if u.InputTokens != 26 || u.CacheReadTokens != 13 || u.OutputTokens != 18 {
-		t.Fatalf("平铺归一不对：In=%d(26) Read=%d(13) Out=%d(18)", u.InputTokens, u.CacheReadTokens, u.OutputTokens)
-	}
-	if u.InputTokensUncached != 13 {
-		t.Fatalf("Uncached = %d，期望 13 = 26−13（4.4.3 Ollama 坑）", u.InputTokensUncached)
-	}
-	// done_reason 三值（4.5.2）+ 空且 done ⇒ stop。
-	for _, c := range []struct {
-		body, want string
-	}{
-		{`{"message":{"content":"x"},"done":true,"done_reason":"load"}`, core.FinishLoad},
-		{`{"message":{"content":"x"},"done":true,"done_reason":"unload"}`, core.FinishUnload},
-		{`{"message":{"content":"x"},"done":true}`, core.FinishStop},
-	} {
-		out, err := a.ParseResponse(newOllamaResolution(""), []byte(c.body))
-		if err != nil {
-			t.Fatalf("ParseResponse(%s) 报错: %v", c.body, err)
-		}
-		if out.FinishReason != c.want {
-			t.Fatalf("body=%s ⇒ FinishReason=%q，期望 %q", c.body, out.FinishReason, c.want)
-		}
-	}
-}
-
-// TestOllamaCompatParseUsage 钉住 /v1 兼容层 usage（4.4.2 Ollama /v1 行）：
-// 仅 prompt/completion/total 三字段，无缓存明细 ⇒ 读写记 0。
-// 错误实现会红：按原生平铺字段解 ⇒ In=0 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaCompatParseUsage -v
 func TestOllamaCompatParseUsage(t *testing.T) {
 	a := NewOllamaCompat(http.DefaultClient)
 	u := a.ParseUsage(loadFixture(t, "ollama_v1_usage.json"))
@@ -231,63 +119,6 @@ func TestOllamaCompatParseUsage(t *testing.T) {
 		t.Fatalf("/v1 无缓存明细 ⇒ 记 0：Read=%d Write=%d", u.CacheReadTokens, u.CacheWriteTokens)
 	}
 }
-
-// TestOllamaNativeStreamNDJSON 钉住原生流式（3.6 坑 2 / 4.3.6）：
-// NDJSON 一行一帧（⛔ 非 SSE、⛔ 无 [DONE]）；usage 只在 done:true 帧；done_reason 帧载终态。
-// 错误实现会红：按 SSE 解析 NDJSON ⇒ 帧全丢 ⇒ 断言红；usage 逐帧乱记 ⇒ 帧数断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaNativeStreamNDJSON -v
-func TestOllamaNativeStreamNDJSON(t *testing.T) {
-	const body = "" +
-		"{\"model\":\"qwen3:8b\",\"message\":{\"role\":\"assistant\",\"content\":\"你\"},\"done\":false}\n" +
-		"{\"model\":\"qwen3:8b\",\"message\":{\"role\":\"assistant\",\"content\":\"好\"},\"done\":false}\n" +
-		"{\"model\":\"qwen3:8b\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":26,\"prompt_eval_cached_count\":13,\"eval_count\":18}\n"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = w.Write([]byte(body))
-	}))
-	defer srv.Close()
-
-	a := NewOllama(srv.Client())
-	it, err := a.StreamStart(context.Background(), &core.Request{}, newOllamaResolution(srv.URL))
-	if err != nil {
-		t.Fatalf("StreamStart 报错: %v", err)
-	}
-	frames, cerr := collectFrames(t, it)
-	if cerr != nil {
-		t.Fatalf("流式终态错误: %v（⛔ 无 [DONE]，以 done:true 帧判终态）", cerr)
-	}
-	var texts []string
-	usageCount := 0
-	var doneStatus string
-	for _, f := range frames {
-		switch f.Kind {
-		case stream.FrameTextDelta:
-			texts = append(texts, f.Text)
-		case stream.FrameUsage:
-			usageCount++
-			if f.Usage.InputTokens != 26 || f.Usage.CacheReadTokens != 13 || f.Usage.OutputTokens != 18 {
-				t.Fatalf("usage 帧 = %+v，期望 26/13/18（只在 done:true 帧）", f.Usage)
-			}
-		case stream.FrameDone:
-			doneStatus = f.Status
-		}
-	}
-	if len(texts) != 2 || texts[0] != "你" || texts[1] != "好" {
-		t.Fatalf("文本增量 = %v，期望 [你 好]", texts)
-	}
-	if usageCount != 1 {
-		t.Fatalf("usage 帧数 = %d，期望 1（usage 只在 done:true 帧，4.3.6）", usageCount)
-	}
-	if doneStatus != core.FinishStop {
-		t.Fatalf("done 状态 = %q，期望 stop（done_reason 原值）", doneStatus)
-	}
-}
-
-// TestOllamaCompatStreamDoneSentinel 钉住 /v1 兼容层流式收口语义（wire 迁移后主题不变）：
-// Responses 形以 response.completed 收口（usage 自带 ⇒ Usage 帧先于 Done 帧）；[DONE] 是 Chat 形
-// 哨兵，出现时容忍（真机流无 [DONE]，见 TestOllamaCompatStreamRealResponses）。
-// 错误实现会红：不收口 ⇒ collectFrames 挂起/报错 ⇒ 红；usage 丢失 ⇒ 断言红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaCompatStreamDoneSentinel -v
 func TestOllamaCompatStreamDoneSentinel(t *testing.T) {
 	const body = "" +
 		"event: response.output_text.delta\n" +
@@ -451,25 +282,5 @@ func TestOllamaCompatStreamRealResponses(t *testing.T) {
 	}
 	if frames[len(frames)-1].Status != core.StatusCompleted {
 		t.Fatalf("Done.Status = %q，期望 completed", frames[len(frames)-1].Status)
-	}
-}
-
-// TestOllamaParseUsageRealSample 钉住真实样本（排障实录贴真机响应 Ollama 0.40.14 + 官方文档示例，
-// 来源见 testdata/real/README.md）上 ParseUsage 归一成立：
-// prompt_eval_count=40 是总输入（含命中）⇒ Uncached = 40 − 24 = 16（⛔ 不能拿 prompt_eval_count 当未缓存量）；
-// 官方示例无 prompt_eval_cached_count ⇒ Read=0、Uncached=11；两者都无总值原报 ⇒ Total=0。
-// 错误实现会红：Uncached=40 ≠ 16 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOllamaParseUsageRealSample -v
-func TestOllamaParseUsageRealSample(t *testing.T) {
-	a := NewOllama(http.DefaultClient)
-	u := a.ParseUsage(loadFixture(t, "real/ollama_usage_real.json"))
-	if u.InputTokens != 40 || u.CacheReadTokens != 24 || u.InputTokensUncached != 16 || u.OutputTokens != 10 || u.TotalTokens != 0 {
-		t.Fatalf("真机样本归一 = In%d/Read%d/Unc%d/Out%d/Total%d，期望 40/24/16/10/0（样本逐字）",
-			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens, u.TotalTokens)
-	}
-	u = a.ParseUsage(loadFixture(t, "real/ollama_usage_docs.json"))
-	if u.InputTokens != 11 || u.CacheReadTokens != 0 || u.InputTokensUncached != 11 || u.OutputTokens != 18 {
-		t.Fatalf("文档样本归一 = In%d/Read%d/Unc%d/Out%d，期望 11/0/11/18（样本逐字）",
-			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens)
 	}
 }

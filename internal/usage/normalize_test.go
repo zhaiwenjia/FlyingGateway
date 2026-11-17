@@ -103,19 +103,6 @@ func TestNormalizeDeepSeekCacheHitDedup(t *testing.T) {
 	}
 }
 
-// TestNormalizeOllamaNative 钉住 Ollama 平铺口径（11.1「Ollama 平铺」）：
-// prompt_eval_count=26, prompt_eval_cached_count=13 ⇒ InputTokens=26、CacheRead=13、Uncached=13、
-// eval_count=13 ⇒ Output=13。缓存命中不减少 prompt_eval_count（4.4.3 Ollama 的坑）。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -run TestNormalizeOllamaNative -v
-func TestNormalizeOllamaNative(t *testing.T) {
-	u := Normalize(core.ProviderOllama, core.APIShapeOllamaNative,
-		json.RawMessage(`{"prompt_eval_count":26,"prompt_eval_cached_count":13,"eval_count":13}`))
-	if u.InputTokens != 26 || u.CacheReadTokens != 13 || u.InputTokensUncached != 13 || u.OutputTokens != 13 {
-		t.Fatalf("Ollama 平铺归一不对：Input=%d(26) Read=%d(13) Uncached=%d(13) Output=%d(13)",
-			u.InputTokens, u.CacheReadTokens, u.InputTokensUncached, u.OutputTokens)
-	}
-}
-
 // TestNormalizeGeminiThoughts 钉住 Gemini thoughts 口径（3.2 Gemini 行 / 11.1「Gemini 含 thoughts」）：
 // OutputTokens = candidatesTokenCount + thoughtsTokenCount（thoughts 独立加项、⛔ 不含在 candidates 内、
 // ⛔ 不重复加）；InputTokens = promptTokenCount + toolUsePromptTokenCount；TotalTokens 保留原报 ⛔ 不重算。
@@ -150,7 +137,7 @@ func TestNormalizeGeminiThoughts(t *testing.T) {
 // TestNormalizeMiniMaxNoCache 钉住 MiniMax 无缓存字段 ⇒ 读写记 0（任务书 MiniMax 条 / 3.2 MiniMax 行）。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -run TestNormalizeMiniMaxNoCache -v
 func TestNormalizeMiniMaxNoCache(t *testing.T) {
-	u := Normalize(core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2,
+	u := Normalize(core.ProviderMiniMax, core.APIShapeOpenAIChat,
 		json.RawMessage(`{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"total_characters":999}`))
 	if u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 {
 		t.Fatalf("MiniMax 无缓存字段 ⇒ 读写记 0：Read=%d Write=%d", u.CacheReadTokens, u.CacheWriteTokens)
@@ -328,17 +315,6 @@ func TestNormalizeOllamaV1(t *testing.T) {
 	}
 }
 
-// TestNormalizeQwenNative 钉住 Qwen 原生口径（4.4.2 Qwen 原生行：usage.input_tokens / output_tokens，无缓存记 0）。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -run TestNormalizeQwenNative -v
-func TestNormalizeQwenNative(t *testing.T) {
-	u := Normalize(core.ProviderQwen, core.APIShapeQwenNative,
-		json.RawMessage(`{"input_tokens":700,"output_tokens":35,"total_tokens":735}`))
-	if u.InputTokens != 700 || u.OutputTokens != 35 || u.CacheReadTokens != 0 || u.CacheWriteTokens != 0 {
-		t.Fatalf("Qwen 原生归一不对：Input=%d(700) Output=%d(35) Read=%d(0) Write=%d(0)",
-			u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens)
-	}
-}
-
 // TestNormalizeParseFailure 钉住解析失败口径（任务书：解析失败不 panic、返回 Estimated=true 的保守结果、
 // Raw 保留原文）。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/usage/ -run TestNormalizeParseFailure -v
@@ -431,11 +407,8 @@ var realSampleCases = []realSample{
 	{"zhipu", "zhipu_usage.json", core.ProviderZhipu, core.APIShapeOpenAIChat, 1075, 1024, 0, 51, 241, 0, 1316},
 	// qwen_compat_usage.json（官方文档示例）：命中 2048、无写入 ⇒ Uncached=971（隐式缓存档）。
 	{"qwen-compat", "qwen_compat_usage.json", core.ProviderQwen, core.APIShapeOpenAIChat, 3019, 2048, 0, 971, 104, 0, 3123},
-	// qwen_native_usage.json（官方文档示例）：⚠️ 2026-11-14 实测修正——原生样本带
-	// prompt_tokens_details.cached_tokens=2048，有字段就解析 ⇒ Read=2048、Uncached=971。
-	{"qwen-native", "qwen_native_usage.json", core.ProviderQwen, core.APIShapeQwenNative, 3019, 2048, 0, 971, 101, 0, 3120},
 	// minimax_usage.json（官方文档示例）：无缓存字段 ⇒ 读写 0；reasoning 214 单列；total_characters 随 Raw。
-	{"minimax", "minimax_usage.json", core.ProviderMiniMax, core.APIShapeMiniMaxNativeV2, 26, 0, 0, 26, 223, 214, 249},
+	{"minimax", "minimax_usage.json", core.ProviderMiniMax, core.APIShapeOpenAIChat, 26, 0, 0, 26, 223, 214, 249},
 	// mimo_usage_asr.json（官方文档示例）：命中 45 ⇒ Uncached = 46 − 45 = 1；seconds=4 随 Raw。
 	{"mimo-asr", "mimo_usage_asr.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 46, 45, 0, 1, 20, 0, 66},
 	// mimo_usage_audio.json（官方文档示例）：无命中 ⇒ Uncached=86；reasoning_tokens=66 入
@@ -443,11 +416,6 @@ var realSampleCases = []realSample{
 	{"mimo-audio", "mimo_usage_audio.json", core.ProviderXiaomi, core.APIShapeOpenAIChat, 86, 0, 0, 86, 98, 66, 184},
 	// grok_responses_usage.json（官方文档示例）：Responses 树；cost_in_usd_ticks=158500 随 Raw 保留。
 	{"grok-responses", "grok_responses_usage.json", core.ProviderXAI, core.APIShapeOpenAIResponses, 199, 0, 0, 199, 1, 0, 200},
-	// ollama_usage_real.json（排障实录贴真机响应）：prompt_eval_count=40 含命中 ⇒ Uncached=40−24=16；
-	// 无总值原报 ⇒ Total=0。
-	{"ollama-real", "ollama_usage_real.json", core.ProviderOllama, core.APIShapeOllamaNative, 40, 24, 0, 16, 10, 0, 0},
-	// ollama_usage_docs.json（官方文档示例）：无 prompt_eval_cached_count ⇒ Read=0、Uncached=11。
-	{"ollama-docs", "ollama_usage_docs.json", core.ProviderOllama, core.APIShapeOllamaNative, 11, 0, 0, 11, 18, 0, 0},
 }
 
 // TestNormalizeRealSamples 把 realSampleCases 逐条钉在归一化结果上
