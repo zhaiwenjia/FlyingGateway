@@ -5,7 +5,9 @@ package adapter
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -87,6 +89,20 @@ func geminiSDKParams(r *core.Request) (*genai.GenerateContentConfig, []*genai.Co
 		cfg.StopSequences = r.Stop
 	}
 	var contents []*genai.Content
+	// toolCallNames：tool_call id → 函数名。Gemini 的 FunctionResponse 只按函数名配对，
+	// 而回程 role=tool 消息携带的是合成 call id ⇒ 从同请求历史的 assistant.tool_calls
+	// 还原「id→名字」映射（解析顺序见 geminiContentOf）。
+	toolCallNames := map[string]string{}
+	for _, m := range r.Messages {
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" {
+				toolCallNames[tc.ID] = tc.Name
+			}
+			if tc.CallID != "" {
+				toolCallNames[tc.CallID] = tc.Name
+			}
+		}
+	}
 	for _, m := range r.Messages {
 		if m.Role == "system" {
 			text := contentText(m.Content)
@@ -97,7 +113,7 @@ func geminiSDKParams(r *core.Request) (*genai.GenerateContentConfig, []*genai.Co
 			}
 			continue
 		}
-		c, err := geminiContentOf(m)
+		c, err := geminiContentOf(m, toolCallNames)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -146,13 +162,19 @@ func geminiSDKParams(r *core.Request) (*genai.GenerateContentConfig, []*genai.Co
 }
 
 // geminiContentOf 映射非 system 消息（assistant ⇒ model；tool ⇒ functionResponse）。
-func geminiContentOf(m core.Message) (*genai.Content, error) {
+// toolCallNames 承载「tool_call id → 函数名」历史映射（geminiSDKParams 预扫描）。
+func geminiContentOf(m core.Message, toolCallNames map[string]string) (*genai.Content, error) {
 	role := "user"
 	if m.Role == "assistant" {
 		role = "model"
 	}
 	if m.Role == "tool" {
+		// FunctionResponse.Name 解析顺序：显式 Name → 历史映射（合成 call id ⇒ 函数名）
+		// → 旧口径兜底（ToolCallID 直接承载函数名的历史形态）。
 		name := m.Name
+		if name == "" {
+			name = toolCallNames[m.ToolCallID]
+		}
 		if name == "" {
 			name = m.ToolCallID
 		}
@@ -311,6 +333,24 @@ func mapGeminiFinish(v string) string {
 
 // geminiArgsJSON 把 functionCall.args 转为 JSON 字符串（genai.FunctionCall.Args 是
 // map[string]any ⇒ 重序列化；nil ⇒ 空串，与旧 RawMessage 缺字段同口径）。
+// newGeminiCallID 为一次 Gemini function call 合成调用级 id（call_ + 16 hex）。
+// ⚠️【修复 2026-11-17】
+// 现象：Gemini FunctionCall 协议上无调用级 id，旧实现把函数名当 ToolCallID ⇒ 同轮两个
+// 同名调用撞 id：chat 流式按 id 取号会把两次调用并成一个 index，role=tool 回配也会串。
+// 根因：Gemini 的 functionCall / FunctionResponse 只按函数名配对，协议层不存在 call_id，
+// 旧实现拿函数名补位是「单工具单调用」假设下的近似，同名并行一出现就坏。
+// 为什么这么修：出站响应侧为每个调用合成唯一 id（OutputItem 的 ID 与 CallID 同值，
+// Gemini 无双字段语义），回程 role=tool 消息经「历史 assistant.tool_calls 的 id→名字映射」
+// 还原函数名再映射 FunctionResponse（geminiContentOf）；⛔ 不选「让下游自己按名字猜」——
+// 配对是运行时相关性，猜错是静默错配。
+// 不修会怎样：并行同名工具调用的结果配错对象，harness 的 tool_call_id 配对保证被静默
+// 破坏，且错误表现为「模型拿到了别人的工具结果」这类最难归因的形态。
+func newGeminiCallID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read 在现代 Go 上不会失败（失败即 panic 兜底）
+	return "call_" + hex.EncodeToString(b[:])
+}
+
 func geminiArgsJSON(args map[string]any) string {
 	if args == nil {
 		return ""
@@ -341,8 +381,9 @@ func (a *geminiAdapter) ParseResponse(res *core.Resolution, body []byte) (*core.
 				}
 				switch {
 				case p.FunctionCall != nil:
+					id := newGeminiCallID()
 					out.OutputItems = append(out.OutputItems, core.OutputItem{
-						Type: "function_call", Name: p.FunctionCall.Name, Arguments: geminiArgsJSON(p.FunctionCall.Args),
+						Type: "function_call", ID: id, CallID: id, Name: p.FunctionCall.Name, Arguments: geminiArgsJSON(p.FunctionCall.Args),
 					})
 				case p.Text != "":
 					text += p.Text
@@ -405,9 +446,10 @@ func (d *geminiStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 				switch {
 				case p.FunctionCall != nil:
 					frames = append(frames, stream.Frame{
-						Kind: stream.FrameToolCallArgsDelta, ToolCallID: p.FunctionCall.Name,
-						// Text 载函数名（帧承载约定）：functionCall part 名字与参数同包、
-						// 无独立 call_id ⇒ ToolCallID 沿用函数名，名字同时进 Text 供消费端装配。
+						Kind: stream.FrameToolCallArgsDelta, ToolCallID: newGeminiCallID(),
+						// Text 载函数名（帧承载约定）：functionCall part 名字与参数同包。
+						// ToolCallID 用合成 id（newGeminiCallID 处有完整修复注释）——
+						// ⛔ 不再沿用函数名：同轮同名多调用会撞 id。
 						Text:      p.FunctionCall.Name,
 						Arguments: geminiArgsJSON(p.FunctionCall.Args),
 					})

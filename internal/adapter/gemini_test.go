@@ -213,14 +213,15 @@ func TestGeminiStreamNoFinishReasonIsError(t *testing.T) {
 	}
 }
 
-// TestGeminiStreamToolCallName 钉住流式工具调用名进帧（帧承载约定：FrameToolCallArgsDelta.Text
-// 载函数名）：functionCall part 的名字与参数同包 ⇒ 名字必须进工具帧 Text；Gemini 无独立
-// call_id ⇒ ToolCallID 沿用函数名（现状钉住）。
-// 错误实现会红：帧不带 Text ⇒ 找不到 Text=search 的工具帧 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiStreamToolCallName -v
-func TestGeminiStreamToolCallName(t *testing.T) {
+// TestGeminiStreamToolCallSyntheticID 钉住流式工具调用两件事（2026-11-17 契约变更）：
+// ① 帧承载约定不变：FrameToolCallArgsDelta.Text 载函数名（functionCall 名字与参数同包）；
+// ② ToolCallID 用合成 call id —— 同轮两个同名调用必须拿到不同 id（⛔ 不再沿用函数名）。
+// 错误实现会红：ToolCallID=函数名（旧口径）⇒ 同名双调用 id 相同 ⇒ distinct 断言红；
+// 帧不带 Text ⇒ Text=search 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiStreamToolCall -v
+func TestGeminiStreamToolCallSyntheticID(t *testing.T) {
 	const body = "" +
-		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":1}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5}}\n\n"
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":1}}},{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":2}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5}}\n\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(body))
@@ -236,14 +237,107 @@ func TestGeminiStreamToolCallName(t *testing.T) {
 	if cerr != nil {
 		t.Fatalf("流式终态错误: %v", cerr)
 	}
-	found := false
+	var ids []string
 	for _, f := range frames {
-		if f.Kind == stream.FrameToolCallArgsDelta && f.ToolCallID == "search" && f.Text == "search" && f.Arguments == "{\"q\":1}" {
-			found = true
+		if f.Kind != stream.FrameToolCallArgsDelta {
+			continue
+		}
+		if f.Text != "search" {
+			t.Fatalf("工具帧 Text 应载函数名 search：%+v", f)
+		}
+		if f.ToolCallID == "" || f.ToolCallID == "search" {
+			t.Fatalf("工具帧 ToolCallID 应为合成 id（非空且非函数名）：%+v", f)
+		}
+		ids = append(ids, f.ToolCallID)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("工具帧数 = %d，期望 2：%+v", len(ids), frames)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("同轮同名两调用 ToolCallID 相同 = %s（撞 id，下游配对会串）", ids[0])
+	}
+}
+
+// TestGeminiParseResponseSyntheticCallIDs 钉住非流式 function_call 的合成 call id：
+// 同轮两个同名调用 ⇒ 各自非空且互不相同，ID==CallID 同值（Gemini 无 id/call_id 双字段语义）。
+// 错误实现会红：旧实现不置 ID/CallID（全空）⇒ 非空断言红；沿用函数名 ⇒ 撞 id 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiParseResponseSyntheticCallIDs -v
+func TestGeminiParseResponseSyntheticCallIDs(t *testing.T) {
+	const body = `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":1}}},{"functionCall":{"name":"search","args":{"q":2}}}]},"finishReason":"STOP"}]}`
+	a := NewGemini(http.DefaultClient)
+	resp, err := a.ParseResponse(newGeminiResolution("https://generativelanguage.googleapis.com/v1beta"), []byte(body))
+	if err != nil {
+		t.Fatalf("ParseResponse 报错: %v", err)
+	}
+	var ids []string
+	for _, item := range resp.OutputItems {
+		if item.Type != "function_call" {
+			continue
+		}
+		if item.ID == "" || item.CallID == "" {
+			t.Fatalf("function_call item 应带合成 id（ID/CallID 非空）：%+v", item)
+		}
+		if item.ID != item.CallID {
+			t.Fatalf("Gemini 无双字段语义 ⇒ ID 应 == CallID：%+v", item)
+		}
+		if item.ID == item.Name {
+			t.Fatalf("id 不得沿用函数名（同名调用会撞）：%+v", item)
+		}
+		ids = append(ids, item.ID)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("function_call item 数 = %d，期望 2", len(ids))
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("同轮同名两调用 id 相同 = %s", ids[0])
+	}
+}
+
+// TestGeminiToolResultNameFromHistory 钉住回程 FunctionResponse.Name 的历史映射：
+// role=tool 消息只带合成 call id 时，函数名必须从同请求历史 assistant.tool_calls 还原。
+// 错误实现会红：旧实现 name=ToolCallID（call_xxx）⇒ Name 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiToolResult -v
+func TestGeminiToolResultNameFromHistory(t *testing.T) {
+	r := &core.Request{Messages: []core.Message{
+		{Role: "user", Content: []core.ContentPart{{Text: "查一下"}}},
+		{Role: "assistant", ToolCalls: []core.ToolCall{{ID: "call_a1", CallID: "call_a1", Name: "search", Arguments: `{"q":1}`, Type: "function"}}},
+		{Role: "tool", ToolCallID: "call_a1", Content: []core.ContentPart{{Text: "结果"}}},
+	}}
+	_, contents, _, err := geminiSDKParams(r)
+	if err != nil {
+		t.Fatalf("geminiSDKParams 报错: %v", err)
+	}
+	found := false
+	for _, c := range contents {
+		for _, p := range c.Parts {
+			if p.FunctionResponse != nil {
+				found = true
+				if p.FunctionResponse.Name != "search" {
+					t.Fatalf("FunctionResponse.Name = %q，期望 search（合成 id ⇒ 历史映射还原函数名）", p.FunctionResponse.Name)
+				}
+			}
 		}
 	}
 	if !found {
-		t.Fatalf("缺 ToolCallID=search 且 Text=search 的工具帧（functionCall 名字与参数同包 ⇒ 名字进 Text）：%+v", frames)
+		t.Fatalf("未生成 FunctionResponse：%+v", contents)
+	}
+}
+
+// TestGeminiToolResultLegacyNameFallback 钉住旧口径兜底：ToolCallID 直接承载函数名
+// （合成 id 之前的历史形态）时仍按其作函数名，⛔ 不因映射表缺失而专名。
+// 错误实现会红：兜底缺失 ⇒ Name 变空 ⇒ 断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestGeminiToolResultLegacy -v
+func TestGeminiToolResultLegacyNameFallback(t *testing.T) {
+	r := &core.Request{Messages: []core.Message{
+		{Role: "tool", ToolCallID: "search", Content: []core.ContentPart{{Text: "结果"}}},
+	}}
+	_, contents, _, err := geminiSDKParams(r)
+	if err != nil {
+		t.Fatalf("geminiSDKParams 报错: %v", err)
+	}
+	p := contents[0].Parts[0]
+	if p.FunctionResponse == nil || p.FunctionResponse.Name != "search" {
+		t.Fatalf("旧口径兜底失效：FunctionResponse = %+v，期望 Name=search", p.FunctionResponse)
 	}
 }
 
