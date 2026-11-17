@@ -17,6 +17,7 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/security"
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 	"github.com/zhaiwenjia/FlyingGateway/internal/usage"
+	"strconv"
 )
 
 // 本文件承载客户端侧响应装配与收口（统一 SDD 3.4 出站编码 / 3.7 终止帧 / 5.6 计费）：
@@ -228,6 +229,17 @@ func (s *Server) writeOutcome(w http.ResponseWriter, r *http.Request, h *execHan
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, string(core.ErrUpstreamError), "encode_failed", security.Redact(err.Error()))
 		return
+	}
+	// 费用响应头（接入契约出口，统一 SDD 5.6）：非流式响应可带费用，下游（如 harness）
+	// 直接记账、⛔ 不必翻日志。usage 取 h.finalUsage()（与计费日志**同一取数口** ⇒
+	// 头值与日志逐字同值；resp.Usage 不保证在所有收拢路径上回填）。
+	// ⚠️ 流式响应头在首帧已发出、费用终值在末帧才知 ⇒ 流式不带费用头（费用以计费
+	// 日志 + 末帧 usage 为准，见接入契约）。
+	if u := h.finalUsage(); u != nil && s.curRates() != nil {
+		rate := s.curRates().Lookup(h.upstreamModelName())
+		c := cost.CalculateCost(u, rate, h.startedAt)
+		w.Header().Set("X-Gateway-Cost-CNY", strconv.FormatFloat(c.CostCNY, 'f', 4, 64))
+		w.Header().Set("X-Gateway-Cost-Source", string(c.Source))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

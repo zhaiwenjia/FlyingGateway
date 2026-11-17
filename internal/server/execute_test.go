@@ -7,19 +7,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/zhaiwenjia/FlyingGateway/internal/core"
-	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/zhaiwenjia/FlyingGateway/internal/core"
+	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
 
 // 本文件是请求管线的功能测试（统一 SDD 12.1 A2 / A11 / A12 / 12.2 D2 / D3 / D5 / 11.4）：
@@ -985,5 +989,71 @@ func TestBreakerTripsAndSkipsToFallback(t *testing.T) {
 	}
 	if st := srv.breakerFor("primary").State(); st != "open" {
 		t.Fatalf("primary 熔断状态 = %s，期望 open", st)
+	}
+}
+
+// TestCostResponseHeader 钉住费用响应头（接入契约出口，统一 SDD 5.6）：非流式响应带
+// X-Gateway-Cost-CNY / X-Gateway-Cost-Source，口径与计费日志同源（同 usage/费率/计费时点）。
+// 错误实现对照：不写头 ⇒ 头断言红；费用算 0 ⇒ 数值断言红（费率取显著单价保证 4 位小数可见）。
+func TestCostResponseHeader(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	// 假上游回放真实 MiMo 样本（Responses 形 SSE）——⚠️ fixture 形状必须匹配出站 wire 形：
+	// xiaomi 出站是 Responses 形，Chat chunk 形响应会被解析成空壳（content/usage 全丢），
+	// 费用头测试会假红（2026-11-17 实测定性，与「探针请求体按协议」同族的**响应侧**教训）。
+	sample, err := os.ReadFile(filepath.Join("..", "adapter", "testdata", "real", "mimo_responses_stream_real.sse"))
+	if err != nil {
+		t.Fatalf("读真实样本失败: %v", err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sample)
+	}))
+	defer up.Close()
+	reg := writeRegistry(t, []epSpec{{
+		name: "primary", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+	}}, nil)
+	// 显著单价（1e7 元/1M）⇒ 3 输入 + 1 输出 token 的费用在 4 位小数下可见。
+	ratesPath := filepath.Join(t.TempDir(), "rates.json")
+	os.WriteFile(ratesPath, []byte(`{"usd_to_cny":7,"snapshot_date":"2026-11-13","rates":[{"model":"mimo-v2.6-flash","provider":"xiaomi","input_price_cny":10000000,"cache_read_explicit_cny":0.02,"cache_read_implicit_cny":0.02,"cache_write_cny":0.0,"cache_write_long_cny":0.0,"output_price_cny":10000000,"peak_multiplier":1.0,"input_tiers":[],"long_context_multiplier":1.0,"long_context_threshold":0,"price_valid_until":"","region":"","cache_price_unknown":false,"batch_discount":0,"local_deployment":false,"context_window":1000000,"currency":"CNY","price_source":"OfficialCNY","snapshot_date":"2026-11-13"}]}`), 0o600)
+	rates, err := cost.LoadRates(ratesPath)
+	if err != nil {
+		t.Fatalf("费率表加载失败: %v", err)
+	}
+	srv, err := New(Options{
+		Registry:            reg,
+		Rates:               rates,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	t.Logf("M-DEBUG body: %s", body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	costStr := resp.Header.Get("X-Gateway-Cost-CNY")
+	if costStr == "" {
+		t.Fatal("缺 X-Gateway-Cost-CNY 响应头（费用契约出口）")
+	}
+	costVal, err := strconv.ParseFloat(costStr, 64)
+	if err != nil || costVal <= 0 {
+		t.Fatalf("X-Gateway-Cost-CNY = %q，期望可解析且 > 0（3 输入 + 1 输出 token × 1e7 元/1M）", costStr)
+	}
+	if src := resp.Header.Get("X-Gateway-Cost-Source"); src != "provider_reported" && src != "estimated" && src != "unknown" {
+		t.Fatalf("X-Gateway-Cost-Source = %q，期望三值之一", src)
 	}
 }
