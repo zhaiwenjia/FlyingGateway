@@ -1077,7 +1077,7 @@ func (a *anthropicAdapter) StreamStart(ctx context.Context, r *core.Request, res
 		option.WithBaseURL(res.BaseURL),
 		option.WithHTTPClient(a.hc),
 		option.WithHeader("anthropic-version", "2026-10-21"),
-		option.WithMaxRetries(0), // ⛔ 适配器层不重试（7.4：重试与降级由网关层分别计数）
+		option.WithMaxRetries(0), // ⛔ 适配器层不重试（gateway 不重试，模型调用重试由 harness 系统控制）
 		option.WithMiddleware(wire.middleware()),
 	)
 	st := client.Messages.NewStreaming(ctx, params)

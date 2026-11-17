@@ -76,13 +76,12 @@ func TestPoolPickSkipsCooledTokens(t *testing.T) {
 
 // TestUpstreamTokenRotationOn429 断言限流轮换（本任务核心）：
 // 自有令牌 tok-A 被上游 429 ⇒ 自动换未限流的 tok-B 重打并成功；
-// max_retries=0 ⇒ 轮换 ⛔ 不吃重试预算（独立机制）。
+// 轮换是独立机制（gateway 不重试，模型调用重试由 harness 系统控制）。
 func TestUpstreamTokenRotationOn429(t *testing.T) {
 	t.Setenv("TEST_KEY_POOL", "tok-A,tok-B")
 	e := newEnv(t, func(base string) []epSpec {
 		ep := primaryEP(base)
 		ep.credRef = "TEST_KEY_POOL"
-		ep.maxRetries = 0 // 轮换必须不吃重试预算
 		return []epSpec{ep}
 	}, nil, nil)
 	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
@@ -112,7 +111,6 @@ func TestAllTokensLimitedPicksShortestWait(t *testing.T) {
 	e := newEnv(t, func(base string) []epSpec {
 		ep := primaryEP(base)
 		ep.credRef = "TEST_KEY_POOL"
-		ep.maxRetries = 0
 		return []epSpec{ep}
 	}, nil, nil)
 	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
@@ -155,7 +153,6 @@ func TestAllTokensLimitedWaitExceedsCap(t *testing.T) {
 	e := newEnv(t, func(base string) []epSpec {
 		ep := primaryEP(base)
 		ep.credRef = "TEST_KEY_POOL"
-		ep.maxRetries = 0
 		return []epSpec{ep}
 	}, nil, func(o *Options) {
 		o.MaxTokenWait = 100 * time.Millisecond

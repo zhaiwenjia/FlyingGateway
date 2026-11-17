@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	mrand "math/rand" // 仅退避抖动用（⛔ 不做路由/限流决策，统一 SDD 24 可复现口径不受影响）
 	"net/http"
 	"strconv"
 	"strings"
@@ -198,7 +197,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	defer stopWatch()
 
 	// 11. 执行（恒流式：stream 参数只决定客户端侧返回形态，统一 SDD 3.7）。
-	s.runWithRetries(w, r, h, req, mode, ep, &res, ad, int64(estInput+outCap))
+	s.runAttempts(w, r, h, req, mode, ep, &res, ad, int64(estInput+outCap))
 }
 
 // clientRequestID 取客户端提供的本轮唯一标识；未提供则生成（统一 SDD 6.5）。
@@ -563,7 +562,7 @@ func (s *Server) handleContextExceeded(w http.ResponseWriter, r *http.Request, h
 		nres.SupportsPreviousResponseID = nad.SupportsPreviousResponseID()
 		*res = nres
 		// 降级目标作为本轮主执行（上下文专用链，独立于通用降级链）。
-		s.runWithRetries(w, r, h, req, mode, next, res, nad, int64(estInput+outCap))
+		s.runAttempts(w, r, h, req, mode, next, res, nad, int64(estInput+outCap))
 		return
 	}
 	s.writeDetail(w, gwerrors.New(core.ErrContextExceeded, http.StatusBadRequest, "context_exceeded", security.Redact(ctxErr.Error())))
@@ -571,16 +570,18 @@ func (s *Server) handleContextExceeded(w http.ResponseWriter, r *http.Request, h
 
 // ---- 执行（恒流式 + 重试 / 降级分列，统一 SDD 3.7 / 7.4 / 7.5）----
 
-// runWithRetries 执行上游调用。尝试族三类分开计数、⛔ 不合成兜底循环（统一 SDD 7.4 + 令牌轮换）：
-//   - 令牌轮换（同端点换自有令牌，⛔ 不吃 Endpoint.MaxRetries 预算）：上游 429 且池内
-//     还有未冷却令牌 ⇒ 换令牌重打；轮换上界 = 池大小（每令牌每轮至多一次）；
-//   - 重试（同端点，上限 Endpoint.MaxRetries）；
+// runAttempts 执行上游调用。尝试族两类分开、⛔ 不合成兜底循环（统一 SDD 7.4 + 令牌轮换）：
+//   - 令牌轮换（同端点换自有令牌）：上游 429 且池内还有未冷却令牌 ⇒ 换令牌重打；
+//     轮换上界 = 池大小（每令牌每轮至多一次）；
 //   - 降级（换端点，上限 = 降级链长度，routing.SelectChain 显式分链）。
 //
-// 取消 ⇒ 立即收口，⛔ 不触发任何一族（7.5，SC-5）；重试 / 轮换 / 降级只在
+// ⛔ 同端点重试已移除：gateway 不做模型调用重试，重试由 harness 系统控制 ——
+// 失败原样返回（HTTP 状态码 + Retry-After 头），由 harness 决定是否重发。
+//
+// 取消 ⇒ 立即收口，⛔ 不触发任何一族（7.5，SC-5）；轮换 / 降级只在
 // 「尚未向客户端提交」时进行（流式转发后重放会向客户端发重复内容）。
-// span 按端点持有：重试与令牌轮换合并进同一 span，降级换端点才另起（统一 SDD 6.2）。
-func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, mode inboundMode, ep *registry.Endpoint, res *core.Resolution, ad adapter.Adapter, est int64) {
+// span 按端点持有：令牌轮换合并进同一 span，降级换端点才另起（统一 SDD 6.2）。
+func (s *Server) runAttempts(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, mode inboundMode, ep *registry.Endpoint, res *core.Resolution, ad adapter.Adapter, est int64) {
 	var counters routing.AttemptCounters
 	var rotations int
 	brk := s.breakerFor(ep.Name)
@@ -628,28 +629,16 @@ func (s *Server) runWithRetries(w http.ResponseWriter, r *http.Request, h *execH
 			s.endEndpointSpan(span, h, resp, detail)
 			return
 		}
-		// 熔断跳过的尝试 ⛔ 不轮换、⛔ 不重试（端点在冷却中，同端点重打没有意义），直接走降级。
-		if detail.Code != codeEndpointCooling {
-			// 令牌轮换（同端点换自有令牌）：上游 429 且池内仍有未冷却令牌 ⇒ 直接换令牌重打。
-			// token_pool_exhausted 是本地池闸（无令牌可换）⇒ 不轮换、不重试。
-			if detail.Category == core.ErrRateLimit && detail.Code != codeTokenPoolExhausted &&
-				rotations < s.poolSize(ep.CredentialRef) && s.poolHasUncool(ep.CredentialRef) {
-				rotations++
-				continue
-			}
-			retryable := detail.Category == core.ErrRateLimit || detail.Category == core.ErrTimeout || detail.Category == core.ErrUpstreamError
-			if retryable && detail.Code != codeTokenPoolExhausted && counters.RetryCount < ep.MaxRetries {
-				counters.RecordRetry()
-				// 同端点重试前退避（统一 SDD 7.4）：5xx / 超时无恢复信号 ⇒ 截断指数退避 + 抖动
-				// 给上游喘息、防同步重试风暴；429 ⛔ 不在此退避（Retry-After / 默认冷却已由
-				// 令牌池承载等待，叠加退避 = 同一限流事件双重等待）。等待中被取消 ⇒ 取消收口。
-				if werr := s.waitBeforeRetry(h, ep, detail.Category, counters.RetryCount); werr != nil {
-					s.endEndpointSpan(span, h, nil, gwerrors.New(core.ErrCancelled, 499, "cancelled", "执行已取消"))
-					s.writeOutcome(w, r, h, req, mode, nil, nil, true)
-					return
-				}
-				continue // 同端点重试（级内）
-			}
+		// 熔断跳过的尝试 ⛔ 不轮换（端点在冷却中，同端点重打没有意义），直接走降级。
+		// 令牌轮换（同端点换自有令牌）：上游 429 且池内仍有未冷却令牌 ⇒ 直接换令牌重打；
+		// token_pool_exhausted 是本地池闸（无令牌可换）⇒ 不轮换。
+		// ⛔ 同端点重试已移除（gateway 不重试，模型调用重试由 harness 系统控制）：
+		// 失败原样进降级 / 最终错误，HTTP 状态码与 Retry-After 头供 harness 决策重试。
+		if detail.Code != codeEndpointCooling &&
+			detail.Category == core.ErrRateLimit && detail.Code != codeTokenPoolExhausted &&
+			rotations < s.poolSize(ep.CredentialRef) && s.poolHasUncool(ep.CredentialRef) {
+			rotations++
+			continue
 		}
 		kind := failureKind(detail.Category)
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
@@ -705,24 +694,6 @@ func (s *Server) breakerFor(name string) *EndpointBreaker {
 		return b
 	}
 	return NewEndpointBreaker(name, 0, 0, 0, s.logger)
-}
-
-// waitBeforeRetry 在同端点重试前等待（统一 SDD 7.4 退避口径）：
-//   - 429（rate_limit）⇒ 不退避：Retry-After / 默认冷却已由令牌池承载等待语义
-//     （respect Retry-After 优先于自算退避），⛔ 同一限流事件不叠双重等待；
-//   - timeout / upstream_error ⇒ 截断指数退避 + 抖动（第 attempt 次重试，
-//     min(Base·2^(attempt-1) + U[0,Jitter), Cap)，Google Cloud 推荐算法）。
-//
-// 返回非 nil = 等待期间被取消（ctx done），调用方走取消收口（⛔ 不再重试，SC-5）。
-// 错误分类若将来新增可重试类，⛔ 不默认套退避 —— 先明确其等待语义再进本分支。
-func (s *Server) waitBeforeRetry(h *execHandle, ep *registry.Endpoint, cat core.ErrorCategory, attempt int) error {
-	if cat == core.ErrRateLimit {
-		return nil
-	}
-	wait := s.retryBackoff.Wait(attempt, mrand.Float64)
-	s.logger.Info("同端点重试退避",
-		"endpoint", ep.Name, "retry_attempt", attempt, "wait_ms", wait.Milliseconds(), "error", string(cat))
-	return waitSleep(h.ctx, wait)
 }
 
 // poolSize 返回端点凭据池的令牌数（轮换上界；解析失败 ⇒ 0）。
@@ -790,7 +761,7 @@ func failureKind(cat core.ErrorCategory) routing.FailureKind {
 	}
 }
 
-// runEndpoint 执行一次上游调用（⛔ 不自建 span —— span 由 runWithRetries 按端点持有，
+// runEndpoint 执行一次上游调用（⛔ 不自建 span —— span 由 runAttempts 按端点持有，
 // 自动重试 / 令牌轮换合并进同一 span，统一 SDD 6.2）：
 // 网关→上游恒流式（StreamStart）；stream=true 转发帧给客户端、stream=false 收完帧装配完整响应。
 // 返回装配响应（失败 / 取消时为已收部分）+ 降级标记 + 终态错误。

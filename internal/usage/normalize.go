@@ -37,21 +37,16 @@ func Normalize(provider core.Provider, shape core.APIShape, raw json.RawMessage)
 }
 
 // normalize 按 (provider, shape) 分发到逐家口径解析器。
-// shape 优先（Anthropic / Gemini / Ollama / Qwen 原生 / MiniMax 原生 V2 / Responses 由线上形状决定），
+// shape 优先（Anthropic / Gemini / Responses 由线上形状决定），
 // 其余（OpenAIChat 与未知形状）按 provider 分派；ProviderUnknown 走 OpenAI Chat 兼容形（3.3 兜底口径）。
+// ⛔ 国内供应商无原生形状分派（Qwen 原生 / MiniMax 原生 V2 / Ollama 原生已移除）——出站统一 Responses 通道。
 func normalize(provider core.Provider, shape core.APIShape, raw json.RawMessage) (*core.Usage, error) {
 	switch shape {
 	case core.APIShapeAnthropicMessages:
-		// Anthropic 形（含 MiniMax Anthropic 兼容端点）：input_tokens 是残值语义。
+		// Anthropic 形（Claude）：input_tokens 是残值语义。
 		return parseAnthropic(raw)
 	case core.APIShapeGeminiNative:
 		return parseGeminiNative(raw)
-	case core.APIShapeOllamaNative:
-		return parseOllamaNative(raw)
-	case core.APIShapeQwenNative:
-		return parseQwenNative(raw)
-	case core.APIShapeMiniMaxNativeV2:
-		return parseMiniMax(raw)
 	case core.APIShapeOpenAIResponses:
 		// Responses 形（OpenAI / Grok Responses）。Grok Responses 无缓存字段 ⇒ 解析后记 0。
 		return parseResponses(raw)
@@ -518,31 +513,6 @@ func parseGeminiNative(raw json.RawMessage) (*core.Usage, error) {
 	}, nil
 }
 
-// ollamaUsage 是 Ollama /api/chat 平铺 usage（4.4.2：缓存字段平级，非 details）。
-type ollamaUsage struct {
-	PromptEvalCount       int64 `json:"prompt_eval_count"`
-	PromptEvalCachedCount int64 `json:"prompt_eval_cached_count"`
-	EvalCount             int64 `json:"eval_count"`
-}
-
-// parseOllamaNative 按 Ollama 原生口径归一（4.4.2 / 4.4.3 Ollama 坑）：
-// prompt_eval_count 是总输入（含命中缓存部分，缓存命中不减少它）；
-// prompt_eval_cached_count ⇒ CacheRead；Uncached = 两者之差（⛔ 不能拿 prompt_eval_count 当未缓存量）；
-// eval_count ⇒ Output。Ollama 无总值原报 ⇒ TotalTokens 记 0。
-func parseOllamaNative(raw json.RawMessage) (*core.Usage, error) {
-	var v ollamaUsage
-	if err := decode(raw, &v); err != nil {
-		return nil, err
-	}
-	return &core.Usage{
-		InputTokens:         v.PromptEvalCount,
-		CacheReadTokens:     v.PromptEvalCachedCount,
-		InputTokensUncached: nonNeg(v.PromptEvalCount - v.PromptEvalCachedCount),
-		OutputTokens:        v.EvalCount,
-		CacheReadMode:       core.CacheModeImplicit, // 前缀自动缓存
-	}, nil
-}
-
 // ollamaV1Usage 是 Ollama /v1 兼容层 usage（4.4.2：OpenAI 形、无缓存明细）。
 type ollamaV1Usage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
@@ -562,42 +532,6 @@ func parseOllamaV1(raw json.RawMessage) (*core.Usage, error) {
 		OutputTokens:        v.CompletionTokens,
 		TotalTokens:         v.TotalTokens,
 		CacheReadMode:       core.CacheModeNone,
-	}, nil
-}
-
-// qwenNativeUsage 是 Qwen / DashScope 原生 usage（4.4.2 Qwen 原生行：input_tokens / output_tokens）。
-// ⚠️ 2026-11-14 实测修正：真实样本（阿里云 Context Cache 文档 Cache hit 示例）带
-// `prompt_tokens_details.cached_tokens` —— 现象：SDD 4.4.2 记「无缓存字段 ⇒ 记 0」，
-// 真实响应却有该字段、被丢后缓存命中算成全价；根因：SDD 口径按旧版响应写的；
-// 为什么这么修：字段在就解析（无字段时仍记 0，兼容旧行为），⛔ 不猜造。
-type qwenNativeUsage struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
-	PromptTokensDetails struct {
-		CachedTokens int64 `json:"cached_tokens"`
-	} `json:"prompt_tokens_details"`
-}
-
-// parseQwenNative 按 Qwen 原生口径归一（4.4.2 Qwen 原生行）：命中
-// prompt_tokens_details.cached_tokens（无该字段 ⇒ 记 0），写入记 0。
-func parseQwenNative(raw json.RawMessage) (*core.Usage, error) {
-	var v qwenNativeUsage
-	if err := decode(raw, &v); err != nil {
-		return nil, err
-	}
-	cached := v.PromptTokensDetails.CachedTokens
-	mode := core.CacheModeNone
-	if cached > 0 {
-		mode = core.CacheModeImplicit
-	}
-	return &core.Usage{
-		InputTokens:         v.InputTokens,
-		CacheReadTokens:     cached,
-		InputTokensUncached: nonNeg(v.InputTokens - cached),
-		OutputTokens:        v.OutputTokens,
-		TotalTokens:         v.TotalTokens,
-		CacheReadMode:       mode,
 	}, nil
 }
 

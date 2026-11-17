@@ -16,7 +16,6 @@
       },
       "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 30,
-      "max_retries": 2,
       "priority": 0,
       "breaker": {
         "failure_threshold": 5,
@@ -46,7 +45,6 @@
       },
       "credential_ref": "DEEPSEEK_API_KEY",
       "timeout_s": 45,
-      "max_retries": 1,
       "priority": 1
     },
     {
@@ -64,7 +62,6 @@
       },
       "credential_ref": "VLLM_API_KEY",
       "timeout_s": 60,
-      "max_retries": 0,
       "priority": 2
     },
     {
@@ -82,7 +79,6 @@
       },
       "credential_ref": "OPENAI_API_KEY",
       "timeout_s": 60,
-      "max_retries": 2,
       "priority": 0
     }
   ],

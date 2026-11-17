@@ -59,10 +59,7 @@ const (
 	APIShapeOpenAIChat
 	APIShapeOpenAIResponses
 	APIShapeAnthropicMessages
-	APIShapeGeminiNative    // generateContent / streamGenerateContent
-	APIShapeOllamaNative    // /api/chat（NDJSON）
-	APIShapeMiniMaxNativeV2 // /v1/text/chatcompletion_v2
-	APIShapeQwenNative      // /api/v1/services/aigc/text-generation/generation
+	APIShapeGeminiNative // generateContent / streamGenerateContent
 )
 
 // String 返回形状名（供 Trace gateway.shape 使用）。
@@ -76,12 +73,6 @@ func (s APIShape) String() string {
 		return "anthropic_messages"
 	case APIShapeGeminiNative:
 		return "gemini_native"
-	case APIShapeOllamaNative:
-		return "ollama_native"
-	case APIShapeMiniMaxNativeV2:
-		return "minimax_native_v2"
-	case APIShapeQwenNative:
-		return "qwen_native"
 	default:
 		return "unknown"
 	}

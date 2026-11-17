@@ -210,7 +210,7 @@ func TestUnsupportedCapabilityPreviousResponseID(t *testing.T) {
 		ds := epSpec{
 			name: "deepseek", base: base, model: "deepseek-chat", upstreamModel: "deepseek-chat",
 			provider: "deepseek", credRef: "TEST_KEY_OPENAI",
-			ctxWindow: 64000, maxOut: 4096, maxRetries: 0, priority: 1, timeoutS: 5,
+			ctxWindow: 64000, maxOut: 4096, priority: 1, timeoutS: 5,
 		}
 		return []epSpec{primaryEP(base), ds}
 	}, nil, nil)
@@ -401,22 +401,24 @@ func TestContextWindowFallbackChain(t *testing.T) {
 	}
 }
 
-// TestRetrySameEndpointThenSuccess 断言重试打同一端点、上限 = Endpoint.MaxRetries（7.4）。
-func TestRetrySameEndpointThenSuccess(t *testing.T) {
+// TestUpstreamErrorNoRetry 断言上游 5xx 后 ⛔ 不重试（gateway 不重试，模型调用重试由
+// harness 系统控制）：上游恒 500 ⇒ 客户端收到 502、上游恰好被打 1 次。
+// 错误实现对照：带同端点重试的实现会打出第 2+ 次上游请求 ⇒ 上游计数 != 1 红。
+func TestUpstreamErrorNoRetry(t *testing.T) {
 	e := newEnv(t, func(base string) []epSpec {
 		ep := primaryEP(base)
-		ep.maxRetries = 1
 		return []epSpec{ep}
 	}, nil, nil)
 	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
-	e.up.setFailFirstN(1) // 首次 500、第二次成功
+	e.up.setFailFirstN(99) // 恒 500
 
 	resp := e.postJSON("/v1/chat/completions", chatHelloBody, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("状态 = %d，期望 200（首次 500、重试成功）", resp.StatusCode)
+	// 上游 HTTP 状态码透传（errors.NewUpstream：HTTPStatus = upstreamStatus）。
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("状态 = %d，期望 500（上游状态码透传、⛔ 不重试）", resp.StatusCode)
 	}
-	if n, _, _, _ := e.up.stats(); n != 2 {
-		t.Errorf("上游调用数 = %d，期望 2（1 次失败 + 1 次重试）", n)
+	if n, _, _, _ := e.up.stats(); n != 1 {
+		t.Errorf("上游调用数 = %d，期望 1（⛔ 同端点不重试）", n)
 	}
 }
 
@@ -441,7 +443,7 @@ func TestDegradeToChainEndpoint(t *testing.T) {
 		t.Fatalf("状态 = %d，期望 200（降级到 backup）", resp.StatusCode)
 	}
 	if n, _, _, _ := e.up.stats(); n != 1 {
-		t.Errorf("主端点上游调用数 = %d，期望 1（重试上限 0）", n)
+		t.Errorf("主端点上游调用数 = %d，期望 1（gateway ⛔ 不重试）", n)
 	}
 	if n, _, _, _ := up2.stats(); n != 1 {
 		t.Errorf("backup 上游调用数 = %d，期望 1", n)
@@ -531,7 +533,7 @@ func claudeEP(base string) epSpec {
 	return epSpec{
 		name: "claude", base: base, model: "claude-3-5-sonnet", upstreamModel: "claude-3-5-sonnet",
 		provider: "anthropic", credRef: "TEST_KEY_ANTHROPIC",
-		ctxWindow: 200000, maxOut: 8192, maxRetries: 0, priority: 1, timeoutS: 5,
+		ctxWindow: 200000, maxOut: 8192, priority: 1, timeoutS: 5,
 	}
 }
 
@@ -540,7 +542,7 @@ func mimoEP(base string) epSpec {
 	return epSpec{
 		name: "mimo", base: base, model: "mimo-v2", upstreamModel: "mimo-v2",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 4096, maxRetries: 0, priority: 2, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 4096, priority: 2, timeoutS: 5,
 	}
 }
 
@@ -573,21 +575,21 @@ func splitBlocks(raw string) []string {
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/server/ -run TestAdapterDetailTimeoutRetryable -v
 func TestAdapterDetailTimeoutRetryable(t *testing.T) {
 	if d := adapterDetail(context.DeadlineExceeded); d.Category != core.ErrTimeout {
-		t.Fatalf("context.DeadlineExceeded 归类 = %s，期望 timeout（可重试）", d.Category)
+		t.Fatalf("context.DeadlineExceeded 归类 = %s，期望 timeout", d.Category)
 	}
 	if d := adapterDetail(fmt.Errorf("do request: %w", context.DeadlineExceeded)); d.Category != core.ErrTimeout {
 		t.Fatalf("包装后的超时归类 = %s，期望 timeout", d.Category)
 	}
 	if d := adapterDetail(context.Canceled); d.Category != core.ErrCancelled {
-		t.Fatalf("context.Canceled 归类 = %s，期望 cancelled（⛔ 不重试）", d.Category)
+		t.Fatalf("context.Canceled 归类 = %s，期望 cancelled", d.Category)
 	}
 }
 
-// TestTimeoutRetriedThenSucceeds 端到端钉住「成功率恒 100%」口径：上游首请求卡满超时、
-// 同端点重试成功 ⇒ 客户端拿到 200、上游恰好被打 2 次、RetryCount 计数分离。
-// 错误实现对照：超时不重试（误分类回归）⇒ 首试即失败、上游只被打 1 次 ⇒ 红。
-// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/server/ -run TestTimeoutRetriedThenSucceeds -v
-func TestTimeoutRetriedThenSucceeds(t *testing.T) {
+// TestTimeoutNoRetry 端到端钉住「gateway ⛔ 不重试」口径：上游首请求卡满超时（TimeoutS=1）⇒
+// 网关一次即回失败、上游恰好被打 1 次（模型调用重试由 harness 系统控制）。
+// 错误实现对照：带同端点重试的实现会打出第 2 次上游请求 ⇒ calls != 1 红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/server/ -run TestTimeoutNoRetry -v
+func TestTimeoutNoRetry(t *testing.T) {
 	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
 	const okChunk = "" +
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
@@ -607,7 +609,7 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 	reg := writeRegistry(t, []epSpec{{
 		name: "flaky", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 1, priority: 0, timeoutS: 1,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 1,
 	}}, nil)
 	srv, err := New(Options{
 		Registry:            reg,
@@ -615,7 +617,6 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 		Metrics:             telemetry.NewMetrics(),
 		AllowLoopbackEgress: true,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("server.New 失败: %v", err)
@@ -629,70 +630,11 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		t.Fatalf("重试后应 200（成功率恒 100%% 口径），实际 %d：%s", resp.StatusCode, body[:200])
+	if resp.StatusCode == 200 {
+		t.Fatalf("上游恒卡超时 ⇒ 客户端不应拿到 200（gateway ⛔ 不重试），body: %s", body[:200])
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("上游调用 = %d，期望 2（首试超时 + 重试成功）", got)
-	}
-}
-
-// TestRetryBackoffAppliedOnUpstreamError 钉住「同端点重试前指数退避」（统一 SDD 7.4）：
-// 上游 5xx 两次后成功、max_retries=2 ⇒ 重试前各等 Base·2^(n-1)（50ms + 100ms）、
-// 上游恰好被打 3 次、客户端 200。
-// 错误实现对照：无退避 ⇒ elapsed < 150ms 红；不重试 ⇒ calls != 3 红。
-func TestRetryBackoffAppliedOnUpstreamError(t *testing.T) {
-	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
-	const okChunk = "" +
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
-		"data: [DONE]\n\n"
-	var calls int32
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) <= 2 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, okChunk)
-	}))
-	defer up.Close()
-	reg := writeRegistry(t, []epSpec{{
-		name: "flaky", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
-		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 2, priority: 0, timeoutS: 5,
-	}}, nil)
-	srv, err := New(Options{
-		Registry:            reg,
-		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
-		Metrics:             telemetry.NewMetrics(),
-		AllowLoopbackEgress: true,
-		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		// Jitter=0 保持确定性：n=1 ⇒ 50ms、n=2 ⇒ 100ms ⇒ 总退避 150ms。
-		RetryBackoff: Backoff{Base: 50 * time.Millisecond, Jitter: 0, Cap: 200 * time.Millisecond},
-	})
-	if err != nil {
-		t.Fatalf("server.New 失败: %v", err)
-	}
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	start := time.Now()
-	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
-	if err != nil {
-		t.Fatalf("请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("退避重试后应 200，实际 %d：%s", resp.StatusCode, body[:200])
-	}
-	if got := atomic.LoadInt32(&calls); got != 3 {
-		t.Fatalf("上游调用 = %d，期望 3（两次 500 + 重试成功）", got)
-	}
-	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
-		t.Fatalf("端到端耗时 %v < 150ms —— 重试前未按 50ms+100ms 退避", elapsed)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("上游调用 = %d，期望 1（⛔ 同端点不重试，模型调用重试由 harness 控制）", got)
 	}
 }
 
@@ -928,13 +870,13 @@ func TestBreakerTripsAndSkipsToFallback(t *testing.T) {
 		{
 			name: "primary", base: primary.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 			breaker: map[string]any{"failure_threshold": 1, "cooldown_s": 30},
 		},
 		{
 			name: "backup", base: backup.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
 			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 1, timeoutS: 5,
+			ctxWindow: 128000, maxOut: 1024, priority: 1, timeoutS: 5,
 		},
 	}, map[string][]string{
 		"general":        {"backup"},
@@ -946,7 +888,6 @@ func TestBreakerTripsAndSkipsToFallback(t *testing.T) {
 		Metrics:             telemetry.NewMetrics(),
 		AllowLoopbackEgress: true,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("server.New 失败: %v", err)
@@ -1012,7 +953,7 @@ func TestCostResponseHeader(t *testing.T) {
 	reg := writeRegistry(t, []epSpec{{
 		name: "primary", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
-		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}}, nil)
 	// 显著单价（1e7 元/1M）⇒ 3 输入 + 1 输出 token 的费用在 4 位小数下可见。
 	ratesPath := filepath.Join(t.TempDir(), "rates.json")

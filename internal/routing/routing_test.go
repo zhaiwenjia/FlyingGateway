@@ -239,19 +239,12 @@ func TestParseFailureKind(t *testing.T) {
 	}
 }
 
-// TestAttemptCountersSeparate 断言重试与降级分开计数（统一 SDD 11.3
-// 「重试与降级分别计数」行）：同一端点重试 2 次 + 降级到另一端点 ⇒
-// RetryCount=2、FallbackCount=1，⛔ 不混成 3。
-// 对照点：实现只留一个合计计数器 ⇒ 断言字段不存在，编译失败（类型层面就混不了）。
-func TestAttemptCountersSeparate(t *testing.T) {
+// TestAttemptCountersFallback 断言降级计数：降级换端点记一次（统一 SDD 7.4）。
+// 同端点重试已移除（gateway 不重试，模型调用重试由 harness 系统控制），计数器只有级内项。
+func TestAttemptCountersFallback(t *testing.T) {
 	var c AttemptCounters
-	c.RecordRetry()
-	c.RecordRetry()
 	c.RecordFallback()
-	if c.RetryCount != 2 {
-		t.Errorf("RetryCount = %d, want 2（⛔ 与降级不混）", c.RetryCount)
-	}
 	if c.FallbackCount != 1 {
-		t.Errorf("FallbackCount = %d, want 1（⛔ 与重试不混）", c.FallbackCount)
+		t.Errorf("FallbackCount = %d, want 1", c.FallbackCount)
 	}
 }

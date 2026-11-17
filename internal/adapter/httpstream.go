@@ -44,9 +44,6 @@ func streamRequest(ctx context.Context, hc *http.Client, p core.Provider, out *O
 // finished=true 表示终态事件已到（后续帧发完即收口）。
 type frameDecoder func(ev stream.SSEEvent) (frames []stream.Frame, finished bool, err error)
 
-// lineDecoder 是 NDJSON 帧解码器（Ollama 原生流，4.3.6）。
-type lineDecoder func(line []byte) (frames []stream.Frame, finished bool, err error)
-
 // endCheck 是流自然结束后的完整性检查（如 Gemini 流结束无 finishReason ⇒ 按错误处理，3.7）。
 type endCheck func() error
 
@@ -121,81 +118,6 @@ func (it *sseIter) Err() error { return it.err }
 // Release 安全性：close 只在终态路径调用；bufio.Scanner 在 EOF/出错后再 Scan
 // 不会向缓冲读写（GOROOT bufio/scan.go：s.err != nil 直接短路），⛔ 不会串流数据。
 func (it *sseIter) close() {
-	if !it.closed {
-		it.closed = true
-		_ = it.body.Close()
-		it.sc.Release() // 缓冲归还池（可省略走 GC；此处调用以复用 64KB 初始缓冲）
-	}
-}
-
-// ndjsonIter 是 NDJSON 流式帧迭代器（Ollama 原生流，4.3.6：application/x-ndjson，⛔ 非 SSE、⛔ 无 [DONE]）。
-type ndjsonIter struct {
-	ctx     context.Context
-	body    io.ReadCloser
-	sc      *stream.NDJSONScanner
-	decode  lineDecoder
-	endChk  endCheck
-	queue   []stream.Frame
-	cur     stream.Frame
-	err     error
-	stop    bool
-	closed  bool
-	seqAuto int64
-}
-
-func newNDJSONIter(ctx context.Context, body io.ReadCloser, decode lineDecoder, endChk endCheck) *ndjsonIter {
-	return &ndjsonIter{ctx: ctx, body: body, sc: stream.NewNDJSONScanner(body), decode: decode, endChk: endChk}
-}
-
-// Next 推进到下一帧；流结束或出错返回 false（此时关闭 body）。
-func (it *ndjsonIter) Next() bool {
-	for len(it.queue) == 0 {
-		if it.stop {
-			it.close()
-			return false
-		}
-		if err := it.ctx.Err(); err != nil {
-			it.err = err
-			it.close()
-			return false
-		}
-		if !it.sc.Scan() {
-			if e := it.sc.Err(); e != nil {
-				it.err = e
-			} else if it.endChk != nil {
-				it.err = it.endChk()
-			}
-			it.close()
-			return false
-		}
-		frames, finished, err := it.decode(it.sc.Line())
-		if err != nil {
-			it.err = err
-			it.close()
-			return false
-		}
-		for i := range frames {
-			it.seqAuto++
-			if frames[i].Seq == 0 {
-				frames[i].Seq = it.seqAuto
-			}
-		}
-		it.queue = frames
-		it.stop = finished
-	}
-	it.cur = it.queue[0]
-	it.queue = it.queue[1:]
-	return true
-}
-
-// Frame 返回当前帧。
-func (it *ndjsonIter) Frame() stream.Frame { return it.cur }
-
-// Err 返回终态错误（nil 表示正常结束）。
-func (it *ndjsonIter) Err() error { return it.err }
-
-// close 关闭上游 body 并归还扫描缓冲；幂等（Release 安全性口径同 sseIter.close）。
-func (it *ndjsonIter) close() {
 	if !it.closed {
 		it.closed = true
 		_ = it.body.Close()

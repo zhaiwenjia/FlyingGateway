@@ -25,11 +25,9 @@ var shapeRules = []struct {
 }{
 	{":streamGenerateContent", core.APIShapeGeminiNative},
 	{":generateContent", core.APIShapeGeminiNative},
-	{"/v1/text/chatcompletion_v2", core.APIShapeMiniMaxNativeV2},
 	{"/chat/completions", core.APIShapeOpenAIChat},
 	{"/responses", core.APIShapeOpenAIResponses},
 	{"/messages", core.APIShapeAnthropicMessages},
-	{"/api/chat", core.APIShapeOllamaNative},
 }
 
 // shapeFromPath 按 path 后缀判定 shape（统一 SDD 3.3 step 4）。

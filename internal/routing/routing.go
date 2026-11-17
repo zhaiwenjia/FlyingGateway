@@ -109,19 +109,13 @@ func SelectChain(chains map[FailureKind][]string, primary string, kind FailureKi
 	return out, nil
 }
 
-// AttemptCounters 是重试与降级的分开计数（统一 SDD 7.4 基本口径）：
-// 重试打同一端点（级内）、降级换端点（级间），两者次数必须分别有上限、各自计数，
-// ⛔ 不混成一个数（统一 SDD 11.3：同端点重试 2 次 + 降级 1 次 ⇒ RetryCount=2、
-// FallbackCount=1，⛔ 不混成 3）。
+// AttemptCounters 是降级次数计数（统一 SDD 7.4）：降级换端点（级间），上限 = 降级链长度。
+// 同端点重试已移除（gateway ⛔ 不重试，模型重试由 harness 系统控制），
+// 计数器不再有级内计数项。
 type AttemptCounters struct {
-	// RetryCount 是重试次数（打同一端点）。
-	RetryCount int
 	// FallbackCount 是降级次数（换端点）。
 	FallbackCount int
 }
-
-// RecordRetry 记一次重试（打同一端点）。
-func (c *AttemptCounters) RecordRetry() { c.RetryCount++ }
 
 // RecordFallback 记一次降级（换端点）。
 func (c *AttemptCounters) RecordFallback() { c.FallbackCount++ }

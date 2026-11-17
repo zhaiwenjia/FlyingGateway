@@ -195,18 +195,24 @@ func TestSC4_NoFramesAfterCancel(t *testing.T) {
 	}
 }
 
-// TestSC5_CancelSuppressesRetryAndRejectsID 断言 SC-5：取消不触发重试 / 降级
-// （上游请求计数保持 1）；同 client_request_id 的后续尝试被拒（409）。
-// 判别力：MaxRetries=2 + 取消引发的传输中断属可重试类 ⇒ 无抑制的实现会打出第 2 次上游请求。
-func TestSC5_CancelSuppressesRetryAndRejectsID(t *testing.T) {
+// TestSC5_CancelSuppressesFallbackAndRejectsID 断言 SC-5：取消不触发令牌轮换 / 降级
+// （primary 请求计数保持 1、backup 为 0）；同 client_request_id 的后续尝试被拒（409）。
+// 判别力：取消引发的传输中断属可重试类（upstream_error）+ 降级链 upstream_error → backup ⇒
+// 无取消抑制的实现会降级打 backup ⇒ backup 计数非 0 红。
+func TestSC5_CancelSuppressesFallbackAndRejectsID(t *testing.T) {
+	up2 := newFakeUpstream(t)
+	t.Cleanup(up2.close)
+	up2.setEvents(loadSSE(t, "openai_responses_stream.sse"))
 	e := newEnv(t, func(base string) []epSpec {
-		ep := primaryEP(base)
-		ep.maxRetries = 2
-		return []epSpec{ep}
-	}, nil, nil)
+		primary := primaryEP(base)
+		backup := primaryEP(up2.srv.URL)
+		backup.name = "backup"
+		backup.priority = 1
+		return []epSpec{primary, backup}
+	}, map[string][]string{"upstream_error": {"backup"}}, nil)
 	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse")[:2])
 
-	// 非流式路径：帧已收未转发 ⇒ 重试可行域（错误实现会在取消后重试）。
+	// 非流式路径：帧已收未转发 ⇒ 降级可行域（无取消抑制的实现在取消后降级打 backup）。
 	s := dialRaw(t, e.http.URL)
 	host := strings.TrimPrefix(e.http.URL, "http://")
 	s.send(t, "/v1/chat/completions", host,
@@ -220,7 +226,10 @@ func TestSC5_CancelSuppressesRetryAndRejectsID(t *testing.T) {
 	}
 	n1, _, _, _ := e.up.stats()
 	if n1 != 1 {
-		t.Errorf("上游请求计数 = %d，期望 1（⛔ 取消不触发重试 / 降级，SC-5）", n1)
+		t.Errorf("primary 上游请求计数 = %d，期望 1（⛔ 取消不触发轮换 / 降级，SC-5）", n1)
+	}
+	if nb, _, _, _ := up2.stats(); nb != 0 {
+		t.Errorf("backup 上游请求计数 = %d，期望 0（⛔ 取消不触发降级，SC-5）", nb)
 	}
 
 	// 同 id 后续尝试必须被拒（取消终态不可回退）。
@@ -235,7 +244,7 @@ func TestSC5_CancelSuppressesRetryAndRejectsID(t *testing.T) {
 	}
 	n2, _, _, _ := e.up.stats()
 	if n2 != 1 {
-		t.Errorf("被拒后上游请求计数 = %d，期望仍为 1", n2)
+		t.Errorf("被拒后 primary 上游请求计数 = %d，期望仍为 1", n2)
 	}
 }
 
@@ -324,7 +333,6 @@ func TestSC8_CancelReasonsDistinguishable(t *testing.T) {
 	t.Run("upstream_error", func(t *testing.T) {
 		e := newEnv(t, func(base string) []epSpec {
 			ep := primaryEP(base)
-			ep.maxRetries = 0
 			return []epSpec{ep}
 		}, nil, nil)
 		e.up.setEvents(loadSSE(t, "openai_responses_failed.sse")) // 1 分片后 response.failed
@@ -346,7 +354,6 @@ func TestSC8_CancelReasonsDistinguishable(t *testing.T) {
 		e := newEnv(t, func(base string) []epSpec {
 			ep := primaryEP(base)
 			ep.timeoutS = 0.3
-			ep.maxRetries = 0
 			return []epSpec{ep}
 		}, nil, nil)
 		e.up.setEvents(nil) // 上游挂住不回（触发超时）

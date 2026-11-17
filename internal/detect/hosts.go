@@ -57,8 +57,9 @@ var hostRules = []hostRule{
 		values:   []string{"api.xiaomimimo.com", "batch-api-cn.", "token-plan-cn."},
 		provider: core.ProviderXiaomi,
 	},
-	// 第 6 行：`api.minimax.io` ⇒ MiniMax。
-	{patterns: []hostPattern{hostExact}, values: []string{"api.minimax.io"}, provider: core.ProviderMiniMax},
+	// 第 6 行：`api.minimax.cn` ⇒ MiniMax（国内站；⛔ 不走国际版 api.minimax.io——
+	// key 绑站、国际站按量口径与国内站不同，统一 SDD 4.6.1 以国内站为准）。
+	{patterns: []hostPattern{hostExact}, values: []string{"api.minimax.cn"}, provider: core.ProviderMiniMax},
 	// 第 7 行：`api.openai.com` ⇒ OpenAI。
 	{patterns: []hostPattern{hostExact}, values: []string{"api.openai.com"}, provider: core.ProviderOpenAI},
 	// 第 8 行：`api.anthropic.com` ⇒ Claude。
