@@ -39,7 +39,7 @@ func TestSplitTokens(t *testing.T) {
 // 全部冷却 ⇒ 取等待时间最短者（⛔ 不扣减桶、⛔ 不盲发）。
 func TestPoolPickSkipsCooledTokens(t *testing.T) {
 	t.Setenv("TEST_POOL_UNIT", "tok-A,tok-B")
-	m := newPoolManager(0, 0, time.Second, nil) // 本地桶关闭 ⇒ 只看冷却
+	m := newPoolManager(0, 0, time.Second, nil, nil, nil) // 本地桶关闭 ⇒ 只看冷却
 	p, err := m.PoolFor("TEST_POOL_UNIT")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -189,7 +189,7 @@ func TestAllTokensLimitedWaitExceedsCap(t *testing.T) {
 // TestSingleTokenPoolBackwardCompat 断言单令牌值兼容（池退化为 1 槽，无轮换但语义一致）。
 func TestSingleTokenPoolBackwardCompat(t *testing.T) {
 	t.Setenv("TEST_POOL_SINGLE", "only-tok")
-	m := newPoolManager(0, 0, time.Second, nil)
+	m := newPoolManager(0, 0, time.Second, nil, nil, nil)
 	p, err := m.PoolFor("TEST_POOL_SINGLE")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -224,7 +224,7 @@ func TestPoolPerKeyContractIndependent(t *testing.T) {
 	t.Setenv("TEST_POOL_PERKEY", "tok-A,tok-B")
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_PERKEY": {perKey: rl(600, 1)}, // 每 key 桶深 10
-	})
+	}, nil, nil)
 	p, err := m.PoolFor("TEST_POOL_PERKEY")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -249,7 +249,7 @@ func TestPoolSharedContract(t *testing.T) {
 	t.Setenv("TEST_POOL_SHARED", "tok-A,tok-B")
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_SHARED": {shared: rlb(600, 1)}, // 全池共享桶深 10
-	})
+	}, nil, nil)
 	p, err := m.PoolFor("TEST_POOL_SHARED")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -272,7 +272,7 @@ func TestPoolKeyLimitsOverride(t *testing.T) {
 			perKey:    rl(300, 1),                 // 缺省每 key 桶深 5
 			keyLimits: []*rlSpec{rl(600, 1), nil}, // 槽 0 覆盖为 10；槽 1 用缺省 5
 		},
-	})
+	}, nil, nil)
 	p, err := m.PoolFor("TEST_POOL_KEYLIM")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -299,7 +299,7 @@ func TestPoolNoHalfCharge(t *testing.T) {
 	t.Setenv("TEST_POOL_NOHALF", "tok-A")
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_NOHALF": {shared: rlb(600, 1), perKey: rl(6000, 1)}, // 共享桶深 10 / 每 key 桶深 100
-	})
+	}, nil, nil)
 	p, err := m.PoolFor("TEST_POOL_NOHALF")
 	if err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
@@ -325,7 +325,7 @@ func TestPoolKeyLimitsOverflowRejected(t *testing.T) {
 	t.Setenv("TEST_POOL_OVERFLOW", "tok-A")
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_OVERFLOW": {keyLimits: []*rlSpec{rl(600, 1), rl(600, 1)}},
-	})
+	}, nil, nil)
 	if _, err := m.PoolFor("TEST_POOL_OVERFLOW"); err == nil {
 		t.Fatal("key_limits 多于池内令牌数应报错")
 	}
@@ -361,7 +361,7 @@ func TestPoolTenKeysAccounting(t *testing.T) {
 	t.Setenv("TEST_POOL_TEN_A", keys)
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_TEN_A": {perKey: rl(6, 10)}, // cap = 0.1×10 = 1
-	})
+	}, nil, nil)
 	p, _ := m.PoolFor("TEST_POOL_TEN_A")
 	for i := 0; i < 10; i++ {
 		if got := p.Pick(1, time.Now()); !got.OK || got.Slot != i {
@@ -376,7 +376,7 @@ func TestPoolTenKeysAccounting(t *testing.T) {
 	t.Setenv("TEST_POOL_TEN_B", keys)
 	m2 := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_TEN_B": {perKey: rl(6, 10), shared: rlb(6, 50)}, // shared cap = 0.1×50 = 5
-	})
+	}, nil, nil)
 	p2, _ := m2.PoolFor("TEST_POOL_TEN_B")
 	for i := 0; i < 5; i++ {
 		if got := p2.Pick(1, time.Now()); !got.OK {
@@ -393,7 +393,7 @@ func TestAdminCredentialPools(t *testing.T) {
 	t.Setenv("TEST_POOL_VIEW", "tok-secret-A,tok-secret-B")
 	m := newPoolManager(0, 0, time.Second, map[string]*poolLimits{
 		"TEST_POOL_VIEW": {perKey: rl(600, 1), shared: rlb(600, 1)},
-	})
+	}, nil, nil)
 	if _, err := m.PoolFor("TEST_POOL_VIEW"); err != nil {
 		t.Fatalf("PoolFor 失败: %v", err)
 	}

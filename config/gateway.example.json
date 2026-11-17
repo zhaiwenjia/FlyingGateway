@@ -18,6 +18,11 @@
       "timeout_s": 30,
       "max_retries": 2,
       "priority": 0,
+      "breaker": {
+        "failure_threshold": 5,
+        "cooldown_s": 30,
+        "probe": 1
+      },
       "rate_limit": {
         "tpm": 2000000,
         "rpm": 5000,

@@ -17,6 +17,7 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/security"
 	"github.com/zhaiwenjia/FlyingGateway/internal/stream"
 	"github.com/zhaiwenjia/FlyingGateway/internal/usage"
+	"strconv"
 )
 
 // 本文件承载客户端侧响应装配与收口（统一 SDD 3.4 出站编码 / 3.7 终止帧 / 5.6 计费）：
@@ -118,6 +119,17 @@ func (a *frameAccumulator) add(f stream.Frame) {
 }
 
 // result 装配规范 Response（model 用客户端别名 —— 响应体面向调用方）。
+//
+// ⚠️ 文本部件类型统一 "text"（core 树标准口径）：
+//   - 现象：/v1/messages 非流式返回 content:[] 且带「内容部件已丢弃」降级标记，
+//     而同请求流式逐帧完整（content_block_delta text 正常）；
+//   - 根因：此处曾标 Type:"output_text"（Responses wire 口径），而 messages 编码器
+//     按 core 标准只认 "text" ⇒ 收拢出的文本落「不承载部件」分支被丢；
+//   - 为什么这么修：core 树部件类型是内部契约（anthropic 适配器与 messages 编解码
+//     均产/认 "text"），wire 形的 output_text 只该出现在出口编码层（responses.go
+//     编码时转 wire 名）；⛔ 不在 core 树混用 wire 部件名；
+//   - 不修会怎样：messages 非流式静默丢正文（只有降级标记提示），且三出口行为不一致
+//     （chat/responses 出得来、messages 出不来），端到端排查极易跑偏。
 func (a *frameAccumulator) result(model string) *core.Response {
 	resp := &core.Response{Model: model, FinishReason: a.finish, Usage: a.usage}
 	if a.text.Len() > 0 {
@@ -125,7 +137,7 @@ func (a *frameAccumulator) result(model string) *core.Response {
 		resp.OutputItems = append(resp.OutputItems, core.OutputItem{
 			Type:    "message",
 			Role:    "assistant",
-			Content: []core.ContentPart{{Type: "output_text", Text: resp.Text}},
+			Content: []core.ContentPart{{Type: "text", Text: resp.Text}},
 		})
 	}
 	// 逐块装配 reasoning item：ThinkingSignature 落块签名（流式非流式同一出口，
@@ -218,6 +230,17 @@ func (s *Server) writeOutcome(w http.ResponseWriter, r *http.Request, h *execHan
 		writeError(w, http.StatusInternalServerError, string(core.ErrUpstreamError), "encode_failed", security.Redact(err.Error()))
 		return
 	}
+	// 费用响应头（接入契约出口，统一 SDD 5.6）：非流式响应可带费用，下游（如 harness）
+	// 直接记账、⛔ 不必翻日志。usage 取 h.finalUsage()（与计费日志**同一取数口** ⇒
+	// 头值与日志逐字同值；resp.Usage 不保证在所有收拢路径上回填）。
+	// ⚠️ 流式响应头在首帧已发出、费用终值在末帧才知 ⇒ 流式不带费用头（费用以计费
+	// 日志 + 末帧 usage 为准，见接入契约）。
+	if u := h.finalUsage(); u != nil && s.curRates() != nil {
+		rate := s.curRates().Lookup(h.upstreamModelName())
+		c := cost.CalculateCost(u, rate, h.startedAt)
+		w.Header().Set("X-Gateway-Cost-CNY", strconv.FormatFloat(c.CostCNY, 'f', 4, 64))
+		w.Header().Set("X-Gateway-Cost-Source", string(c.Source))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -279,8 +302,8 @@ func (s *Server) finalizeExec(h *execHandle, req *core.Request, caller string, s
 			// 预算按**调用方**累计（调用方 key 与上游令牌解耦后的计费口径）。
 			s.budget.Record(caller, u.NormalizedTokens())
 		}
-		if s.rates != nil {
-			rate := s.rates.Lookup(h.upstreamModelName())
+		if s.curRates() != nil {
+			rate := s.curRates().Lookup(h.upstreamModelName())
 			c := cost.CalculateCost(u, rate, startTime)
 			s.logger.Info("upstream 执行计费",
 				"client_request_id", h.id,

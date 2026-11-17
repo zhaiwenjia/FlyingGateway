@@ -5,12 +5,15 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 )
 
 // 本文件承载调用方 API key 侧（统一 SDD 8.1 两段式凭据的「调用方段」）：
@@ -41,16 +44,22 @@ type callerAuth struct {
 	// rlOverrides 是按 key 的契约配额（注册表 caller_rate_limits，key 明文值 → 双维桶）。
 	// 命中 ⇒ 以契约桶为准（覆盖全局兜底）；未登记 ⇒ 不限流（⛔ 不套默认值）。
 	rlOverrides map[string]*policy.RateLimitBuckets
+
+	// store 非 nil ⇒ 共享模式（桶状态跨实例一致；共享键按身份短哈希，⛔ 明文不入键）。
+	store        share.Store
+	onShareError func(error)
 }
 
 // newCallerAuth 构造调用方鉴权。keys 为空 ⇒ 开放模式。
-func newCallerAuth(keys []string, bucketCapacity int64, bucketRefill float64, rlOverrides map[string]*policy.RateLimitBuckets) *callerAuth {
+func newCallerAuth(keys []string, bucketCapacity int64, bucketRefill float64, rlOverrides map[string]*policy.RateLimitBuckets, store share.Store, onShareError func(error)) *callerAuth {
 	c := &callerAuth{
 		keys:           map[string]bool{},
 		buckets:        map[string]*policy.TokenBucket{},
 		bucketCapacity: bucketCapacity,
 		bucketRefill:   bucketRefill,
 		rlOverrides:    rlOverrides,
+		store:          store,
+		onShareError:   onShareError,
 	}
 	if c.rlOverrides == nil {
 		c.rlOverrides = map[string]*policy.RateLimitBuckets{}
@@ -114,7 +123,14 @@ func (c *callerAuth) bucketFor(id string) *policy.TokenBucket {
 	defer c.mu.Unlock()
 	b, ok := c.buckets[id]
 	if !ok {
-		b = policy.NewTokenBucket(c.bucketCapacity, c.bucketRefill)
+		if c.store != nil {
+			// 共享键按调用方身份短哈希（⛔ 明文 key 不入存储键）。
+			sum := sha256.Sum256([]byte(id))
+			b = policy.NewSharedTokenBucket(c.store,
+				"fg:rl:caller-global:"+hex.EncodeToString(sum[:8]), c.onShareError, c.bucketCapacity, c.bucketRefill)
+		} else {
+			b = policy.NewTokenBucket(c.bucketCapacity, c.bucketRefill)
+		}
 		c.buckets[id] = b
 	}
 	return b

@@ -103,6 +103,8 @@ type ExecSnapshot struct {
 // execHandle 是一次上游执行的取消句柄（统一 SDD 6.6 实现清单「取消注册表」）。
 type execHandle struct {
 	id string
+	// startedAt 是执行开始时刻（费率快照与费用口径的计费时点，统一 SDD 5.6）。
+	startedAt time.Time
 	// ctx 是本次执行的上游执行上下文：客户端断连（r.Context 取消）、显式取消、
 	// 超时、进程关闭四条路都汇到它的取消上。
 	ctx    context.Context
@@ -421,11 +423,12 @@ func (r *cancelRegistry) register(id string) (*execHandle, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &execHandle{
-		id:     id,
-		ctx:    ctx,
-		cancel: cancel,
-		state:  stateRunning,
-		grace:  r.graceFor,
+		id:        id,
+		startedAt: time.Now(),
+		ctx:       ctx,
+		cancel:    cancel,
+		state:     stateRunning,
+		grace:     r.graceFor,
 	}
 	r.entries[id] = h
 	return h, nil

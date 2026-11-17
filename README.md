@@ -25,7 +25,8 @@
 - **路由与降级** —— `priority`（显式有序降级链）/ `round_robin` 两种策略；
   路由决策可复现（同输入 + 同注册表 + 同配置 ⇒ 同一决策），降级目标不可用时显式报错、
   不静默换端点。
-- **治理语义** —— 错误九分类与可重试性、重试与降级分账、token 级限流与预算、
+- **治理语义** —— 错误九分类与可重试性、重试与降级分账（同端点重试前截断指数退避 + 抖动）、
+  端点熔断三态（连续失败熔断冷却、半开探测、熔断期间跳过转降级链）、token 级限流与预算、
   超时 / 取消 / 上游错误三分、流式逐帧转发与断连检测、显式取消（`/v1/cancel`）。
 - **安全** —— 凭据只从环境变量读（注册表只存来源引用）、日志与轨迹统一脱敏
   （`[REDACTED:<类型>]`）、出网目标校验（默认禁内网，环回需显式放行）。
@@ -123,6 +124,7 @@ OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
 | `GET /v1/models`            | 列出注册表模型别名与能力（tools / stream / vision、上下文窗口、输出上限） |
 | `POST /v1/cancel`           | 显式取消在途执行，请求体 `{"client_request_id": "..."}`                 |
 | `GET /health`               | 存活探针（不鉴权）                                                        |
+| `GET /health/readiness`     | 就绪探针（不鉴权）：就绪 200 / 优雅关闭中 503                              |
 
 **非流式调用**：
 
@@ -336,9 +338,11 @@ usage）→ `message_stop`。
 | 500 | `credential_unresolved` | `credential_ref` 环境变量解析失败 |
 | 500 | `auth_scheme_missing` | 适配器未声明鉴权头 |
 | 502 | `upstream_error` | 上游 5xx / 错误体 / 响应解析失败（对内诊断子码：`response_parse_failed`、`encode_failed`、`stream_encode_failed`、`stream_finish_failed`、`request_build_failed`、`request_marshal_failed` 等） |
+| 502 | `endpoint_cooling` | 端点熔断冷却中被跳过（降级链上无可用端点时的最终报错；状态见 `/admin/health`） |
 | 504 | `timeout` | 单次上游调用超时（端点 `timeout_s` 预算） |
 
-**可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限）；
+**可重试性**：`429` / `502` / `504` 可重试（网关内部已按策略重试与降级，重试与降级分别有上限；
+`502` / `504` 重试前截断指数退避 + 抖动，`429` 由令牌冷却尊重上游 `Retry-After`、不叠退避）；
 `499` 不重试（取消后抑制重试）；其余 4xx 为请求问题，不重试。
 
 ### 4.4 出口（网关 → 上游）
@@ -363,6 +367,7 @@ usage）→ `message_stop`。
 | `rate_limit`        | 可选，套餐契约配额 `{tpm, rpm, burst_s}`（tokens/min、requests/min、桶深折算秒数）；**未登记 ⇒ 不限流**，⛔ 无默认值                                             |
 | `concurrency_limit` | 可选，在途上游请求数上限（0 = 不限）；并发按**在途上游尝试**计（发起 +1 / 收口 −1，流式占位到流收口）                                                              |
 | `limits_group`      | 可选，配额共享组名：同组端点共享一份 `rate_limit` / `concurrency_limit` 计数（同供应商多模型 / 多 key / 多部署共享配额池的语义）；空 = 自成一组，同组声明必须逐字一致 |
+| `breaker`           | 可选，端点熔断三态配置 `{failure_threshold, cooldown_s, probe}`（连续可归因失败阈值 / 冷却秒数 / 半开同时放行探测数）；缺省 = `5 / 30 / 1` |
 
 - **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
   不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。
@@ -383,8 +388,20 @@ usage）→ `message_stop`。
   usage 逐家归一后计量费用（费率表）。
 - **出网校验**：默认拒绝内网目标地址；本地 Ollama 等环回上游用 `-allow-loopback` 放行。
 - **管理面**（默认关闭）：`-admin-listen <内网地址>` + `GATEWAY_ADMIN_TOKEN` 开启后提供
-  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）与
-  `GET /admin/health`。⛔ 管理面不绑公网。
+  `GET /admin/endpoints`（注册表全量视图，只含凭据来源引用，可安全输出）、
+  `GET /admin/health`（含端点熔断状态 `breakers` 与巡检 `probes`）、`GET /admin/credential-pools`、
+  `GET /metrics`（Prometheus 文本暴露格式 0.0.4：请求/取消/token 计数、断连检测
+  延迟直方图、usage 缺失率、熔断状态 gauge）与 `POST /admin/reload`（配置热加载）。
+  ⛔ 管理面不绑公网。
+- **配置热加载**：`SIGHUP` 或 `POST /admin/reload` 重读注册表/费率表，先校验后原子替换、
+  失败保留旧表。可热更：费率表、端点 `base_url`/`upstream_model`/`timeout_s`/`max_retries`/
+  `priority`/`context_window`/`max_output_tokens`/`capabilities`/`fallback_chains`；
+  **需重启**（显式拒绝并列出）：端点增删、`rate_limit`/`concurrency_limit`/`limits_group`/
+  `breaker`/`credential_rate_limits`/`caller_rate_limits`（运行时组件绑定，热换会洗掉
+  桶余额/冷却/熔断状态）。
+- **多实例部署**：`-redis-addr` 接 Redis 后限流/预算/上游 429 冷却计数**跨实例一份配额**
+  （Lua 原子扣减 + `TIME` 统一时钟；不设 = 内存单实例模式）；Redis 故障时限流/预算
+  fail-open 放行 + warn 告警（业务可用性优先，恢复自动回归）。
 
 ## 五、运行参数
 
@@ -411,6 +428,9 @@ usage）→ `message_stop`。
 | `--rate-limit-cooldown`      | `-k` | 上游 429 无 Retry-After 时的令牌默认冷却                                        | `30s`                         |
 | `--max-token-wait`           | `-m` | 全部令牌受限时的最长等待（超上限 ⇒ 429 + Retry-After）                         | `3s`                          |
 | `--max-in-flight`            | `-i` | 过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After） | `0`                           |
+| `--upstream-probe-interval`  | `-I` | 上游周期巡检间隔（HTTP 可达性巡检、⛔ 不发模型调用；0 = 不启用）              | `0`                           |
+| `--upstream-probe-timeout`   | `-T` | 单次上游巡检探测超时                                                          | `3s`                          |
+| `--redis-addr`               | `-A` | Redis 地址（空 = 内存单实例模式）：限流/预算/冷却计数跨实例共享；密码走 `GATEWAY_REDIS_PASSWORD` | —                             |
 | `--guardrail-pattern`        | `-P` | 护栏正则（可重复）                                                              | —                              |
 | `--guardrail-webhook`        | `-W` | 护栏 Webhook URL（空 = 只做正则）                                               | —                              |
 | `--version`                  | —     | 打印版本号后退出                                                                | —                              |

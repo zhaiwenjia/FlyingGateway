@@ -7,19 +7,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/zhaiwenjia/FlyingGateway/internal/core"
-	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/zhaiwenjia/FlyingGateway/internal/core"
+	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
 
 // 本文件是请求管线的功能测试（统一 SDD 12.1 A2 / A11 / A12 / 12.2 D2 / D3 / D5 / 11.4）：
@@ -611,6 +615,7 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 		Metrics:             telemetry.NewMetrics(),
 		AllowLoopbackEgress: true,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("server.New 失败: %v", err)
@@ -629,6 +634,65 @@ func TestTimeoutRetriedThenSucceeds(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("上游调用 = %d，期望 2（首试超时 + 重试成功）", got)
+	}
+}
+
+// TestRetryBackoffAppliedOnUpstreamError 钉住「同端点重试前指数退避」（统一 SDD 7.4）：
+// 上游 5xx 两次后成功、max_retries=2 ⇒ 重试前各等 Base·2^(n-1)（50ms + 100ms）、
+// 上游恰好被打 3 次、客户端 200。
+// 错误实现对照：无退避 ⇒ elapsed < 150ms 红；不重试 ⇒ calls != 3 红。
+func TestRetryBackoffAppliedOnUpstreamError(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	const okChunk = "" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
+		"data: [DONE]\n\n"
+	var calls int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, okChunk)
+	}))
+	defer up.Close()
+	reg := writeRegistry(t, []epSpec{{
+		name: "flaky", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 1024, maxRetries: 2, priority: 0, timeoutS: 5,
+	}}, nil)
+	srv, err := New(Options{
+		Registry:            reg,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// Jitter=0 保持确定性：n=1 ⇒ 50ms、n=2 ⇒ 100ms ⇒ 总退避 150ms。
+		RetryBackoff: Backoff{Base: 50 * time.Millisecond, Jitter: 0, Cap: 200 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	start := time.Now()
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("退避重试后应 200，实际 %d：%s", resp.StatusCode, body[:200])
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("上游调用 = %d，期望 3（两次 500 + 重试成功）", got)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("端到端耗时 %v < 150ms —— 重试前未按 50ms+100ms 退避", elapsed)
 	}
 }
 
@@ -835,4 +899,161 @@ func TestIngressProtocolMismatch(t *testing.T) {
 		t.Fatalf("chat+gpt = %d，期望 200", resp4.StatusCode)
 	}
 	readBody(t, resp4)
+}
+
+// TestBreakerTripsAndSkipsToFallback 钉住「熔断期间跳过该端点转降级链」（统一 SDD 7.3）：
+// 主端点连续失败达阈值（threshold=1）⇒ 熔断打开；后续请求⛔ 不再打主上游（调用数冻结）、
+// 直接走降级链到 backup；两请求客户端均 200。
+// 错误实现对照：熔断后仍打主上游 ⇒ 第 2 次断言主计数红；跳过后不降级 ⇒ 第 2 请求非 200。
+func TestBreakerTripsAndSkipsToFallback(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	const okChunk = "" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n" +
+		"data: [DONE]\n\n"
+	var primaryCalls, backupCalls int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&primaryCalls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&backupCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, okChunk)
+	}))
+	defer backup.Close()
+	reg := writeRegistry(t, []epSpec{
+		{
+			name: "primary", base: primary.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+			breaker: map[string]any{"failure_threshold": 1, "cooldown_s": 30},
+		},
+		{
+			name: "backup", base: backup.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+			provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+			ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 1, timeoutS: 5,
+		},
+	}, map[string][]string{
+		"general":        {"backup"},
+		"upstream_error": {"backup"},
+	})
+	srv, err := New(Options{
+		Registry:            reg,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RetryBackoff:        Backoff{Base: time.Millisecond, Jitter: 0, Cap: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	post := func() *http.Response {
+		t.Helper()
+		resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		return resp
+	}
+
+	// 请求 1：主 500（阈值 1 ⇒ 熔断开）⇒ 降级 backup 200。
+	resp1 := post()
+	if resp1.StatusCode != 200 {
+		body, _ := io.ReadAll(resp1.Body)
+		t.Fatalf("请求 1 = %d，期望 200（降级成功）：%s", resp1.StatusCode, body[:200])
+	}
+	resp1.Body.Close()
+	if got := atomic.LoadInt32(&primaryCalls); got != 1 {
+		t.Fatalf("请求 1 后主上游调用 = %d，期望 1", got)
+	}
+	// 请求 2：主已熔断 ⇒ ⛔ 不打主上游、直接降级 backup。
+	resp2 := post()
+	if resp2.StatusCode != 200 {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("请求 2 = %d，期望 200（熔断跳过后降级成功）：%s", resp2.StatusCode, body[:200])
+	}
+	resp2.Body.Close()
+	if got := atomic.LoadInt32(&primaryCalls); got != 1 {
+		t.Fatalf("请求 2 后主上游调用 = %d，期望 1（熔断后冻结，⛔ 不再打）", got)
+	}
+	if got := atomic.LoadInt32(&backupCalls); got != 2 {
+		t.Fatalf("backup 调用 = %d，期望 2", got)
+	}
+	if st := srv.breakerFor("primary").State(); st != "open" {
+		t.Fatalf("primary 熔断状态 = %s，期望 open", st)
+	}
+}
+
+// TestCostResponseHeader 钉住费用响应头（接入契约出口，统一 SDD 5.6）：非流式响应带
+// X-Gateway-Cost-CNY / X-Gateway-Cost-Source，口径与计费日志同源（同 usage/费率/计费时点）。
+// 错误实现对照：不写头 ⇒ 头断言红；费用算 0 ⇒ 数值断言红（费率取显著单价保证 4 位小数可见）。
+func TestCostResponseHeader(t *testing.T) {
+	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
+	// 假上游回放真实 MiMo 样本（Responses 形 SSE）——⚠️ fixture 形状必须匹配出站 wire 形：
+	// xiaomi 出站是 Responses 形，Chat chunk 形响应会被解析成空壳（content/usage 全丢），
+	// 费用头测试会假红（2026-11-17 实测定性，与「探针请求体按协议」同族的**响应侧**教训）。
+	sample, err := os.ReadFile(filepath.Join("..", "adapter", "testdata", "real", "mimo_responses_stream_real.sse"))
+	if err != nil {
+		t.Fatalf("读真实样本失败: %v", err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sample)
+	}))
+	defer up.Close()
+	reg := writeRegistry(t, []epSpec{{
+		name: "primary", base: up.URL, model: "m", upstreamModel: "mimo-v2.6-flash",
+		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
+		ctxWindow: 128000, maxOut: 1024, maxRetries: 0, priority: 0, timeoutS: 5,
+	}}, nil)
+	// 显著单价（1e7 元/1M）⇒ 3 输入 + 1 输出 token 的费用在 4 位小数下可见。
+	ratesPath := filepath.Join(t.TempDir(), "rates.json")
+	os.WriteFile(ratesPath, []byte(`{"usd_to_cny":7,"snapshot_date":"2026-11-13","rates":[{"model":"mimo-v2.6-flash","provider":"xiaomi","input_price_cny":10000000,"cache_read_explicit_cny":0.02,"cache_read_implicit_cny":0.02,"cache_write_cny":0.0,"cache_write_long_cny":0.0,"output_price_cny":10000000,"peak_multiplier":1.0,"input_tiers":[],"long_context_multiplier":1.0,"long_context_threshold":0,"price_valid_until":"","region":"","cache_price_unknown":false,"batch_discount":0,"local_deployment":false,"context_window":1000000,"currency":"CNY","price_source":"OfficialCNY","snapshot_date":"2026-11-13"}]}`), 0o600)
+	rates, err := cost.LoadRates(ratesPath)
+	if err != nil {
+		t.Fatalf("费率表加载失败: %v", err)
+	}
+	srv, err := New(Options{
+		Registry:            reg,
+		Rates:               rates,
+		Tracer:              telemetry.NewTracer(&telemetry.InMemoryExporter{}),
+		Metrics:             telemetry.NewMetrics(),
+		AllowLoopbackEgress: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("server.New 失败: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	t.Logf("M-DEBUG body: %s", body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态 = %d，期望 200", resp.StatusCode)
+	}
+	costStr := resp.Header.Get("X-Gateway-Cost-CNY")
+	if costStr == "" {
+		t.Fatal("缺 X-Gateway-Cost-CNY 响应头（费用契约出口）")
+	}
+	costVal, err := strconv.ParseFloat(costStr, 64)
+	if err != nil || costVal <= 0 {
+		t.Fatalf("X-Gateway-Cost-CNY = %q，期望可解析且 > 0（3 输入 + 1 输出 token × 1e7 元/1M）", costStr)
+	}
+	if src := resp.Header.Get("X-Gateway-Cost-Source"); src != "provider_reported" && src != "estimated" && src != "unknown" {
+		t.Fatalf("X-Gateway-Cost-Source = %q，期望三值之一", src)
+	}
 }

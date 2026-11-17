@@ -3,7 +3,8 @@
 
 // Package server 是服务装配层（统一 SDD 2.1 ① 入口层）：
 // 数据面双入口（/v1/chat/completions、/v1/responses）+ /v1/models + /health + /v1/cancel，
-// 管理面（/admin/endpoints、/admin/health）默认关闭、显式开启 + 强制鉴权 + 只绑内网。
+// 管理面（/admin/endpoints、/admin/health、/admin/credential-pools、/metrics）默认关闭、
+// 显式开启 + 强制鉴权 + 只绑内网。
 // 执行与取消见 execute.go / cancel.go。
 package server
 
@@ -15,13 +16,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/cost"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 )
 
@@ -63,6 +68,28 @@ type Options struct {
 	// 超限 ⇒ 429 + Retry-After（⛔ 不排队无界、⛔ 不静默丢弃）。
 	MaxInFlight int64
 
+	// RetryBackoff 是同端点重试的截断指数退避 + 抖动参数（统一 SDD 7.4；429 不走退避，
+	// Retry-After 语义由令牌冷却承载）。整体零值 ⇒ 默认 1s/1s/32s（Google Cloud
+	// truncated exponential backoff 推荐值）；测试注入小值提速。
+	RetryBackoff Backoff
+
+	// UpstreamProbeInterval 是上游周期巡检间隔（统一 SDD 2.8：主动巡检是预防）；
+	// 0 = 不启用（默认关、显式开）。探测为 HTTP 可达性巡检（⛔ 不发模型调用、不花配额），
+	// 结果进 /admin/health 的 probes 视图并与熔断器联动（不可达 ⇒ 主动熔断）。
+	UpstreamProbeInterval time.Duration
+	// UpstreamProbeTimeout 是单次巡检探测超时（默认 3s）。
+	UpstreamProbeTimeout time.Duration
+
+	// Share 是跨实例共享计数存储（统一 SDD 7.2 多实例一致性）；nil = 内存模式（单实例）。
+	// 非 nil ⇒ 限流桶 / 预算 / 上游冷却计数存该存储，多实例共享一份配额（⛔ 不再 N 倍配额）。
+	Share share.Store
+
+	// RegistryPath / RatesPath 是配置文件路径（热加载数据源，统一 SDD 9.2 / 5.4）。
+	// 非空 ⇒ 支持 SIGHUP 与 POST /admin/reload 热加载（重读该路径、原子替换）；
+	// 空 ⇒ 热加载显式报错（⛔ 不静默无操作）。
+	RegistryPath string
+	RatesPath    string
+
 	// ---- 上游自有令牌池与限流轮换 ----
 
 	// UpstreamBucketCapacity / UpstreamBucketRefill 是每自有令牌的本地令牌桶；≤ 0 = 不启用
@@ -89,12 +116,20 @@ type Options struct {
 	Logger *slog.Logger
 }
 
+// gatewayCfg 是可热加载配置的原子快照（注册表 + 费率表配套替换，⛔ 不出现
+// 新注册表配旧费率表的混合态；对象发布后不可变，统一 SDD 9.2）。
+type gatewayCfg struct {
+	reg   *registry.Registry
+	rates *cost.Rates
+}
+
 // Server 是网关服务（数据面 + 管理面）。
 type Server struct {
-	reg     *registry.Registry
-	rates   *cost.Rates
-	tracer  *telemetry.Tracer
-	metrics *telemetry.Metrics
+	cfg       atomic.Pointer[gatewayCfg]
+	regPath   string // 热加载数据源（空 = 不支持热加载）
+	ratesPath string
+	tracer    *telemetry.Tracer
+	metrics   *telemetry.Metrics
 
 	bucket    *policy.TokenBucket
 	budget    *policy.Budget
@@ -111,6 +146,17 @@ type Server struct {
 	// maxInFlight / inFlight 是过载闸（load shedding；≤ 0 = 不启用）。
 	maxInFlight int64
 	inFlight    atomic.Int64
+
+	// retryBackoff 是同端点重试退避（已在 New 补齐默认值）。
+	retryBackoff Backoff
+
+	// breakers 是端点熔断器（键 = 端点名，统一 SDD 7.3 三态；注册表每端点一个）。
+	breakers map[string]*EndpointBreaker
+
+	// prober 是上游周期巡检器（nil = 不启用）。
+	prober *upstreamProber
+	// shuttingDown 由 Shutdown 置位：readiness 转 503（先摘流量再排空，K8s readiness 口径）。
+	shuttingDown atomic.Bool
 
 	allowLoopback bool
 	pollInterval  time.Duration
@@ -180,8 +226,8 @@ func New(opts Options) (*Server, error) {
 		lg = slog.Default()
 	}
 	s := &Server{
-		reg:           opts.Registry,
-		rates:         opts.Rates,
+		regPath:       opts.RegistryPath,
+		ratesPath:     opts.RatesPath,
 		tracer:        opts.Tracer,
 		metrics:       opts.Metrics,
 		bucket:        opts.TokenBucket,
@@ -194,9 +240,14 @@ func New(opts Options) (*Server, error) {
 		pollInterval:  poll,
 		logger:        lg,
 	}
+	s.cfg.Store(&gatewayCfg{reg: opts.Registry, rates: opts.Rates})
 	// 配额共享组装配（统一 SDD 7.2 锚点分离：限流锚定契约，未登记 ⇒ 不限）：
 	// 同组端点共享同一个 limitGroup 实例（一份桶 + 一个并发计数，⛔ 不按端点各建一份 ——
 	// 共享配额池按端点各计一份会 N 倍超发）。
+	// 共享存储故障口径：fail-open 放行 + 显式告警（⛔ 不静默；详见 policy 双模式注释）。
+	onShareError := func(err error) {
+		lg.Warn("共享计数存储故障（限流/预算 fail-open 放行，恢复后自动回归）", "err", err)
+	}
 	s.limitGroups = make(map[string]*limitGroup)
 	for _, ep := range opts.Registry.List() {
 		if ep.RateLimit == nil && ep.ConcurrencyLimit <= 0 {
@@ -211,7 +262,12 @@ func New(opts Options) (*Server, error) {
 		}
 		g := &limitGroup{maxInFlight: ep.ConcurrencyLimit}
 		if ep.RateLimit != nil {
-			g.buckets = policy.NewRateLimitBuckets(ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			if opts.Share != nil {
+				g.buckets = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:group:"+key, onShareError,
+					ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			} else {
+				g.buckets = policy.NewRateLimitBuckets(ep.RateLimit.TPM, ep.RateLimit.RPM, ep.RateLimit.BurstS)
+			}
 		}
 		s.limitGroups[key] = g
 	}
@@ -224,12 +280,17 @@ func New(opts Options) (*Server, error) {
 		if strings.TrimSpace(os.Getenv(crl.KeyRef)) == "" {
 			return nil, fmt.Errorf("server: credential_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
 		}
-		pl := &poolLimits{}
+		pl := &poolLimits{ref: crl.KeyRef, store: opts.Share, onShareError: onShareError}
 		if crl.PerKey != nil {
 			pl.perKey = &rlSpec{tpm: crl.PerKey.TPM, rpm: crl.PerKey.RPM, burstS: crl.PerKey.BurstS}
 		}
 		if crl.Shared != nil {
-			pl.shared = policy.NewRateLimitBuckets(crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			if opts.Share != nil {
+				pl.shared = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:poolc:"+crl.KeyRef, onShareError,
+					crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			} else {
+				pl.shared = policy.NewRateLimitBuckets(crl.Shared.TPM, crl.Shared.RPM, crl.Shared.BurstS)
+			}
 		}
 		for _, kl := range crl.KeyLimits {
 			pl.keyLimits = append(pl.keyLimits, &rlSpec{tpm: kl.TPM, rpm: kl.RPM, burstS: kl.BurstS})
@@ -243,10 +304,28 @@ func New(opts Options) (*Server, error) {
 		if key == "" {
 			return nil, fmt.Errorf("server: caller_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
 		}
-		callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
+		if opts.Share != nil {
+			callerRL[key] = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:caller:"+crl.KeyRef, onShareError,
+				crl.TPM, crl.RPM, crl.BurstS)
+		} else {
+			callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
+		}
 	}
-	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim)
-	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL)
+	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim, opts.Share, onShareError)
+	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL, opts.Share, onShareError)
+	s.retryBackoff = opts.RetryBackoff.withDefaults()
+	// 端点熔断器（统一 SDD 7.3）：逐端点按注册表 breaker 配置构造（缺省 = 默认 5/30s/1）。
+	s.breakers = make(map[string]*EndpointBreaker, len(opts.Registry.List()))
+	for _, ep := range opts.Registry.List() {
+		th, cd, pb := 0, time.Duration(0), 0
+		if ep.Breaker != nil {
+			th, cd, pb = ep.Breaker.FailureThreshold, time.Duration(ep.Breaker.CooldownS*float64(time.Second)), ep.Breaker.Probe
+		}
+		s.breakers[ep.Name] = NewEndpointBreaker(ep.Name, th, cd, pb, s.logger)
+	}
+	// 上游周期巡检器（统一 SDD 2.8；interval=0 ⇒ 不启用，newUpstreamProber 返回 nil）。
+	s.prober = newUpstreamProber(opts.Registry.List(), s.breakers,
+		opts.UpstreamProbeInterval, opts.UpstreamProbeTimeout, s.allowLoopback, s.logger)
 	if s.maxTokenWait <= 0 {
 		s.maxTokenWait = DefaultMaxTokenWait
 	}
@@ -265,7 +344,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.callers.wrap(s.handleModels))
 	mux.HandleFunc("POST /v1/cancel", s.callers.wrap(s.handleCancel))
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/readiness", s.handleReadiness)
 	return mux
+}
+
+// handleReadiness 是就绪探针（GET /health/readiness，K8s readiness 口径：管「能不能接流量」）：
+// 就绪 ⇒ 200 {"status":"ready"}；Shutdown 进行中 ⇒ 503（先摘流量再排空在途执行）。
+// ⛔ 不因上游端点不健康而 503 —— 上游是共享外部依赖，全部实例会同时不就绪 ⇒
+// 全摘流量比上游故障本身更糟；上游健康由熔断器逐端点管理（统一 SDD 2.8 / 7.3 分工）。
+func (s *Server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	if s.shuttingDown.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "shutting_down"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
 }
 
 // AdminHandler 返回管理面路由（统一 SDD 8.5：强制鉴权；只读视图）。
@@ -278,7 +370,31 @@ func (s *Server) AdminHandler(adminToken string) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/endpoints", s.adminAuth(adminToken, s.handleAdminEndpoints))
 	mux.HandleFunc("GET /admin/health", s.adminAuth(adminToken, s.handleAdminHealth))
 	mux.HandleFunc("GET /admin/credential-pools", s.adminAuth(adminToken, s.handleAdminCredentialPools))
+	mux.HandleFunc("GET /metrics", s.adminAuth(adminToken, s.handleAdminMetrics))
+	mux.HandleFunc("POST /admin/reload", s.adminAuth(adminToken, s.handleAdminReload))
 	return mux, nil
+}
+
+// handleAdminMetrics 输出 Prometheus 文本暴露格式 0.0.4 指标（GET /metrics，管理面鉴权）：
+// telemetry 指标（SDD 6.4）+ 端点熔断状态 gauge（closed=0 / half_open=1 / open=2）。
+// Content-Type 逐字按官方口径 `text/plain; version=0.0.4; charset=utf-8`（Prometheus 3.0
+// 起抓取端校验 Content-Type，缺失/不受支持 ⇒ 抓取失败）。
+func (s *Server) handleAdminMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.metrics.WritePrometheus(w)
+	// 端点熔断状态（统一 SDD 7.3 可观测：⛔ 静默熔断是谜之故障）。
+	if len(s.breakers) > 0 {
+		names := make([]string, 0, len(s.breakers))
+		for name := range s.breakers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintln(w, "# HELP gateway_endpoint_breaker_state 端点熔断状态（0=closed 1=half_open 2=open，SDD 7.3）。")
+		fmt.Fprintln(w, "# TYPE gateway_endpoint_breaker_state gauge")
+		for _, name := range names {
+			fmt.Fprintf(w, "gateway_endpoint_breaker_state{endpoint=%q} %d\n", name, s.breakers[name].StateCode())
+		}
+	}
 }
 
 // adminAuth 是管理面强制鉴权（Bearer token，常量时间比较；鉴权失败 401）。
@@ -322,6 +438,10 @@ func ValidateAdminAddr(addr string) error {
 // Shutdown 优雅关闭：进程关闭 ⇒ 全部在途执行以 shutdown 原因立即收口
 // （统一 SDD 6.6 要求 4 / 8.5）。
 func (s *Server) Shutdown() {
+	s.shuttingDown.Store(true) // readiness 转 503：先摘流量（K8s readiness 口径）
+	if s.prober != nil {
+		s.prober.Stop() // 停上游巡检（⛔ 关闭后继续敲上游）
+	}
 	s.cancels.cancelAll(reasonShutdown)
 }
 
@@ -359,7 +479,7 @@ type modelInfo struct {
 // handleModels 由注册表生成模型列表（GET /v1/models，统一 SDD 2.3 / 9.1）：
 // ⛔ 不做动态模型发现，注册表是唯一真源。
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	eps := s.reg.List()
+	eps := s.curReg().List()
 	data := make([]modelInfo, 0, len(eps))
 	for _, ep := range eps {
 		var m modelInfo
@@ -401,7 +521,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 // handleAdminEndpoints 返回端点注册表全量视图（GET /admin/endpoints）。
 // 注册表只存凭据来源引用、⛔ 不存明文 ⇒ 视图可安全输出（统一 SDD 8.1）。
 func (s *Server) handleAdminEndpoints(w http.ResponseWriter, _ *http.Request) {
-	eps := s.reg.List()
+	eps := s.curReg().List()
 	out := make([]map[string]any, 0, len(eps))
 	for _, ep := range eps {
 		out = append(out, map[string]any{
@@ -435,13 +555,147 @@ func (s *Server) handleAdminCredentialPools(w http.ResponseWriter, _ *http.Reque
 
 // handleAdminHealth 返回管理面健康视图（GET /admin/health）。
 func (s *Server) handleAdminHealth(w http.ResponseWriter, _ *http.Request) {
+	// 熔断状态（统一 SDD 7.3 可观测要求：⛔ 静默熔断是谜之故障）。
+	breakers := make(map[string]string, len(s.breakers))
+	for name, b := range s.breakers {
+		breakers[name] = b.State()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             "ok",
-		"endpoints":          len(s.reg.List()),
-		"strategy":           s.reg.Strategy,
+		"endpoints":          len(s.curReg().List()),
+		"strategy":           s.curReg().Strategy,
 		"cancel_pending":     s.cancels.pendingCount(),
 		"usage_missing_rate": s.metrics.UsageMissingRate(),
+		"breakers":           breakers,
+		"probes":             s.probeSnapshot(),
 	})
+}
+
+// probeSnapshot 返回巡检结果视图（未启用 ⇒ "disabled"）。
+func (s *Server) probeSnapshot() any {
+	if s.prober == nil {
+		return "disabled"
+	}
+	return s.prober.Snapshot()
+}
+
+// curReg / curRates 返回当前配置快照（热加载原子切换后新请求见新表；
+// 单请求内经同一 gatewayCfg 读到配套的注册表与费率表）。
+func (s *Server) curReg() *registry.Registry { return s.cfg.Load().reg }
+func (s *Server) curRates() *cost.Rates      { return s.cfg.Load().rates }
+
+// ---- 配置热加载（统一 SDD 9.2：先校验后切换、失败保留旧表）----
+
+// ReloadOutcome 是一次热加载的结果（可观测：成功 / 需重启 / 失败三分，
+// 对齐业界 reloadable vs restart-required 口径）。
+type ReloadOutcome struct {
+	OK              bool     `json:"ok"`
+	RestartRequired []string `json:"restart_required,omitempty"` // 需重启的变更点（显式列出）
+	Error           string   `json:"error,omitempty"`
+}
+
+// Reload 热加载注册表与费率表：重读 → 校验 → 原子替换；任何失败 ⇒ 保留旧表。
+//
+// 可热更：费率表全量；注册表的端点字段（base_url / upstream_model / timeout_s /
+// max_retries / priority / context_window / max_output_tokens / capabilities）与
+// fallback_chains —— 这些只被请求路径按快照读取（每请求重做识别与适配），无运行时组件绑定。
+//
+// ⛔ 需重启（显式拒绝并列出，⛔ 不静默半生效）：端点增删、rate_limit /
+// concurrency_limit / limits_group / breaker / credential_rate_limits /
+// caller_rate_limits 变更 —— 这些在启动时构建运行时组件（令牌池 / 配额组 / 熔断器 /
+// 调用方桶），热换组件会把桶余额、429 冷却、熔断状态一并洗掉或产生半应用态。
+func (s *Server) Reload() ReloadOutcome {
+	if s.regPath == "" {
+		return ReloadOutcome{Error: "server: 未配置注册表路径（RegistryPath），不支持热加载"}
+	}
+	newReg, err := registry.Load(s.regPath)
+	if err != nil {
+		return ReloadOutcome{Error: fmt.Sprintf("注册表重载失败（保留旧表）：%v", err)}
+	}
+	var newRates *cost.Rates
+	if s.ratesPath != "" {
+		newRates, err = cost.LoadRates(s.ratesPath)
+		if err != nil {
+			return ReloadOutcome{Error: fmt.Sprintf("费率表重载失败（保留旧表）：%v", err)}
+		}
+	}
+	old := s.cfg.Load()
+	if rr := restartRequiredDiffs(old.reg, newReg); len(rr) > 0 {
+		return ReloadOutcome{RestartRequired: rr}
+	}
+	s.cfg.Store(&gatewayCfg{reg: newReg, rates: newRates})
+	s.logger.Info("配置热加载完成",
+		"endpoints", len(newReg.List()), "rates_loaded", newRates != nil)
+	return ReloadOutcome{OK: true}
+}
+
+// restartRequiredDiffs 对比新旧注册表，返回需重启的变更点（空 = 可热更）。
+// 判定口径见 Reload 注释：运行时组件绑定的配置变更都归需重启。
+func restartRequiredDiffs(oldReg, newReg *registry.Registry) []string {
+	var rr []string
+	oldEPs := map[string]registry.Endpoint{}
+	for _, ep := range oldReg.List() {
+		oldEPs[ep.Name] = ep
+	}
+	newEPs := map[string]registry.Endpoint{}
+	for _, ep := range newReg.List() {
+		newEPs[ep.Name] = ep
+	}
+	for name := range newEPs {
+		if _, ok := oldEPs[name]; !ok {
+			rr = append(rr, "新增端点 "+name)
+		}
+	}
+	for name := range oldEPs {
+		if _, ok := newEPs[name]; !ok {
+			rr = append(rr, "删除端点 "+name)
+		}
+	}
+	for name, nep := range newEPs {
+		oep, ok := oldEPs[name]
+		if !ok {
+			continue
+		}
+		if !reflect.DeepEqual(oep.RateLimit, nep.RateLimit) {
+			rr = append(rr, "端点 "+name+" 的 rate_limit")
+		}
+		if oep.ConcurrencyLimit != nep.ConcurrencyLimit {
+			rr = append(rr, "端点 "+name+" 的 concurrency_limit")
+		}
+		if oep.LimitsGroup != nep.LimitsGroup {
+			rr = append(rr, "端点 "+name+" 的 limits_group")
+		}
+		if !reflect.DeepEqual(oep.Breaker, nep.Breaker) {
+			rr = append(rr, "端点 "+name+" 的 breaker")
+		}
+	}
+	if !reflect.DeepEqual(oldReg.CredentialRateLimits, newReg.CredentialRateLimits) {
+		rr = append(rr, "credential_rate_limits")
+	}
+	if !reflect.DeepEqual(oldReg.CallerRateLimits, newReg.CallerRateLimits) {
+		rr = append(rr, "caller_rate_limits")
+	}
+	sort.Strings(rr)
+	return rr
+}
+
+// handleAdminReload 触发配置热加载（POST /admin/reload，管理面鉴权）。
+// 响应体 = ReloadOutcome：ok / restart_required（列出需重启的变更点）/ error。
+func (s *Server) handleAdminReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, string(core.ErrInvalidRequest), "method_not_allowed",
+			"热加载仅支持 POST")
+		return
+	}
+	out := s.Reload()
+	status := http.StatusOK
+	if !out.OK {
+		status = http.StatusBadRequest
+		if len(out.RestartRequired) > 0 {
+			status = http.StatusConflict
+		}
+	}
+	writeJSON(w, status, out)
 }
 
 // ---- 错误与 JSON 出口 ----

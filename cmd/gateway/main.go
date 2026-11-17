@@ -28,6 +28,7 @@ import (
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
 	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/server"
+	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 	"github.com/zhaiwenjia/FlyingGateway/internal/telemetry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/version"
 )
@@ -74,6 +75,10 @@ type options struct {
 	rateLimitCooldown      time.Duration
 	maxTokenWait           time.Duration
 	maxInFlight            int64
+
+	upstreamProbeInterval time.Duration
+	upstreamProbeTimeout  time.Duration
+	redisAddr             string
 
 	guardrailPatterns []string
 	guardrailWebhook  string
@@ -169,6 +174,12 @@ func parseFlags(args []string) (*options, error) {
 	fs.DurationVar(&opts.maxTokenWait, "m", 3*time.Second, "同 --max-token-wait")
 	fs.Int64Var(&opts.maxInFlight, "max-in-flight", 0, "过载保护：在途请求数上限（0 = 不限；按实测容量标定，超限 ⇒ 429 + Retry-After）")
 	fs.Int64Var(&opts.maxInFlight, "i", 0, "同 --max-in-flight")
+	fs.DurationVar(&opts.upstreamProbeInterval, "upstream-probe-interval", 0, "上游周期巡检间隔（HTTP 可达性巡检、⛔ 不发模型调用；0 = 不启用；结果见 /admin/health probes）")
+	fs.DurationVar(&opts.upstreamProbeInterval, "I", 0, "同 --upstream-probe-interval")
+	fs.DurationVar(&opts.upstreamProbeTimeout, "upstream-probe-timeout", 3*time.Second, "单次上游巡检探测超时")
+	fs.DurationVar(&opts.upstreamProbeTimeout, "T", 3*time.Second, "同 --upstream-probe-timeout")
+	fs.StringVar(&opts.redisAddr, "redis-addr", "", "Redis 地址（host:port；空 = 内存单实例模式）—— 限流/预算/冷却计数跨实例共享；密码走环境变量 GATEWAY_REDIS_PASSWORD")
+	fs.StringVar(&opts.redisAddr, "A", "", "同 --redis-addr")
 
 	var pats multiFlag
 	fs.Var(&pats, "guardrail-pattern", "护栏正则（可重复）")
@@ -245,9 +256,21 @@ func run(args []string, stdout io.Writer) int {
 	if opts.rateCapacity > 0 && opts.rateRefill > 0 {
 		bucket = policy.NewTokenBucket(opts.rateCapacity, opts.rateRefill)
 	}
+	var sharedStore share.Store
+	if opts.redisAddr != "" {
+		sharedStore = share.NewRedisStore(opts.redisAddr,
+			os.Getenv("GATEWAY_REDIS_PASSWORD"), 3*time.Second, 8)
+		logger.Info("共享计数存储已启用（Redis）", "addr", opts.redisAddr)
+	}
 	var budget *policy.Budget
 	if opts.budgetTokens > 0 {
-		budget = policy.NewBudget(opts.budgetTokens)
+		if sharedStore != nil {
+			budget = policy.NewSharedBudget(sharedStore, "fg:budget:",
+				func(err error) { logger.Warn("共享计数存储故障（预算 fail-open 放行）", "err", err) },
+				opts.budgetTokens)
+		} else {
+			budget = policy.NewBudget(opts.budgetTokens)
+		}
 	}
 	var guardrail *policy.Guardrail
 	if len(opts.guardrailPatterns) > 0 || opts.guardrailWebhook != "" {
@@ -266,6 +289,9 @@ func run(args []string, stdout io.Writer) int {
 	srv, err := server.New(server.Options{
 		Registry:               reg,
 		Rates:                  rates,
+		RegistryPath:           opts.configPath,
+		RatesPath:              opts.ratesPath,
+		Share:                  sharedStore,
 		Tracer:                 telemetry.NewTracer(&logExporter{logger: logger}),
 		Metrics:                telemetry.NewMetrics(),
 		TokenBucket:            bucket,
@@ -279,6 +305,8 @@ func run(args []string, stdout io.Writer) int {
 		RateLimitCooldown:      opts.rateLimitCooldown,
 		MaxTokenWait:           opts.maxTokenWait,
 		MaxInFlight:            opts.maxInFlight,
+		UpstreamProbeInterval:  opts.upstreamProbeInterval,
+		UpstreamProbeTimeout:   opts.upstreamProbeTimeout,
 		AllowLoopbackEgress:    opts.allowLoopback,
 		CancelGracePeriod:      opts.cancelGrace,
 		CancelGraceByProvider:  opts.cancelGraceByProvider,
@@ -346,6 +374,24 @@ func run(args []string, stdout io.Writer) int {
 			return 1
 		}
 	}
+
+	// 配置热加载（统一 SDD 9.2）：SIGHUP 触发重读注册表/费率表，先校验后原子切换、
+	// 失败保留旧表（与 POST /admin/reload 同一路径）。
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			out := srv.Reload()
+			switch {
+			case out.OK:
+				logger.Info("配置热加载成功")
+			case len(out.RestartRequired) > 0:
+				logger.Warn("配置变更需重启（热加载拒绝，旧表继续生效）", "restart_required", out.RestartRequired)
+			default:
+				logger.Error("配置热加载失败（旧表继续生效）", "err", out.Error)
+			}
+		}
+	}()
 
 	// 优雅关闭：shutdown ⇒ 在途执行以 shutdown 原因立即收口（统一 SDD 6.6 要求 4）。
 	sig := make(chan os.Signal, 1)

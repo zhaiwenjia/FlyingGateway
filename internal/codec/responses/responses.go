@@ -896,7 +896,7 @@ func (e *EventEncoder) terminalResponse(status string) *respResponseOut {
 		resp.OutputItems = append(resp.OutputItems, core.OutputItem{
 			Type:    "message",
 			Role:    "assistant",
-			Content: []core.ContentPart{{Type: "output_text", Text: e.text.String()}},
+			Content: []core.ContentPart{{Type: "text", Text: e.text.String()}}, // core 树口径 "text"（wire 的 output_text 只在出口编码层出现，见 2026-11-17 messages 丢正文修复）
 		})
 	}
 	for _, key := range e.callOrder {
