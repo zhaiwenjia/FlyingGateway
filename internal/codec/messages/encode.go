@@ -84,7 +84,9 @@ func EncodeResponse(resp *core.Response) ([]byte, error) {
 		case "message":
 			for _, p := range item.Content {
 				switch p.Type {
-				case "text":
+				case "text", "output_text":
+					// output_text 为历史/异路径部件名的兼容认列（2026-11-17 修复后
+					// core 树生产者统一 "text"；兼容认列防旧数据/跨出口转换再丢正文）。
 					if p.Text != "" {
 						out.Content = append(out.Content, blockOut{Type: "text", Text: p.Text})
 					}

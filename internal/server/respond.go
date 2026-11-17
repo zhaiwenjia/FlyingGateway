@@ -118,6 +118,17 @@ func (a *frameAccumulator) add(f stream.Frame) {
 }
 
 // result 装配规范 Response（model 用客户端别名 —— 响应体面向调用方）。
+//
+// ⚠️ 文本部件类型统一 "text"（core 树标准口径）：
+//   - 现象：/v1/messages 非流式返回 content:[] 且带「内容部件已丢弃」降级标记，
+//     而同请求流式逐帧完整（content_block_delta text 正常）；
+//   - 根因：此处曾标 Type:"output_text"（Responses wire 口径），而 messages 编码器
+//     按 core 标准只认 "text" ⇒ 收拢出的文本落「不承载部件」分支被丢；
+//   - 为什么这么修：core 树部件类型是内部契约（anthropic 适配器与 messages 编解码
+//     均产/认 "text"），wire 形的 output_text 只该出现在出口编码层（responses.go
+//     编码时转 wire 名）；⛔ 不在 core 树混用 wire 部件名；
+//   - 不修会怎样：messages 非流式静默丢正文（只有降级标记提示），且三出口行为不一致
+//     （chat/responses 出得来、messages 出不来），端到端排查极易跑偏。
 func (a *frameAccumulator) result(model string) *core.Response {
 	resp := &core.Response{Model: model, FinishReason: a.finish, Usage: a.usage}
 	if a.text.Len() > 0 {
@@ -125,7 +136,7 @@ func (a *frameAccumulator) result(model string) *core.Response {
 		resp.OutputItems = append(resp.OutputItems, core.OutputItem{
 			Type:    "message",
 			Role:    "assistant",
-			Content: []core.ContentPart{{Type: "output_text", Text: resp.Text}},
+			Content: []core.ContentPart{{Type: "text", Text: resp.Text}},
 		})
 	}
 	// 逐块装配 reasoning item：ThinkingSignature 落块签名（流式非流式同一出口，
