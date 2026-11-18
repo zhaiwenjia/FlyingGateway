@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -311,6 +312,89 @@ func TestOpenAIStreamToolCallName(t *testing.T) {
 	}
 	if args == 0 {
 		t.Fatalf("参数帧缺失（ToolCallID=call_abc 且 Arguments={\"q\":1}）：%+v", frames)
+	}
+}
+
+// TestOpenAIStreamToolCallRealShape 钉住真实上游形态的流式工具调用解析（2026-11-18 修复回归锁）：
+// fixture 逐字取自 MiMo 真实 Responses 流抓取（api.xiaomimimo.com/v1/responses，mimo-v2.6-pro，
+// 2026-11-18 实测，含 data: 无空格 SSE 形态）——两个曾被想象 fixture 掩盖的形态：
+// ① output_item.added 顶层无 item_id（id 在 item.id）；
+// ② function_call_arguments.delta 的参数增量字段是 delta（非 partial_json）。
+// 断言：补名帧 Text=lookup_weather、ToolCallID=call_…（call_id 映射，⛔ 不回退 fc_ item_id）、
+// 参数帧 Arguments 逐字拼回 {"city": "北京"}、未知事件（arguments.done/output_item.done）容忍。
+// 错误实现会红：旧实现不发补名帧（named 断言红）、args 恒空（拼回断言红）、
+// id 回退 item_id（ToolCallID 前缀断言红）。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOpenAIStreamToolCallRealShape -v
+func TestOpenAIStreamToolCallRealShape(t *testing.T) {
+	const sse = `event:response.created
+data:{"type":"response.created","sequence_number":0,"response":{"id":"resp_ab08","object":"response","status":"in_progress","output":[]}}
+
+event:response.output_item.added
+data:{"type":"response.output_item.added","sequence_number":7,"output_index":1,"item":{"id":"fc_710d5c1581ed43aaaffa4d743be6192b","type":"function_call","call_id":"call_3e3e508571474be2a86405bd","name":"lookup_weather","arguments":"","status":"in_progress"}}
+
+event:response.function_call_arguments.delta
+data:{"type":"response.function_call_arguments.delta","sequence_number":8,"item_id":"fc_710d5c1581ed43aaaffa4d743be6192b","output_index":1,"delta":"{\"city\": "}
+
+event:response.function_call_arguments.delta
+data:{"type":"response.function_call_arguments.delta","sequence_number":9,"item_id":"fc_710d5c1581ed43aaaffa4d743be6192b","output_index":1,"delta":"\"北京\"}"}
+
+event:response.function_call_arguments.done
+data:{"type":"response.function_call_arguments.done","sequence_number":15,"item_id":"fc_710d5c1581ed43aaaffa4d743be6192b","arguments":"{\"city\": \"北京\"}"}
+
+event:response.output_item.done
+data:{"type":"response.output_item.done","sequence_number":16,"output_index":1,"item":{"id":"fc_710d5c1581ed43aaaffa4d743be6192b","type":"function_call","call_id":"call_3e3e508571474be2a86405bd","name":"lookup_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}}
+
+event:response.completed
+data:{"type":"response.completed","sequence_number":17,"response":{"usage":{"input_tokens":84,"output_tokens":32,"total_tokens":116}}}
+
+data: [DONE]
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	a := NewOpenAI(srv.Client())
+	it, err := a.StreamStart(context.Background(), &core.Request{}, newOpenAIResolution(srv.URL))
+	if err != nil {
+		t.Fatalf("StreamStart 报错: %v", err)
+	}
+	frames, cerr := collectFrames(t, it)
+	if cerr != nil {
+		t.Fatalf("流式终态错误: %v", cerr)
+	}
+	const callID = "call_3e3e508571474be2a86405bd"
+	named := 0
+	argsTotal := ""
+	for _, f := range frames {
+		if f.Kind == stream.FrameToolCallArgsDelta {
+			if strings.HasPrefix(f.ToolCallID, "fc_") {
+				t.Fatalf("ToolCallID 回退 item_id（fc_ 前缀），期望 call_id 映射 %s：%+v", callID, f)
+			}
+			if f.ToolCallID != callID {
+				t.Fatalf("ToolCallID = %s，期望 %s：%+v", f.ToolCallID, callID, f)
+			}
+			if f.Text == "lookup_weather" {
+				named++
+			}
+			argsTotal += f.Arguments
+		}
+	}
+	if named != 1 {
+		t.Fatalf("补名帧（Text=lookup_weather）= %d，期望 1（output_item.added 的 item.name 必须进帧）：%+v", named, frames)
+	}
+	if argsTotal != "{\"city\": \"北京\"}" {
+		t.Fatalf("参数拼回 = %q，期望 %q（delta 字段增量必须逐字进帧）", argsTotal, "{\"city\": \"北京\"}")
+	}
+	done := 0
+	for _, f := range frames {
+		if f.Kind == stream.FrameDone && f.Status == core.StatusCompleted {
+			done++
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done completed 帧 = %d，期望 1（未知事件容忍、completed 正常收口）：%+v", done, frames)
 	}
 }
 
