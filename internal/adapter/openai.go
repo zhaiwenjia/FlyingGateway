@@ -136,7 +136,20 @@ func openAIInputItems(m core.Message) (items []responses.ResponseInputItemUnionP
 			id = tc.ID
 		}
 		fc := responses.ResponseFunctionToolCallParam{CallID: id, Name: tc.Name, Arguments: tc.Arguments}
-		if tc.ID != "" {
+		// 【2026-11-18 修复·发现即修】item id 只回填 fc_ 形（Responses 条目 id）：
+		//   - 现象：chat 入口回灌 assistant.tool_calls（id 为 call_ 形 tool_call_id）经 GW
+		//     打 OpenAI /v1/responses 得 400："Invalid 'input[1].id': … Expected an ID that
+		//     begins with 'fc'"（20261118-allkeys-toolcall-verify openai S3 格，上游逐字）。
+		//   - 根因：chat 侧 tool_call 只有一个 id（= tool_call_id，call_ 形）；Responses 的
+		//     function_call item 的 id 是**条目 id**（fc_ 形）、call_id 才是调用 id——旧代码把
+		//     call_ 形 id 原样填进 item id，严格校验的上游直接拒（宽松上游照常 ⇒ 单线隐身）。
+		//   - 为什么这个修法：tc.ID 以 fc_ 开头（真条目 id，如 Responses 入口回放）才回填，
+		//     否则省略 id 键——实测 OpenAI 收无 id 的 function_call item 返回 200
+		//     （2026-11-18 探针逐字）；与 reasoning item 的 param.Omit 同口径；
+		//     ⛔ 不合成 fc_ 假 id（上游自会赋号，合成即第二套 id 口径）。
+		//   - 不修会怎样：工具结果回灌（assistant tool_calls + tool 输出）在 OpenAI 线全 400，
+		//     且错误伪装成调用方参数问题（invalid_value）。
+		if strings.HasPrefix(tc.ID, "fc_") {
 			fc.ID = param.NewOpt(tc.ID)
 		}
 		// 旧 wire 这三个字段是 omitempty（空值不出键）⇒ SDK 恒序列化的必填零值用 param.Omit 删键。
@@ -512,18 +525,61 @@ type responseEventExtra struct {
 	} `json:"response"`
 }
 
-// rawPartialJSON 取流事件原始 JSON 的 partial_json（函数参数增量，4.3.1 逐字字段名）：
+// rawArgsDelta 取流事件原始 JSON 的函数参数增量（response.function_call_arguments.delta 载荷）。
+//
+// 【2026-11-18 修复·发现即修】双字段兼容（delta 优先、partial_json 兜底）：
+//   - 现象：MiMo 真实 Responses 流（api.xiaomimimo.com/v1/responses 实测抓取）的
+//     function_call_arguments.delta 载荷字段是 "delta":"{\"city\": "，而本函数原只认
+//     partial_json ⇒ 恒取空串 ⇒ GW 出口 tool_calls 的 function.arguments 全丢
+//     （出口实证：每帧 "function":{} 空壳，Harness 流式装配报 missing_name）。
+//   - 根因：既有测试 fixture（openai_test.go partial_json 形）是照实现想象写的、
+//     未对过真实流；而注释自称「4.3.1 逐字字段名」的 partial_json 实为 Anthropic
+//     input_json_delta 的字段名，OpenAI Responses 规范与 MiMo 实测均用 delta。
+//   - 为什么这个修法：delta 优先 + partial_json 兜底（异型字段宽松转换面，与
+//     decodeChatChunk 两段式容忍同精神）——⛔ 不单删 partial_json：既有样本/别家
+//     quirk 可能真发它，删了会反向打破；⛔ 不只加 delta：旧 fixture 与 4.3.1 口径
+//     仍需兼容。
+//   - 不修会怎样：Responses 出站形（xiaomi/deepseek/openai 共享机件）的流式工具
+//     调用 name/args 全丢，任何 chat.completions 客户端装配 tool call 都会失败——
+//     而纯文本流路一切正常，缺陷只在工具流路隐身（压测电池不含工具调用故未暴露）。
+//
 // SDK 的事件 union 未建模该字段（其 delta 命名不同）⇒ 只能从原始 JSON 取原值。
-func rawPartialJSON(eventRaw string) (string, bool) {
+func rawArgsDelta(eventRaw string) (string, bool) {
 	var q struct {
-		PartialJSON string `json:"partial_json"`
+		Delta       *json.RawMessage `json:"delta"`
+		PartialJSON *json.RawMessage `json:"partial_json"`
 	}
 	// eventRaw 是已成功反序列化过的 JSON 对象，此处仅取一个 string 字段；
 	// 字段类型非 string（畸形上游）⇒ 返回 false，按旧口径整帧容忍跳过。
 	if err := json.Unmarshal([]byte(eventRaw), &q); err != nil {
 		return "", false
 	}
-	return q.PartialJSON, true
+	for _, raw := range []*json.RawMessage{q.Delta, q.PartialJSON} {
+		if raw == nil {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(*raw, &s); err != nil {
+			return "", false
+		}
+		return s, true
+	}
+	return "", true
+}
+
+// rawItemID 取 output_item.added 原始 JSON 的 item.id（2026-11-18 修复配套：
+// 该事件顶层无 item_id，id 在 item.id——MiMo 实测逐字形态，OpenAI 同形；
+// 旧条件用顶层 e.ItemID 判存在 ⇒ 分支永不命中，详见 output_item.added 分支注释）。
+func rawItemID(eventRaw string) string {
+	var q struct {
+		Item struct {
+			ID string `json:"id"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(eventRaw), &q); err != nil {
+		return ""
+	}
+	return q.Item.ID
 }
 
 // openAIStreamDecoder 是 OpenAI 的帧解码器（3.7：每家一个帧解码器）。
@@ -566,12 +622,29 @@ func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 	case "response.created", "response.in_progress", "response.queued":
 		return []stream.Frame{{Kind: stream.FrameLifecycle, Status: etype, Seq: seq}}, false, nil
 	case "response.output_item.added":
-		if e.Item.Type == "function_call" && e.ItemID != "" {
+		// 【2026-11-18 修复·发现即修】itemKey 兼容 item.id（顶层无 item_id 的真实形态）：
+		//   - 现象：MiMo 真实流的 output_item.added 载荷是
+		//     {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_…",
+		//     "type":"function_call","call_id":"call_…","name":"lookup_weather",…}}——
+		//     顶层没有 item_id；而本分支旧条件要求 e.ItemID != "" ⇒ 永不命中 ⇒
+		//     不发补名帧（出口 tool_calls 的 function.name 全丢）也不登记 id 映射
+		//     （出口 id 回退成 item_id "fc_…"，实证与 call_id 不符）。
+		//   - 根因：既有 fixture（openai_test.go）虚构了顶层 "item_id":"fc_1" 与代码
+		//     对拍，从未对过真实流；OpenAI Responses 规范该事件同样只有 item.id。
+		//   - 为什么这个修法：itemKey = 顶层 item_id 优先、item.id 兜底（容忍口径与
+		//     缺 output_item.added 回退 item_id 一致）；⛔ 不改 fixture 了事——fixture
+		//     是想象的、真实上游不会为它变形。
+		//   - 不修会怎样：流式工具调用 name/args 全丢 + id 错配（见 rawArgsDelta 注释）。
+		itemKey := e.ItemID
+		if itemKey == "" {
+			itemKey = rawItemID(e.RawJSON())
+		}
+		if e.Item.Type == "function_call" && itemKey != "" {
 			id := e.Item.CallID
 			if id == "" {
-				id = e.ItemID
+				id = itemKey
 			}
-			d.toolIDs[e.ItemID] = id
+			d.toolIDs[itemKey] = id
 			// 补名帧（4.3.1：output_item.added 的 item.name 载工具函数名，后续
 			// function_call_arguments.delta 不再带名）⇒ 名字必须在此进帧；
 			// 帧承载约定：FrameToolCallArgsDelta 的 Text 载函数名、ToolCallID 载调用 id。
@@ -590,9 +663,9 @@ func (d *openAIStreamDecoder) decode(ev stream.SSEEvent) ([]stream.Frame, bool, 
 		if id == "" {
 			id = e.ItemID // 缺 output_item.added 时容忍：直接用 item_id（4.3.1 解析器容忍性）
 		}
-		args, ok := rawPartialJSON(e.RawJSON())
+		args, ok := rawArgsDelta(e.RawJSON())
 		if !ok {
-			return nil, false, nil // partial_json 畸形（非 string）⇒ 按旧口径整帧跳过
+			return nil, false, nil // delta/partial_json 畸形（非 string）⇒ 按旧口径整帧跳过
 		}
 		return []stream.Frame{{Kind: stream.FrameToolCallArgsDelta, ToolCallID: id, Arguments: args, Seq: seq}}, false, nil
 	case "response.completed", "response.incomplete":
