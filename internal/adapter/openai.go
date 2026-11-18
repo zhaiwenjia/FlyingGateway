@@ -136,7 +136,20 @@ func openAIInputItems(m core.Message) (items []responses.ResponseInputItemUnionP
 			id = tc.ID
 		}
 		fc := responses.ResponseFunctionToolCallParam{CallID: id, Name: tc.Name, Arguments: tc.Arguments}
-		if tc.ID != "" {
+		// 【2026-11-18 修复·发现即修】item id 只回填 fc_ 形（Responses 条目 id）：
+		//   - 现象：chat 入口回灌 assistant.tool_calls（id 为 call_ 形 tool_call_id）经 GW
+		//     打 OpenAI /v1/responses 得 400："Invalid 'input[1].id': … Expected an ID that
+		//     begins with 'fc'"（20261118-allkeys-toolcall-verify openai S3 格，上游逐字）。
+		//   - 根因：chat 侧 tool_call 只有一个 id（= tool_call_id，call_ 形）；Responses 的
+		//     function_call item 的 id 是**条目 id**（fc_ 形）、call_id 才是调用 id——旧代码把
+		//     call_ 形 id 原样填进 item id，严格校验的上游直接拒（宽松上游照常 ⇒ 单线隐身）。
+		//   - 为什么这个修法：tc.ID 以 fc_ 开头（真条目 id，如 Responses 入口回放）才回填，
+		//     否则省略 id 键——实测 OpenAI 收无 id 的 function_call item 返回 200
+		//     （2026-11-18 探针逐字）；与 reasoning item 的 param.Omit 同口径；
+		//     ⛔ 不合成 fc_ 假 id（上游自会赋号，合成即第二套 id 口径）。
+		//   - 不修会怎样：工具结果回灌（assistant tool_calls + tool 输出）在 OpenAI 线全 400，
+		//     且错误伪装成调用方参数问题（invalid_value）。
+		if strings.HasPrefix(tc.ID, "fc_") {
 			fc.ID = param.NewOpt(tc.ID)
 		}
 		// 旧 wire 这三个字段是 omitempty（空值不出键）⇒ SDK 恒序列化的必填零值用 param.Omit 删键。

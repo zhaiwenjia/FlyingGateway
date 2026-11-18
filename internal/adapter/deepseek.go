@@ -51,32 +51,60 @@ func (a *deepseekAdapter) ParseUsage(raw json.RawMessage) *core.Usage {
 	return usage.Normalize(core.ProviderDeepSeek, usageTreeShape(raw), raw)
 }
 
-// BuildRequest 构造 POST {base}/responses 出站请求（Responses 形装配走共享机件
-// responsesBuildParams：model / input items / instructions 顶层 / tools 扁平形 / tool_choice /
-// reasoning / max_output_tokens / prompt_cache_key / stream）。
-// enable_thinking 等特异参数经 Extra 透传（黑名单见 adapter.extraBlocklist）。
+// BuildRequest 委托 BuildRequestWithDegradations（降级记录由上层合并进 x_gateway.degradations[]）。
 func (a *deepseekAdapter) BuildRequest(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, error) {
+	out, _, err := a.BuildRequestWithDegradations(ctx, r, res)
+	return out, err
+}
+
+// BuildRequestWithDegradations 构造 POST {base}/responses 出站请求并返回降级记录
+// （Responses 形装配走共享机件 responsesBuildParams：model / input items / instructions 顶层 /
+// tools 扁平形 / tool_choice / reasoning / max_output_tokens / prompt_cache_key / stream）。
+// enable_thinking 等特异参数经 Extra 透传（黑名单见 adapter.extraBlocklist）。
+//
+// 【2026-11-18 修复·发现即修】tool_choice 降级（none/auto 之外降为 auto，与智谱同形）：
+//   - 现象：deepseek-flash 经 GW 带强制 tool_choice 的工具请求流式/非流式双 400
+//     （上游逐字："Thinking mode does not support this tool_choice"；20261118-allkeys-toolcall-verify
+//     电池 deepseek S1/S2 格 FAIL-FRAMEWORK）。
+//   - 根因：DeepSeek thinking 模式只吃 tool_choice=none/auto（2026-11-18 上游实测：
+//     none 200、required 与指定函数名均 400），而本 adapter 原无降级块、tool_choice 直通上游。
+//   - 为什么这个修法：与 zhipu/xiaomi/moonshot/minimax 同款 DegradationAware 降级块——
+//     required/指定函数名/未知取值降为 auto 并记 degradation（1.4.2 不静默降级）；
+//     ⛔ 不改拒绝请求（none/auto 之外降 auto 是既有能力边界口径，意图丢失可见即可）。
+//   - 不修会怎样：强制 tool_choice 的工具请求（评测电池/Harness 冒烟）在 deepseek 线全 400，
+//     且错误伪装成调用方参数问题（invalid_request_error）。
+func (a *deepseekAdapter) BuildRequestWithDegradations(ctx context.Context, r *core.Request, res *core.Resolution) (*Outbound, []core.Degradation, error) {
 	if err := checkPreviousResponseID(false, r); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	p, err := responsesBuildParams(r, res)
+	rc := *r
+	var degs []core.Degradation
+	if tc := r.ToolChoice; tc != nil && tc.Mode != "auto" && tc.Mode != "none" {
+		degs = append(degs, core.Degradation{
+			Field:  "tool_choice",
+			Reason: core.DegradationCapabilityUnsupported,
+			Detail: "DeepSeek thinking 模式仅支持 tool_choice=none/auto（上游逐字：Thinking mode does not support this tool_choice），required/指定函数名已降为 auto",
+		})
+		rc.ToolChoice = &core.ToolChoice{Mode: "auto"}
+	}
+	p, err := responsesBuildParams(&rc, res)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	raw, err := marshalBody(p)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	raw, err = mergeExtraBody(raw, r.Extra)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return &Outbound{
 		Method:  "POST",
 		URL:     joinURL(res.BaseURL, "/responses"),
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    raw,
-	}, nil
+	}, degs, nil
 }
 
 // ParseResponse 解析 response 对象 → 规范 Response（共享机件 parseResponsesBody：

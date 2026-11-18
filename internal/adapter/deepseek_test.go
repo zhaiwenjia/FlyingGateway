@@ -148,10 +148,11 @@ func TestDeepSeekBuildRequestPath(t *testing.T) {
 	if t0["type"] != "function" || t0["name"] != "get_weather" {
 		t.Fatalf("tools[0] = %v，期望扁平形 {type:function,name:get_weather}", t0)
 	}
-	// tool_choice 命名形态（Responses 标准：{type:"function",name}）。
-	tc := mustAt(t, m, "tool_choice").(map[string]any)
-	if tc["type"] != "function" || tc["name"] != "get_weather" {
-		t.Fatalf("tool_choice = %v，期望 {type:function,name:get_weather}", tc)
+	// tool_choice：请求的指定函数名 ⇒ 降为 auto（2026-11-18 修复：thinking 模式只吃
+	// none/auto，上游 400 实测；降级矩阵见 TestDeepSeekToolChoiceDegradationResponses；
+	// 命名形态 wire 由 openai 线测试钉住——那里上游接受命名形态）。
+	if mustString(t, m, "tool_choice") != "auto" {
+		t.Fatalf("tool_choice = %v，期望降为 auto（DeepSeek thinking 模式仅 none/auto）", m["tool_choice"])
 	}
 	// Extra 透传（enable_thinking 等特异参数，3.1）。
 	if m["enable_thinking"] != true {
@@ -167,6 +168,59 @@ func TestDeepSeekBuildRequestPath(t *testing.T) {
 	sch := a.AuthScheme()
 	if sch.HeaderName != "Authorization" || sch.Prefix != "Bearer " {
 		t.Fatalf("AuthScheme = %+v，期望 Authorization/Bearer ", sch)
+	}
+}
+
+// TestDeepSeekToolChoiceDegradationResponses 钉住 DeepSeek tool_choice 降级
+// （2026-11-18 修复回归锁）：thinking 模式只吃 none/auto（上游实测逐字：none 200、
+// required / 指定函数名 400 "Thinking mode does not support this tool_choice"）
+// ⇒ required / 指定函数名降为 auto 并记 degradation（1.4.2 不静默降级）；
+// none / auto 原样直通、零降级记录。
+// 错误实现会红：不降级 ⇒ body tool_choice 非 auto 断言红；静默降级 ⇒ degradation 断言红；
+// none/auto 被误降 ⇒ 直通断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestDeepSeekToolChoiceDegradationResponses -v
+func TestDeepSeekToolChoiceDegradationResponses(t *testing.T) {
+	a := NewDeepSeek(&http.Client{})
+	res := newDeepSeekResolution("https://api.deepseek.com")
+	base := &core.Request{
+		Messages: []core.Message{{Role: "user", Content: []core.ContentPart{{Type: "text", Text: "hi"}}}},
+		Tools:    []core.Tool{{Type: "function", Name: "get_weather"}},
+	}
+	// required / 指定函数名 ⇒ 降为 auto + degradation。
+	for _, tc := range []*core.ToolChoice{{Mode: "required"}, {Mode: "function", Name: "get_weather"}} {
+		r := *base
+		r.ToolChoice = tc
+		out, degs, err := a.(DegradationAware).BuildRequestWithDegradations(context.Background(), &r, res)
+		if err != nil {
+			t.Fatalf("BuildRequestWithDegradations(%v) 失败: %v", tc, err)
+		}
+		found := false
+		for _, d := range degs {
+			if d.Field == "tool_choice" && d.Reason == core.DegradationCapabilityUnsupported {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("tool_choice=%+v 降级未记 degradation（degs=%v），违反 1.4.2 不静默降级", tc, degs)
+		}
+		if bodyMap(t, out)["tool_choice"] != "auto" {
+			t.Fatalf("tool_choice = %v，期望降为 auto", bodyMap(t, out)["tool_choice"])
+		}
+	}
+	// none / auto ⇒ 直通（thinking 模式官方可吃），无降级记录。
+	for _, tc := range []*core.ToolChoice{{Mode: "none"}, {Mode: "auto"}} {
+		r := *base
+		r.ToolChoice = tc
+		out, degs, err := a.(DegradationAware).BuildRequestWithDegradations(context.Background(), &r, res)
+		if err != nil {
+			t.Fatalf("BuildRequestWithDegradations(%v) 失败: %v", tc, err)
+		}
+		if len(degs) != 0 {
+			t.Fatalf("tool_choice=%v 直通不应记 degradation: %v", tc.Mode, degs)
+		}
+		if bodyMap(t, out)["tool_choice"] != tc.Mode {
+			t.Fatalf("tool_choice = %v，期望原样 %s", bodyMap(t, out)["tool_choice"], tc.Mode)
+		}
 	}
 }
 

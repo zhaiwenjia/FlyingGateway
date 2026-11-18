@@ -138,6 +138,49 @@ func TestOpenAIBuildRequestResponses(t *testing.T) {
 	}
 }
 
+// TestOpenAIBuildRequestToolCallItemID 钉住 function_call item 的 id 形
+// （2026-11-18 修复回归锁）：chat 侧 tool_call id 是 call_ 形 tool_call_id ⇒ item 省略
+// id 键（OpenAI 严格校验逐字 400："Invalid 'input[1].id': … Expected an ID that begins
+// with 'fc'"；无 id 的 item 实测 200 收）；tc.ID 为 fc_ 形（Responses 入口回放的真条目
+// id）⇒ 原样回填；call_id 恒为调用 id。
+// 错误实现会红：call_ 形照填 item.id ⇒ id 键存在断言红；fc_ 形被吞 ⇒ 回填断言红。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/adapter/ -run TestOpenAIBuildRequestToolCallItemID -v
+func TestOpenAIBuildRequestToolCallItemID(t *testing.T) {
+	a := NewOpenAI(http.DefaultClient)
+	res := newOpenAIResolution("https://api.openai.com/v1")
+	build := func(id string) map[string]any {
+		r := &core.Request{
+			Messages: []core.Message{{
+				Role:      "assistant",
+				ToolCalls: []core.ToolCall{{ID: id, CallID: "call_real", Name: "lookup_weather", Arguments: `{"city":"北京"}`}},
+			}},
+			Tools: []core.Tool{{Type: "function", Name: "lookup_weather"}},
+		}
+		out, err := a.BuildRequest(context.Background(), r, res)
+		if err != nil {
+			t.Fatalf("BuildRequest 报错: %v", err)
+		}
+		items := mustSlice(t, bodyMap(t, out), "input")
+		if len(items) != 1 {
+			t.Fatalf("input item 数 = %d，期望 1（纯 tool_calls assistant 只出 function_call item）：%v", len(items), items)
+		}
+		return items[0].(map[string]any)
+	}
+	// call_ 形（chat 回放）⇒ 无 id 键、call_id 保留调用 id。
+	it := build("call_abc")
+	if _, has := it["id"]; has {
+		t.Fatalf("call_ 形 id 不得进 item.id（OpenAI 400：Expected an ID that begins with 'fc'）：%v", it)
+	}
+	if it["type"] != "function_call" || it["call_id"] != "call_real" {
+		t.Fatalf("function_call item = %v，期望 type=function_call / call_id=call_real", it)
+	}
+	// fc_ 形（真条目 id 回放）⇒ 原样回填。
+	it2 := build("fc_1234")
+	if it2["id"] != "fc_1234" {
+		t.Fatalf("fc_ 形条目 id 应原样回填：%v", it2)
+	}
+}
+
 // TestOpenAIParseResponseOutputUnion 钉住 output[] 异构联合解析（4.3.1）：
 // output[0] 是 reasoning（⛔ 不假设 output[0] 是 message）、encrypted_content 保留、
 // output_text 便捷字段、finish_reason/status 推导。
