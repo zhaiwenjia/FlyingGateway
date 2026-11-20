@@ -82,24 +82,46 @@ go build -o bin/gateway ./cmd/gateway
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `<credential_ref>`    | 上游凭据。注册表每条 endpoint 的 `credential_ref` 写**环境变量名**（如 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`），真值由环境注入 |
 | `GATEWAY_ADMIN_TOKEN` | 管理面鉴权 token（仅开管理面时需要）                                                                                                      |
+| `GATEWAY_REDIS_PASSWORD` | Redis 密码（仅 `-redis-addr` 多实例模式时需要）                                                                                       |
 
 **3. 配置文件**
 
 - `config/gateway.example.json` —— 端点注册表（字段说明见「四、出入口使用 / 出口」）；
 - `config/rates.json` —— 费率表（每模型各类 token 的绝对单价，费用计量数据源）。
 
-**4. 运行**
+**4. 开启服务**
 
 ```bash
 ./bin/gateway -config config/gateway.example.json -rates config/rates.json -listen 127.0.0.1:8080
+# 或免构建直接跑：
+go run ./cmd/gateway -config config/gateway.example.json -rates config/rates.json -listen 127.0.0.1:8080
 ```
+
+三个路径参数都有默认值（`config/gateway.example.json` / `config/rates.json` / `:8080`），
+在仓库根目录下 `./bin/gateway` 一条命令即可起；启动日志走 stderr，`{"status":"ok"}` 出现即就绪。
+⚠️ `-listen` 默认 `:8080` 是**全接口**监听，对外部署时显式给内网 IP（如示例的 `127.0.0.1:8080`）。
+
+可选开关（全表见「五、运行参数」）：
+
+- **管理面**（默认关闭）：`-admin-listen 127.0.0.1:8090` + 环境变量 `GATEWAY_ADMIN_TOKEN`
+  （缺 token 拒启），提供 `/admin/*` 与 `/metrics`；监听地址须 IP 字面量（环回 / 私网），⛔ 不绑公网；
+- **本地环回上游**（Ollama 等）：加 `-allow-loopback`；
+- **多实例共享配额**：`-redis-addr host:port`（密码走 `GATEWAY_REDIS_PASSWORD`）。
 
 **5. 验证**
 
 ```bash
 curl http://127.0.0.1:8080/health
 # {"status":"ok"}
+curl http://127.0.0.1:8080/health/readiness
+# {"status":"ready"}
 ```
+
+**6. 停止与热加载**
+
+- 停止：`Ctrl+C`（SIGINT）或 SIGTERM ⇒ 在途请求以 `shutdown` 原因收口后优雅退出；
+- 热加载：`SIGHUP` 或管理面 `POST /admin/reload` 重读注册表 / 费率表（先校验后原子替换，
+  失败保留旧表；端点增删等需重启项会显式拒绝，见 4.4）。
 
 ## 四、出入口使用
 
@@ -457,7 +479,7 @@ usage）→ `message_stop`。
 | ------------------------------ | ------ | ------------------------------------------------------------------------------- | ------------------------------- |
 | `--config`                   | `-c` | 端点注册表配置路径（JSON）                                                      | `config/gateway.example.json` |
 | `--rates`                    | `-r` | 费率表路径（JSON）                                                              | `config/rates.json`           |
-| `--listen`                   | `-l` | 数据面监听地址（host:port）                                                     | `127.0.0.1:8080`              |
+| `--listen`                   | `-l` | 数据面监听地址（host:port）                                                     | `:8080`（全接口）             |
 | `--admin-listen`             | `-a` | 管理面监听地址（须内网 IP，⛔ 不绑公网）                                        | 关闭                            |
 | `--allow-loopback`           | `-L` | 出网校验放行环回地址（本地 Ollama 等）                                          | 关                              |
 | `--pprof-listen`             | `-p` | pprof 排障端点（只绑环回，⛔ 不绑公网）                                         | 关闭                            |
@@ -477,7 +499,7 @@ usage）→ `message_stop`。
 | `--redis-addr`               | `-A` | Redis 地址（空 = 内存单实例模式）：限流/预算/冷却计数跨实例共享；密码走 `GATEWAY_REDIS_PASSWORD` | —                             |
 | `--guardrail-pattern`        | `-P` | 护栏正则（可重复）                                                              | —                              |
 | `--guardrail-webhook`        | `-W` | 护栏 Webhook URL（空 = 只做正则）                                               | —                              |
-| `--version`                  | —     | 打印版本号后退出                                                                | —                              |
+| `--version`                  | `-V`  | 打印版本号后退出                                                                | —                              |
 
 ## 六、与 LiteLLM 的性能对比
 
