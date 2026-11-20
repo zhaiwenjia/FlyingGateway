@@ -6,140 +6,238 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
 	"github.com/zhaiwenjia/FlyingGateway/internal/policy"
+	"github.com/zhaiwenjia/FlyingGateway/internal/registry"
 	"github.com/zhaiwenjia/FlyingGateway/internal/share"
 )
 
-// 本文件承载调用方 API key 侧（统一 SDD 8.1 两段式凭据的「调用方段」）：
-//   - 调用方凭据与上游自有令牌**解耦** —— 调用方 key 只做调用方鉴权与限流 / 计费口径，
-//     ⛔ 永不发给上游；上游请求头永远是网关自有令牌（注入点在 authTransport）；
-//   - 每调用方一个令牌桶（policy.TokenBucket，token 级，⛔ 不只按请求数，8.3）；
-//   - 未配置调用方 key 时不校验（本地开放模式）；配置了则缺失 / 无效一律 401
-//     （鉴权错误按语义返回，8.1）。
+// 本文件承载调用方校验面（R-43 / AC-36，registry callers 单源）：
+//   - 鉴权：Authorization: Bearer <key>；key 以 SHA-256 哈希登记（⛔ 明文不落配置），
+//     比对走常量时间；密钥可轮换（双 key 窗口）、必有过期（⛔ 永不过期，F-36）；
+//   - scope 三闸：允许的模型集 / 端点集 / token 预算，超 scope ⇒ 403 scope_exceeded；
+//   - 入口剥离外部身份类 header（⛔ 公网 header 直通，F-37），身份一律以 key 鉴权
+//     结果为准（网关自设）；
+//   - 审计四元组：caller / route / decision / correlation-id，⛔ 无密钥（R-46）；
+//   - 调用方 key 与上游自有令牌**解耦** —— ⛔ 调用方凭据永不发给上游。
 
-// callerIdentityKey 是 ctx 上的调用方身份键。
+// callerIdentityKey 是 ctx 上的调用方登记键（*callerEntry）。
 type callerIdentityKey struct{}
 
 // AnonymousCaller 是未启用调用方鉴权时的统一身份（预算 / 限流按此归并）。
 const AnonymousCaller = "anonymous"
 
-// callerAuth 是调用方鉴权与每调用方限流。
-type callerAuth struct {
-	// keys 是调用方 API key 白名单（空 = 开放模式，不校验）。
-	keys map[string]bool
+// identityHeaders 是入口剥离的外部身份类 header。与 FH 侧 gateway/policy.ts 的
+// IDENTITY_HEADERS 是同一份清单（两仓口径必须一致）：伪造身份 header 直通即绕过
+// 全部下游授权（F-37）⇒ 一律剥离，身份只认网关自设（key 鉴权结果）。
+var identityHeaders = []string{"X-User-Id", "X-Org-Id", "X-Role", "X-Tenant-Id", "X-Forwarded-User"}
 
-	mu sync.Mutex
-	// buckets 是每调用方令牌桶（惰性创建；全局兜底参数，token 维）。
-	buckets map[string]*policy.TokenBucket
-	// bucketCapacity / bucketRefill 是全局兜底桶参数（≤ 0 = 不启用）。
-	bucketCapacity int64
-	bucketRefill   float64
-
-	// rlOverrides 是按 key 的契约配额（注册表 caller_rate_limits，key 明文值 → 双维桶）。
-	// 命中 ⇒ 以契约桶为准（覆盖全局兜底）；未登记 ⇒ 不限流（⛔ 不套默认值）。
-	rlOverrides map[string]*policy.RateLimitBuckets
-
-	// store 非 nil ⇒ 共享模式（桶状态跨实例一致；共享键按身份短哈希，⛔ 明文不入键）。
-	store        share.Store
-	onShareError func(error)
+// callerKey 是运行面的密钥登记（key_hash 在构造时解码一次，⛔ 每请求不重复解码）。
+type callerKey struct {
+	hash      []byte
+	expiresAt time.Time
 }
 
-// newCallerAuth 构造调用方鉴权。keys 为空 ⇒ 开放模式。
-func newCallerAuth(keys []string, bucketCapacity int64, bucketRefill float64, rlOverrides map[string]*policy.RateLimitBuckets, store share.Store, onShareError func(error)) *callerAuth {
-	c := &callerAuth{
-		keys:           map[string]bool{},
-		buckets:        map[string]*policy.TokenBucket{},
-		bucketCapacity: bucketCapacity,
-		bucketRefill:   bucketRefill,
-		rlOverrides:    rlOverrides,
-		store:          store,
-		onShareError:   onShareError,
+// callerEntry 是 registry.Caller 的运行面（限流桶 / 预算器随登记构造）。
+type callerEntry struct {
+	name   string
+	keys   []callerKey
+	scope  registry.CallerScope
+	rl     *policy.RateLimitBuckets // nil ⇒ 不限流（rate_limit 省略，⛔ 不套默认值）
+	budget *policy.Budget           // nil ⇒ token 预算不限（token_budget = 0）
+}
+
+// callerAuth 是调用方鉴权 + scope 三闸 + 审计（registry callers 单源）。
+type callerAuth struct {
+	entries []*callerEntry
+	logger  *slog.Logger
+}
+
+// newCallerAuth 从注册表 callers 构造鉴权面（callers 为空 ⇒ 开放模式，向后兼容
+// 本地单机形态）。限流桶 / 预算器按登记构造（store 非 nil ⇒ 跨实例共享一份配额）。
+func newCallerAuth(callers []registry.Caller, logger *slog.Logger, store share.Store, onShareError func(error)) *callerAuth {
+	if logger == nil {
+		logger = slog.Default()
 	}
-	if c.rlOverrides == nil {
-		c.rlOverrides = map[string]*policy.RateLimitBuckets{}
-	}
-	for _, k := range keys {
-		if k != "" {
-			c.keys[k] = true
+	c := &callerAuth{logger: logger}
+	for _, cl := range callers {
+		e := &callerEntry{name: cl.Name, scope: cl.Scope}
+		for _, k := range cl.Keys {
+			// 注册表已验 key_hash 形状（64 位小写 hex），此处解码不会失败。
+			raw, _ := hex.DecodeString(k.KeyHash)
+			e.keys = append(e.keys, callerKey{hash: raw, expiresAt: k.ExpiresAt})
 		}
+		if cl.RateLimit != nil {
+			if store != nil {
+				e.rl = policy.NewSharedRateLimitBuckets(store, "fg:rl:caller:"+cl.Name, onShareError,
+					cl.RateLimit.TPM, cl.RateLimit.RPM, cl.RateLimit.BurstS)
+			} else {
+				e.rl = policy.NewRateLimitBuckets(cl.RateLimit.TPM, cl.RateLimit.RPM, cl.RateLimit.BurstS)
+			}
+		}
+		if cl.Scope.TokenBudget > 0 {
+			if store != nil {
+				e.budget = policy.NewSharedBudget(store, "fg:budget:caller:", onShareError, cl.Scope.TokenBudget)
+			} else {
+				e.budget = policy.NewBudget(cl.Scope.TokenBudget)
+			}
+		}
+		c.entries = append(c.entries, e)
 	}
 	return c
 }
 
 // enabled 返回是否启用调用方鉴权。
-func (c *callerAuth) enabled() bool { return len(c.keys) > 0 }
+func (c *callerAuth) enabled() bool { return len(c.entries) > 0 }
 
-// identity 取请求的调用方身份：开放模式 ⇒ anonymous；开启鉴权 ⇒ 校验 Bearer key
-// （⛔ 不做常量时间比较之外的花活 —— key 命中即身份，未命中即 401）。
-func (c *callerAuth) identity(r *http.Request) (string, bool) {
-	if !c.enabled() {
-		return AnonymousCaller, true
-	}
+// authenticate 校验 Bearer key：SHA-256 哈希 + 常量时间比对 + 过期判定。
+// 返回 (entry, denyReason)；denyReason 非空 = 拒，仅供审计与内部归因 ——
+// ⛔ 响应恒为通用 401（缺失 / 无效 / 过期不区分，防枚举）。
+// 比对恒扫全部登记（不提前返回，观测到的差异只剩登记数量）；除常量时间比较外
+// ⛔ 不做任何按命中分支的花活。
+func (c *callerAuth) authenticate(r *http.Request) (*callerEntry, string) {
 	auth := r.Header.Get("Authorization")
 	key, ok := strings.CutPrefix(auth, "Bearer ")
-	if !ok {
-		return "", false
-	}
 	key = strings.TrimSpace(key)
-	if key == "" || !c.keys[key] {
-		return "", false
+	if !ok || key == "" {
+		return nil, "missing_key"
 	}
-	return key, true
+	sum := sha256.Sum256([]byte(key))
+	now := time.Now()
+	var matched *callerEntry
+	matchedExpired := false
+	for _, e := range c.entries {
+		for _, k := range e.keys {
+			if subtle.ConstantTimeCompare(sum[:], k.hash) != 1 {
+				continue
+			}
+			if k.expiresAt.After(now) {
+				matched = e
+			} else {
+				matchedExpired = true
+			}
+		}
+	}
+	if matched == nil {
+		if matchedExpired {
+			return nil, "expired_key"
+		}
+		return nil, "invalid_key"
+	}
+	return matched, ""
 }
 
-// wrap 是 /v1/* 的强制鉴权中间件（缺失 / 无效 ⇒ 401 auth，8.1 语义）。
+// audit 记校验判定四元组（R-43 / R-46）：caller / route / decision / correlation-id。
+// ⛔ 明文 key 与哈希都不入日志（审计只见身份名，不见凭据材料）。
+func (c *callerAuth) audit(caller, route, decision, reason, corr string) {
+	c.logger.Info("caller_decision",
+		"caller", caller,
+		"route", route,
+		"decision", decision,
+		"reason", reason,
+		"correlation_id", corr)
+}
+
+// wrap 是 /v1/* 的强制鉴权中间件：
+//   - 入口先剥离外部身份类 header（F-37，开放模式同样剥离）；
+//   - callers 为空 ⇒ 开放模式直通（向后兼容）；
+//   - 鉴权失败 ⇒ 401 通用错误（8.1 语义）+ 审计 deny（⛔ 拒绝静默）；
+//   - 鉴权成功 ⇒ 审计 allow，登记与关联号入 ctx（身份 = 网关自设）。
 func (c *callerAuth) wrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, ok := c.identity(r)
-		if !ok {
+		for _, h := range identityHeaders {
+			r.Header.Del(h)
+		}
+		if !c.enabled() {
+			next(w, r)
+			return
+		}
+		entry, deny := c.authenticate(r)
+		corr := clientRequestID(r)
+		route := r.Method + " " + r.URL.Path
+		if deny != "" {
+			c.audit(AnonymousCaller, route, "deny", deny, corr)
 			writeError(w, http.StatusUnauthorized, string(core.ErrAuth), "unauthorized",
 				"缺少或无效的调用方 API key（Authorization: Bearer <key>）")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), callerIdentityKey{}, id)))
+		c.audit(entry.name, route, "allow", "authenticated", corr)
+		ctx := context.WithValue(r.Context(), callerIdentityKey{}, entry)
+		ctx = context.WithValue(ctx, clientRequestIDKey{}, corr)
+		next(w, r.WithContext(ctx))
 	}
 }
 
-// rateLimitsFor 取指定调用方的契约配额桶（注册表 caller_rate_limits）；未登记 ⇒ nil（不限流）。
-func (c *callerAuth) rateLimitsFor(id string) *policy.RateLimitBuckets {
-	if c == nil {
-		return nil
+// scopeCheck 是 scope 三闸（R-43）：允许的模型集 / 端点集 / token 预算。
+// 返回拒绝原因（空 = 全过）；token 预算按调用方累计（Allow 预占、finalizeExec 记实际）。
+func (e *callerEntry) scopeCheck(model, endpoint string, est int64) string {
+	if !slices.Contains(e.scope.Models, model) {
+		return fmt.Sprintf("model out of scope: %s", model)
 	}
-	return c.rlOverrides[id]
-}
-
-// bucketFor 取（并按需创建）指定调用方的令牌桶；未启用每调用方限流 ⇒ nil。
-func (c *callerAuth) bucketFor(id string) *policy.TokenBucket {
-	if c == nil || c.bucketCapacity <= 0 || c.bucketRefill <= 0 {
-		return nil
+	if !slices.Contains(e.scope.Endpoints, endpoint) {
+		return fmt.Sprintf("endpoint out of scope: %s", endpoint)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	b, ok := c.buckets[id]
-	if !ok {
-		if c.store != nil {
-			// 共享键按调用方身份短哈希（⛔ 明文 key 不入存储键）。
-			sum := sha256.Sum256([]byte(id))
-			b = policy.NewSharedTokenBucket(c.store,
-				"fg:rl:caller-global:"+hex.EncodeToString(sum[:8]), c.onShareError, c.bucketCapacity, c.bucketRefill)
-		} else {
-			b = policy.NewTokenBucket(c.bucketCapacity, c.bucketRefill)
+	if e.budget != nil {
+		if err := e.budget.Allow(e.name, est); err != nil {
+			return fmt.Sprintf("token budget exceeded: %s", err.Error())
 		}
-		c.buckets[id] = b
 	}
-	return b
+	return ""
 }
 
-// callerIdentityOf 取请求的调用方身份（中间件放入 ctx；未放 ⇒ anonymous）。
+// allowsEndpoint 判端点是否在允许集（降级链过滤用；⛔ 降级不得绕过 scope）。
+func (e *callerEntry) allowsEndpoint(name string) bool {
+	return slices.Contains(e.scope.Endpoints, name)
+}
+
+// scopeFilterChain 按调用方 scope 过滤降级链候选（⛔ 降级不得绕过 scope：端点不在
+// 允许集的不作为降级目标 —— 否则「主端点限死、降级链全开」等于 scope 形同虚设；
+// 开放模式不过滤）。
+func scopeFilterChain(r *http.Request, chain []string) []string {
+	ce := callerEntryOf(r)
+	if ce == nil {
+		return chain
+	}
+	out := make([]string, 0, len(chain))
+	for _, name := range chain {
+		if ce.allowsEndpoint(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// recordUsage 记实际消耗（scope token 预算累计；无预算 / 未登记 ⇒ 无操作）。
+func (c *callerAuth) recordUsage(caller string, tokens int64) {
+	for _, e := range c.entries {
+		if e.name == caller {
+			if e.budget != nil {
+				e.budget.Record(caller, tokens)
+			}
+			return
+		}
+	}
+}
+
+// callerIdentityOf 取请求的调用方身份名（中间件放入 ctx；未放 ⇒ anonymous）。
 func callerIdentityOf(r *http.Request) string {
-	if id, ok := r.Context().Value(callerIdentityKey{}).(string); ok && id != "" {
-		return id
+	if e := callerEntryOf(r); e != nil {
+		return e.name
 	}
 	return AnonymousCaller
+}
+
+// callerEntryOf 取请求的调用方登记（scope / 限流 / 预算用；开放模式 ⇒ nil）。
+func callerEntryOf(r *http.Request) *callerEntry {
+	e, _ := r.Context().Value(callerIdentityKey{}).(*callerEntry)
+	return e
 }

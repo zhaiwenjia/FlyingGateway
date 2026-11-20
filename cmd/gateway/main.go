@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
@@ -42,10 +41,8 @@ const (
 	// adminTokenEnv 是管理面鉴权 token 的来源（统一 SDD 8.1：凭据只从环境变量读，
 	// ⛔ 不给明文命令行参数 —— argv 对同机用户可见）。
 	adminTokenEnv = "GATEWAY_ADMIN_TOKEN"
-	// callerKeysEnv 是调用方 API key 白名单（英文逗号 / 换行分隔；同理 ⛔ 不进 argv）。
-	callerKeysEnv = "GATEWAY_CALLER_KEYS"
 	// ⛔ 令牌桶无默认配额（统一 SDD 7.2 锚点分离）：契约配额走注册表 rate_limit /
-	// caller_rate_limits（未登记 ⇒ 不限流），全局兜底桶默认关闭。拍脑袋默认值是负债 ——
+	// callers.rate_limit（未登记 ⇒ 不限流），全局兜底桶默认关闭。拍脑袋默认值是负债 ——
 	// 旧默认（容量 60000 / 补充 10000 tokens/s）实测在小请求形态下造出 ≈454 rps
 	// 的隐藏吞吐天花板（P3 阶梯 c=256 档 429 实录，见 docs/20261114-限流过载-调研-*.md）。
 )
@@ -68,8 +65,6 @@ type options struct {
 	rateRefill   float64
 	budgetTokens int64
 
-	callerBucketCapacity   int64
-	callerBucketRefill     float64
 	upstreamBucketCapacity int64
 	upstreamBucketRefill   float64
 	rateLimitCooldown      time.Duration
@@ -160,10 +155,6 @@ func parseFlags(args []string) (*options, error) {
 	fs.Int64Var(&opts.budgetTokens, "budget-tokens", 0, "每调用方 token 预算上限（0 = 不限预算）")
 	fs.Int64Var(&opts.budgetTokens, "B", 0, "同 --budget-tokens")
 
-	fs.Int64Var(&opts.callerBucketCapacity, "caller-bucket-capacity", 0, "每调用方令牌桶的全局兜底容量（契约配额走注册表 caller_rate_limits；0 = 关闭）")
-	fs.Int64Var(&opts.callerBucketCapacity, "K", 0, "同 --caller-bucket-capacity")
-	fs.Float64Var(&opts.callerBucketRefill, "caller-bucket-refill", 0, "每调用方令牌桶的全局兜底补充速率（token/秒）")
-	fs.Float64Var(&opts.callerBucketRefill, "E", 0, "同 --caller-bucket-refill")
 	fs.Int64Var(&opts.upstreamBucketCapacity, "upstream-bucket-capacity", 0, "每自有令牌的本地令牌桶容量（契约配额走注册表 rate_limit；0 = 关闭）")
 	fs.Int64Var(&opts.upstreamBucketCapacity, "U", 0, "同 --upstream-bucket-capacity")
 	fs.Float64Var(&opts.upstreamBucketRefill, "upstream-bucket-refill", 0, "每自有令牌的本地令牌桶补充速率（token/秒）")
@@ -297,9 +288,6 @@ func run(args []string, stdout io.Writer) int {
 		TokenBucket:            bucket,
 		Budget:                 budget,
 		Guardrail:              guardrail,
-		CallerKeys:             splitEnvList(os.Getenv(callerKeysEnv)),
-		CallerBucketCapacity:   opts.callerBucketCapacity,
-		CallerBucketRefill:     opts.callerBucketRefill,
 		UpstreamBucketCapacity: opts.upstreamBucketCapacity,
 		UpstreamBucketRefill:   opts.upstreamBucketRefill,
 		RateLimitCooldown:      opts.rateLimitCooldown,
@@ -413,17 +401,6 @@ func run(args []string, stdout io.Writer) int {
 	}
 	_ = dataSrv.Close()
 	return 0
-}
-
-// splitEnvList 切分环境变量里的列表值（英文逗号 / 换行分隔；去空白、去空段）。
-func splitEnvList(v string) []string {
-	var out []string
-	for _, p := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
 }
 
 // detectPollFromBound 由检测延迟上界导出轮询兜底周期（上界的 1/4，统一 SDD 6.6）。

@@ -81,7 +81,6 @@ go build -o bin/gateway ./cmd/gateway
 | 变量                    | 用途                                                                                                                                      |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `<credential_ref>`    | 上游凭据。注册表每条 endpoint 的 `credential_ref` 写**环境变量名**（如 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`），真值由环境注入 |
-| `GATEWAY_CALLER_KEYS` | 调用方 API key 白名单（逗号 / 换行分隔）。非空 ⇒ `/v1/*` 强制鉴权；留空 = 开放模式                                                     |
 | `GATEWAY_ADMIN_TOKEN` | 管理面鉴权 token（仅开管理面时需要）                                                                                                      |
 
 **3. 配置文件**
@@ -108,8 +107,9 @@ curl http://127.0.0.1:8080/health
 
 ### 4.1 入口（客户端 → 网关）
 
-OpenAI 兼容 HTTP API。`GATEWAY_CALLER_KEYS` 非空时，`/v1/*` 须带
-`Authorization: Bearer <key>`（缺失 / 无效 ⇒ 401）。
+OpenAI 兼容 HTTP API。注册表 `callers` 非空时，`/v1/*` 须带
+`Authorization: Bearer <key>`（缺失 / 无效 / 过期 ⇒ 401 通用错误，三态不区分防枚举；
+超 scope ⇒ 403 `scope_exceeded`）。调用方登记与密钥生命周期见 4.5。
 
 **入口协议与模型族绑定（强制）**：Claude 模型（`provider_name: "anthropic"`）**只走**
 `/v1/messages`（Anthropic 形，由始至终 Anthropic SDK）；其它供应商模型**只走**
@@ -158,7 +158,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 | 头 | 说明 |
 |---|---|
-| `Authorization: Bearer <key>` | 调用方 key（`GATEWAY_CALLER_KEYS` 非空时必带） |
+| `Authorization: Bearer <key>` | 调用方 key（注册表 `callers` 非空时必带；只做调用方鉴权，⛔ 永不发给上游） |
 | `Content-Type: application/json` | 请求体为 JSON |
 | `X-Client-Request-Id` | 可选。本轮唯一标识，供 `/v1/cancel` 与请求合并；不传则网关生成 |
 
@@ -322,7 +322,8 @@ usage）→ `message_stop`。
 | 400 | `detect_failed` | 端点供应商识别失败（`base_url` / `upstream_model` 推断不出供应商） |
 | 400 | `ingress_protocol_mismatch` | 入口协议与模型族错配（Claude 模型须走 `/v1/messages`，其它供应商须走 OpenAI 形入口） |
 | 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
-| 401 | `unauthorized` | 调用方 API key 缺失或无效（`GATEWAY_CALLER_KEYS` 非空时） |
+| 401 | `unauthorized` | 调用方 API key 缺失 / 无效 / 过期（注册表 `callers` 非空时；三态同形防枚举，归因见审计） |
+| 403 | `scope_exceeded` | 超调用方 scope（模型集 / 端点集 / token 预算，见 4.5） |
 | 403 | `content_policy` | 护栏命中 |
 | 403 | `egress_denied` | 出网目标被拒（内网地址；本地环回需 `-allow-loopback`） |
 | 404 | `model_not_found` | 模型名不在注册表（⛔ 不透传任意模型名） |
@@ -371,8 +372,8 @@ usage）→ `message_stop`。
 
 - **路由语义**：`priority` = 显式有序降级链（主端点失败沿链回退，降级目标须可用，
   不可用显式报错）；`round_robin` = 轮转。路由决策可复现，顺序不依赖遍历偶然性。
-- **配额与过载（锚点分离）**：限流锚定套餐契约（`rate_limit` / 顶层 `caller_rate_limits`
-  按 key 登记，`key_ref` = 环境变量名），过载保护锚定实测容量（`--max-in-flight`）；
+- **配额与过载（锚点分离）**：限流锚定套餐契约（端点 `rate_limit` / 调用方 `callers.rate_limit`
+  按登记走，未登记 ⇒ 不限流），过载保护锚定实测容量（`--max-in-flight`）；
   两道闸并联判定，超限一律 `429` + `Retry-After`。多供应商混合流量下，每次上游尝试
   占它命中端点（或其共享组）的并发位与配额 —— 降级换供应商即换计数主体。
 - **上游多 key（`credential_rate_limits`）**：同一供应商多个 key（`credential_ref` 环境变量值
@@ -397,11 +398,56 @@ usage）→ `message_stop`。
   失败保留旧表。可热更：费率表、端点 `base_url`/`upstream_model`/`timeout_s`/
   `priority`/`context_window`/`max_output_tokens`/`capabilities`/`fallback_chains`；
   **需重启**（显式拒绝并列出）：端点增删、`rate_limit`/`concurrency_limit`/`limits_group`/
-  `breaker`/`credential_rate_limits`/`caller_rate_limits`（运行时组件绑定，热换会洗掉
+  `breaker`/`credential_rate_limits`/`callers`（运行时组件绑定，热换会洗掉
   桶余额/冷却/熔断状态）。
 - **多实例部署**：`-redis-addr` 接 Redis 后限流/预算/上游 429 冷却计数**跨实例一份配额**
   （Lua 原子扣减 + `TIME` 统一时钟；不设 = 内存单实例模式）；Redis 故障时限流/预算
   fail-open 放行 + warn 告警（业务可用性优先，恢复自动回归）。
+
+### 4.5 调用方校验（注册表 `callers`）
+
+调用方的**身份 + 密钥 + 过期 + scope + 配额**在注册表 `callers` 节合一登记（单源）。
+`callers` 为空 ⇒ 开放模式（不校验，本地形态）；非空 ⇒ `/v1/*` 强制鉴权。
+
+```json
+"callers": [
+  {
+    "name": "frontend",
+    "keys": [
+      { "key_hash": "<sha256 小写 hex 64 位>", "expires_at": "2027-02-18T00:00:00Z" }
+    ],
+    "scope": {
+      "models": ["gpt-6-luna", "gpt-4o"],
+      "endpoints": ["primary", "backup"],
+      "token_budget": 0
+    },
+    "rate_limit": { "tpm": 600000, "rpm": 600, "burst_s": 10 }
+  }
+]
+```
+
+| 字段 | 含义 |
+|---|---|
+| `name` | 调用方标识（审计 / 预算 / 限流按它归并；全局唯一） |
+| `keys[]` | 密钥登记 1–2 把：`key_hash` = key 的 **SHA-256 小写 hex**（⛔ 明文不入配置，非此形状启动报错）；`expires_at` = 过期时刻（RFC3339，必填、必须未来，⛔ 永不过期） |
+| `scope.models` | 允许的模型集（显式非空，须引用已登记模型；⛔ 不设默认全集） |
+| `scope.endpoints` | 允许的端点集（显式非空；降级链同样受此约束，⛔ 降级不绕过 scope） |
+| `scope.token_budget` | token 预算上限（0 = 不限）；触顶 ⇒ 403 `scope_exceeded` |
+| `rate_limit` | 可选，契约配额 `{tpm, rpm, burst_s}`；**未登记 ⇒ 不限流**，⛔ 不套默认值 |
+
+**密钥签发与轮换**：
+1. 生成 key（≥ 128 bit 熵）：`openssl rand -hex 32`；
+2. 只把哈希入配置：`printf '%s' '<key>' | shasum -a 256`（或 `openssl dgst -sha256`），
+   明文 key 通过安全信道交给调用方，⛔ 不落配置 / 日志 / 命令行；
+3. 轮换 = 新旧两把 key 并存（`keys` 放 2 条）→ 调用方切新 key → 旧 key 到期自动失效
+   或从配置移除（轮换窗口不断流，⛔ 不堆历史 key）；
+4. 过期：运行期到 `expires_at` 立即拒（401）；配置里留着过期 key 会在下次启动时报错。
+
+**判定与留痕**：鉴权（401）与 scope（403）判定都写审计行（结构化日志
+`caller_decision`）：`caller` / `route` / `decision` / `correlation_id` 四元组 + `reason`，
+⛔ 明文 key 与哈希都不入日志。入口剥离外部身份类 header（`X-User-Id` / `X-Org-Id` /
+`X-Role` / `X-Tenant-Id` / `X-Forwarded-User`，⛔ 公网 header 直通），身份一律以 key
+鉴权结果为准（网关自设）。
 
 ## 五、运行参数
 
@@ -421,8 +467,6 @@ usage）→ `message_stop`。
 | `--rate-capacity`            | `-C` | token 限流桶容量（0 = 不限流）                                                  | `0`                           |
 | `--rate-refill`              | `-R` | token 限流补充速率（token/秒）                                                  | `0`                           |
 | `--budget-tokens`            | `-B` | 每调用方 token 预算上限（0 = 不限）                                             | `0`                           |
-| `--caller-bucket-capacity`   | `-K` | 每调用方令牌桶的全局兜底容量（契约配额走 `caller_rate_limits`；0 = 关闭）     | `0`                           |
-| `--caller-bucket-refill`     | `-E` | 每调用方令牌桶的全局兜底补充速率（token/秒）                                    | `0`                           |
 | `--upstream-bucket-capacity` | `-U` | 每自有令牌的本地令牌桶容量（契约配额走注册表 `rate_limit`；0 = 关闭）         | `0`                           |
 | `--upstream-bucket-refill`   | `-u` | 每自有令牌的本地令牌桶补充速率（token/秒）                                      | `0`                           |
 | `--rate-limit-cooldown`      | `-k` | 上游 429 无 Retry-After 时的令牌默认冷却                                        | `30s`                         |

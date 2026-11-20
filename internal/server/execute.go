@@ -52,6 +52,10 @@ const (
 	clientRequestIDHeader = "X-Client-Request-Id"
 )
 
+// clientRequestIDKey 是 ctx 上的关联号键（鉴权中间件统一生成一次，审计与执行共用
+// 同一个 id —— ⛔ 不各生成一个、对不上账）。
+type clientRequestIDKey struct{}
+
 // handleChatCompletions 处理 POST /v1/chat/completions。
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.handle(w, r, modeChat)
@@ -188,7 +192,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	}
 
 	// 9. 治理三件套（上游请求之前，统一 SDD 2.3 / 7.2 / 8.3）。
-	if !s.checkGovernance(w, r, h, req, estInput, outCap) {
+	if !s.checkGovernance(w, r, h, req, ep, estInput, outCap) {
 		return // checkGovernance 已写响应
 	}
 
@@ -200,8 +204,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	s.runAttempts(w, r, h, req, mode, ep, &res, ad, int64(estInput+outCap))
 }
 
-// clientRequestID 取客户端提供的本轮唯一标识；未提供则生成（统一 SDD 6.5）。
+// clientRequestID 取本轮唯一标识：ctx（鉴权中间件统一生成）优先，其次客户端头，
+// 都没有则生成（统一 SDD 6.5）。
 func clientRequestID(r *http.Request) string {
+	if id, ok := r.Context().Value(clientRequestIDKey{}).(string); ok && id != "" {
+		return id
+	}
 	if id := r.Header.Get(clientRequestIDHeader); id != "" {
 		return id
 	}
@@ -429,12 +437,25 @@ func withUpstreamAuth(ctx context.Context, payload *upstreamAuth) context.Contex
 
 // ---- 治理（统一 SDD 2.3 治理三件套；均在上游请求之前）----
 
-// checkGovernance 依次过限流（全局 + 每调用方令牌桶）/ 预算 / 护栏；拒绝时写响应并返回 false。
+// checkGovernance 依次过 scope 三闸（模型集 / 端点集 / token 预算，R-43 / AC-36）/
+// 限流（全局 + 调用方契约配额）/ 预算 / 护栏；拒绝时写响应并返回 false。
 // 计数口径：归一化 token 的保守预估（估算输入 + 输出上限），⛔ 不只按请求数（8.3）。
-// 预算与调用方桶按**调用方身份**累计（调用方 key 与上游令牌解耦后的计费口径）。
-func (s *Server) checkGovernance(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, estInput, outCap int) bool {
+// scope 先于限流（⛔ 越权请求先烧配额）；契约配额与预算按**调用方身份**累计
+// （调用方 key 与上游令牌解耦后的计费口径）。
+func (s *Server) checkGovernance(w http.ResponseWriter, r *http.Request, h *execHandle, req *core.Request, ep *registry.Endpoint, estInput, outCap int) bool {
 	est := int64(estInput + outCap)
 	caller := callerIdentityOf(r)
+
+	// scope 三闸（AC-36 类三）：超 scope ⇒ 403 scope_exceeded + 审计（⛔ 拒绝静默）；
+	// 模型 / 端点 / 预算三闸合并一条判定留痕。
+	if ce := callerEntryOf(r); ce != nil {
+		if reason := ce.scopeCheck(req.Model, ep.Name, est); reason != "" {
+			s.callers.audit(caller, req.Model+"@"+ep.Name, "deny", reason, clientRequestID(r))
+			s.writeDetail(w, gwerrors.New(core.ErrAuth, http.StatusForbidden, "scope_exceeded", reason))
+			return false
+		}
+		s.callers.audit(caller, req.Model+"@"+ep.Name, "allow", "in scope", clientRequestID(r))
+	}
 
 	if s.bucket != nil {
 		if ok, retryAfter := s.bucket.Allow(est); !ok {
@@ -443,18 +464,11 @@ func (s *Server) checkGovernance(w http.ResponseWriter, r *http.Request, h *exec
 			return false
 		}
 	}
-	// 契约配额（caller_rate_limits）优先于全局兜底桶：登记了契约的 key 以契约为准，
-	// 全局兜底桶只兜未登记的 key（统一 SDD 7.2 锚点分离）。
-	if rl := s.callers.rateLimitsFor(caller); rl != nil {
-		if ok, retryAfter := rl.Allow(est); !ok {
+	// 调用方契约配额（registry callers.rate_limit）：省略 ⇒ 不限流（⛔ 不套默认值）。
+	if ce := callerEntryOf(r); ce != nil && ce.rl != nil {
+		if ok, retryAfter := ce.rl.Allow(est); !ok {
 			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
 				fmt.Sprintf("调用方契约配额超限（预估 %d 归一化 token），请稍后重试", est))
-			return false
-		}
-	} else if cb := s.callers.bucketFor(caller); cb != nil {
-		if ok, retryAfter := cb.Allow(est); !ok {
-			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
-				fmt.Sprintf("调用方 token 限流超限（预估 %d 归一化 token），请稍后重试", est))
 			return false
 		}
 	}
@@ -537,6 +551,7 @@ func (s *Server) handleContextExceeded(w http.ResponseWriter, r *http.Request, h
 		s.writeDetail(w, gwerrors.New(core.ErrContextExceeded, http.StatusBadRequest, "context_exceeded", security.Redact(ctxErr.Error())))
 		return
 	}
+	chain = scopeFilterChain(r, chain) // 降级不绕过 scope（R-43）
 	estInput := estimateInputTokens(req)
 	for _, name := range chain {
 		next := s.endpointByName(name)
@@ -644,6 +659,12 @@ func (s *Server) runAttempts(w http.ResponseWriter, r *http.Request, h *execHand
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
 		chain, err := routing.SelectChain(s.curReg().FallbackChains, ep.Name, kind)
 		if err != nil || counters.FallbackCount >= len(chain) {
+			s.endEndpointSpan(span, h, resp, detail)
+			s.writeFinalError(w, h, detail)
+			return
+		}
+		chain = scopeFilterChain(r, chain) // 降级不绕过 scope（R-43）
+		if counters.FallbackCount >= len(chain) {
 			s.endEndpointSpan(span, h, resp, detail)
 			s.writeFinalError(w, h, detail)
 			return

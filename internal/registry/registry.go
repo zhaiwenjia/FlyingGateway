@@ -12,6 +12,8 @@ package registry
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/routing"
 )
@@ -98,19 +101,39 @@ type RateLimit struct {
 	BurstS float64 `json:"burst_s"`
 }
 
-// CallerRateLimit 是按调用方 key 的配额登记（统一 SDD 7.2 锚点分离）。
-// KeyRef 是调用方 key 的**来源引用**（环境变量名），⛔ 不存明文 —— 调用方 key 也是凭据
-// （与 credential_ref 同一口径）；未登记的 key 不限流（⛔ 不套全局默认值）。
-type CallerRateLimit struct {
-	KeyRef string  `json:"key_ref"`
-	TPM    float64 `json:"tpm"`
-	RPM    float64 `json:"rpm"`
-	BurstS float64 `json:"burst_s"`
+// CallerKey 是调用方 key 的登记：SHA-256 哈希 + 过期时刻（R-43 / F-36：哈希存储、
+// 可轮换、有过期；⛔ 明文不入配置 —— key_hash 只收 64 位小写 hex，非此形状 = 明文
+// 混入，启动报错）。ExpiresAt 必填且必须是未来时刻（⛔ 永不过期；过期登记 = 配置
+// 错误，轮换后请同步清理）。
+type CallerKey struct {
+	KeyHash   string    `json:"key_hash"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// CallerScope 是 per-caller scope（R-43：允许的模型集 / 端点集 / token 预算）。
+// 模型集与端点集显式非空且引用已登记对象（⛔ 不设默认全集）；TokenBudget ≥ 0
+// （0 = 不限，超预算按 AC-36 归「超 scope」⇒ 403）。
+type CallerScope struct {
+	Models      []string `json:"models"`
+	Endpoints   []string `json:"endpoints"`
+	TokenBudget int64    `json:"token_budget,omitempty"`
+}
+
+// Caller 是调用方登记（registry callers 单源）：身份 + 密钥（哈希 + 过期）+ scope +
+// 配额合一登记 —— 替代明文 GATEWAY_CALLER_KEYS 白名单 + caller_rate_limits 双机制。
+// 调用方 key 只做调用方鉴权与限流 / 计费口径，⛔ 永不发给上游。Keys 1–2 把
+// （双 key 平滑轮换窗口，新旧并存、⛔ 堆历史 key）；RateLimit 省略 ⇒ 不限流
+// （⛔ 不套默认值，统一 SDD 7.2 锚点分离）。
+type Caller struct {
+	Name      string      `json:"name"`
+	Keys      []CallerKey `json:"keys"`
+	Scope     CallerScope `json:"scope"`
+	RateLimit *RateLimit  `json:"rate_limit,omitempty"`
 }
 
 // CredentialRateLimit 是上游自有令牌池的契约配额登记（同供应商多 key 场景，统一 SDD 7.2
 // 锚点分离）。⚠️ 与调用方令牌两域解耦：调用方 key 由外部项目签发（只管理本系统的消费额度，
-// 见 caller_rate_limits / 预算），⛔ 永不发给供应商；本登记只管**上游自有令牌**的套餐配额。
+// 见 callers.rate_limit / scope.token_budget），⛔ 永不发给供应商；本登记只管**上游自有令牌**的套餐配额。
 // KeyRef 与端点 credential_ref 同名的环境变量（池内多 key 逗号/换行分隔）；
 // 未登记 ⇒ 该池不限流（⛔ 不造默认值）。三层语义（可组合，任一不足即拒）：
 //   - PerKey：每个 key 一份桶（N 个 key = N 份套餐容量，业界多 key 池化的共识模型）；
@@ -130,8 +153,8 @@ type Registry struct {
 	// FallbackChains 是按失败类型的降级链（统一 SDD 7.4；实现计划偏差 4）：
 	// 键 = 失败类型，值 = 有序端点名数组（不含主端点语义由 routing.SelectChain 处理）。
 	FallbackChains map[routing.FailureKind][]string
-	// CallerRateLimits 是按调用方 key 的配额登记（key_ref = 环境变量名；未登记 ⇒ 不限流）。
-	CallerRateLimits []CallerRateLimit
+	// Callers 是调用方登记（registry callers 单源：哈希 key + 过期 + scope + 配额合一）。
+	Callers []Caller
 	// CredentialRateLimits 是上游令牌池的契约配额登记（多 key：per_key / shared / key_limits）。
 	CredentialRateLimits []CredentialRateLimit
 
@@ -145,7 +168,7 @@ type fileWire struct {
 	Strategy             string                `json:"strategy"`
 	Endpoints            []Endpoint            `json:"endpoints"`
 	FallbackChains       map[string][]string   `json:"fallback_chains"`
-	CallerRateLimits     []CallerRateLimit     `json:"caller_rate_limits"`
+	Callers              []Caller              `json:"callers"`
 	CredentialRateLimits []CredentialRateLimit `json:"credential_rate_limits"`
 }
 
@@ -240,17 +263,72 @@ func Load(path string) (*Registry, error) {
 		groupDecl[key] = d
 	}
 
-	// 调用方配额登记（可选）：key_ref 是环境变量名（⛔ 不存明文），配额口径与端点 rate_limit 同。
-	for i, crl := range doc.CallerRateLimits {
-		who := fmt.Sprintf("第 %d 条 caller_rate_limits", i+1)
-		if crl.KeyRef == "" {
-			return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：key_ref 缺失或为空（只存来源引用，⛔ 不存明文 key）", path, who)
+	// 调用方登记（可选；registry callers 单源 —— 哈希 key + 过期 + scope + 配额合一，
+	// R-43 / F-36 / Q-23）：⛔ 明文 key（key_hash 只收 64 位小写 hex）、⛔ 永不过期
+	//（expires_at 必填且必须未来）、scope 显式（模型集 / 端点集非空且引用已登记）、
+	// 轮换窗口双 key（1–2 把，⛔ 堆历史 key）、key_hash 全局唯一。
+	if len(doc.Callers) > 0 {
+		modelSet := make(map[string]bool, len(doc.Endpoints))
+		for _, ep := range doc.Endpoints {
+			modelSet[ep.Model] = true
 		}
-		if err := validateRateLimitShape(path, who, crl.TPM, crl.RPM, crl.BurstS); err != nil {
-			return nil, err
+		seenName := make(map[string]bool, len(doc.Callers))
+		seenHash := make(map[string]bool)
+		for i, cl := range doc.Callers {
+			who := fmt.Sprintf("第 %d 条 callers", i+1)
+			if cl.Name == "" {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：name 缺失或为空（审计 / 预算 / 限流按 name 归并）", path, who)
+			}
+			if seenName[cl.Name] {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s：name %q 重复（全局唯一）", path, who, cl.Name)
+			}
+			seenName[cl.Name] = true
+			if len(cl.Keys) < 1 || len(cl.Keys) > 2 {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：keys 数量 = %d，须 1–2 把（双 key 平滑轮换窗口，⛔ 堆历史 key）", path, who, cl.Name, len(cl.Keys))
+			}
+			for j, k := range cl.Keys {
+				// 存储形态检查（AC-36）：key_hash 只收 64 位小写 hex —— 明文 / 非 SHA-256 形态
+				// 一律拒（⛔ 配置里出现可直接使用的凭据）。
+				decoded, err := hex.DecodeString(k.KeyHash)
+				if err != nil || len(decoded) != sha256.Size || k.KeyHash != strings.ToLower(k.KeyHash) {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）的 keys[%d].key_hash 非 64 位小写 hex（疑似明文 key？⛔ 只存 SHA-256 哈希）", path, who, cl.Name, j)
+				}
+				if seenHash[k.KeyHash] {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）的 keys[%d].key_hash 与已有登记重复（全局唯一）", path, who, cl.Name, j)
+				}
+				seenHash[k.KeyHash] = true
+				if k.ExpiresAt.IsZero() {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）的 keys[%d].expires_at 缺失（⛔ 永不过期，F-36）", path, who, cl.Name, j)
+				}
+				if !k.ExpiresAt.After(time.Now()) {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）的 keys[%d].expires_at = %s 已过期（轮换后请同步清理过期 key）", path, who, cl.Name, j, k.ExpiresAt.Format(time.RFC3339))
+				}
+			}
+			if len(cl.Scope.Models) == 0 || len(cl.Scope.Endpoints) == 0 {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.models / scope.endpoints 必须显式非空（⛔ 不设默认全集）", path, who, cl.Name)
+			}
+			if cl.Scope.TokenBudget < 0 {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.token_budget = %d 不得为负（0 = 不限）", path, who, cl.Name, cl.Scope.TokenBudget)
+			}
+			for _, m := range cl.Scope.Models {
+				if !modelSet[m] {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.models 引用不存在的模型 %q", path, who, cl.Name, m)
+				}
+			}
+			for _, n := range cl.Scope.Endpoints {
+				if !seen[n] {
+					return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.endpoints 引用不存在的端点 %q", path, who, cl.Name, n)
+				}
+			}
+			if cl.RateLimit != nil {
+				if err := validateRateLimitShape(path, fmt.Sprintf("%s（%s）的 rate_limit", who, cl.Name),
+					cl.RateLimit.TPM, cl.RateLimit.RPM, cl.RateLimit.BurstS); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
-	r.CallerRateLimits = doc.CallerRateLimits
+	r.Callers = doc.Callers
 
 	// 上游令牌池契约配额（可选）：三层至少登记一层，各层形状与 rate_limit 同口径。
 	for i, crl := range doc.CredentialRateLimits {
@@ -383,7 +461,7 @@ func validateEndpoint(path string, ordinal int, ep Endpoint) error {
 	return nil
 }
 
-// validateRateLimitShape 校验配额登记形状（端点 rate_limit 与 caller_rate_limits 共用）：
+// validateRateLimitShape 校验配额登记形状（端点 rate_limit / callers.rate_limit / credential_rate_limits 共用）：
 // burst_s 必须为正（桶深 = 速率/60 × burst_s，突发上限由部署方按真实扇出登记，⛔ 不猜）；
 // tpm / rpm 不得为负且至少一维为正（两维全 0 = 不限流 ⇒ 请直接省略该登记，别写空壳）。
 func validateRateLimitShape(path, who string, tpm, rpm, burstS float64) error {
