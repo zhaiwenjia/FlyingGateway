@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/routing"
 )
@@ -466,21 +467,87 @@ func TestLoadLimitsGroupConsistency(t *testing.T) {
 	}
 }
 
-// TestLoadCallerRateLimits 断言 caller_rate_limits 解析与校验（key_ref 必填 —— 只存来源引用）。
-func TestLoadCallerRateLimits(t *testing.T) {
-	okRaw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
-      "caller_rate_limits": [{"key_ref": "CALLER_KEY_A", "tpm": 60000, "rpm": 600, "burst_s": 5}]}`
+// TestLoadCallers 断言 callers 合同面（registry callers 单源，R-43 / F-36）解析与校验：
+// 哈希存储（key_hash 形状不合法 = 明文混入 ⇒ 报错）、必有过期（缺失 / 已过期 ⇒ 报错）、
+// scope 显式（模型集 / 端点集非空且引用存在）、轮换双 key 上限、配额形状与端点同口径。
+func TestLoadCallers(t *testing.T) {
+	const hashA = "1111111111111111111111111111111111111111111111111111111111111111"
+	const hashB = "2222222222222222222222222222222222222222222222222222222222222222"
+	// hashC 含字母（数字无大小写，纯数字哈希验不出大小写形态拒）。
+	const hashC = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	key := func(hash, expires string) string {
+		return `{"key_hash": "` + hash + `", "expires_at": "` + expires + `"}`
+	}
+	caller := func(name, keys, models, endpoints string, extra string) string {
+		return `{"name": "` + name + `", "keys": [` + keys + `],
+      "scope": {"models": [` + models + `], "endpoints": [` + endpoints + `]}` + extra + `}`
+	}
+	base := func(callers string) string {
+		return `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `], "callers": [` + callers + `]}`
+	}
+
+	// 合法：单 key + scope + 契约配额。
+	okRaw := base(caller("harness", key(hashA, future), `"m-a"`, `"a"`,
+		`, "rate_limit": {"tpm": 60000, "rpm": 600, "burst_s": 5}`))
 	reg, err := Load(writeConfig(t, okRaw))
 	if err != nil {
-		t.Fatalf("合法 caller_rate_limits 不应报错: %v", err)
+		t.Fatalf("合法 callers 不应报错: %v", err)
 	}
-	if len(reg.CallerRateLimits) != 1 || reg.CallerRateLimits[0].KeyRef != "CALLER_KEY_A" {
-		t.Fatalf("caller_rate_limits 解析失真: %+v", reg.CallerRateLimits)
+	if len(reg.Callers) != 1 || reg.Callers[0].Name != "harness" ||
+		len(reg.Callers[0].Keys) != 1 || reg.Callers[0].Keys[0].KeyHash != hashA ||
+		reg.Callers[0].Scope.TokenBudget != 0 || reg.Callers[0].RateLimit == nil {
+		t.Fatalf("callers 解析失真: %+v", reg.Callers)
 	}
-	badRaw := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
-      "caller_rate_limits": [{"key_ref": "", "tpm": 60000, "rpm": 600, "burst_s": 5}]}`
-	if _, err := Load(writeConfig(t, badRaw)); err == nil {
-		t.Fatal("缺 key_ref 的 caller_rate_limits 应报错")
+
+	// 合法：轮换窗口双 key（新旧并存）。
+	okDual := base(caller("harness", key(hashA, future)+","+key(hashB, future), `"m-a"`, `"a"`, ``))
+	if _, err := Load(writeConfig(t, okDual)); err != nil {
+		t.Fatalf("轮换双 key 不应报错: %v", err)
+	}
+
+	bads := map[string]string{
+		"key_hash 明文形态（非 64 位小写 hex）": base(caller("harness", key("ck-plaintext-key", future), `"m-a"`, `"a"`, ``)),
+		"key_hash 大写 hex":             base(caller("harness", key(strings.ToUpper(hashC), future), `"m-a"`, `"a"`, ``)),
+		"expires_at 缺失（永不过期，F-36）":    base(caller("harness", `{"key_hash": "`+hashA+`"}`, `"m-a"`, `"a"`, ``)),
+		"expires_at 已过期":              base(caller("harness", key(hashA, past), `"m-a"`, `"a"`, ``)),
+		"keys 为空":                     base(caller("harness", ``, `"m-a"`, `"a"`, ``)),
+		"keys 超过 2（⛔ 堆历史 key）":        base(caller("harness", key(hashA, future)+","+key(hashB, future)+","+key(strings.Repeat("3", 64), future), `"m-a"`, `"a"`, ``)),
+		"scope.models 为空":             base(caller("harness", key(hashA, future), ``, `"a"`, ``)),
+		"scope.endpoints 为空":          base(caller("harness", key(hashA, future), `"m-a"`, ``, ``)),
+		"scope.models 引用不存在的模型":       base(caller("harness", key(hashA, future), `"nope"`, `"a"`, ``)),
+		"scope.endpoints 引用不存在的端点":    base(caller("harness", key(hashA, future), `"m-a"`, `"nope"`, ``)),
+		"token_budget 为负": `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+      "callers": [{"name": "harness", "keys": [` + key(hashA, future) + `],
+      "scope": {"models": ["m-a"], "endpoints": ["a"], "token_budget": -1}}]}`,
+		"name 缺失": base(caller("", key(hashA, future), `"m-a"`, `"a"`, ``)),
+		"rate_limit 形状非法（两维全 0）": base(caller("harness", key(hashA, future), `"m-a"`, `"a"`, `, "rate_limit": {"tpm": 0, "rpm": 0, "burst_s": 5}`)),
+	}
+	for name, raw := range bads {
+		if _, err := Load(writeConfig(t, raw)); err == nil {
+			t.Errorf("%s 应报错", name)
+		}
+	}
+
+	// 重复 name / 重复 key_hash 全局唯一。
+	dupName := base(caller("harness", key(hashA, future), `"m-a"`, `"a"`, ``) + "," +
+		caller("harness", key(hashB, future), `"m-a"`, `"a"`, ``))
+	if _, err := Load(writeConfig(t, dupName)); err == nil {
+		t.Error("重复 name 应报错")
+	}
+	dupHash := base(caller("harness", key(hashA, future), `"m-a"`, `"a"`, ``) + "," +
+		caller("other", key(hashA, future), `"m-a"`, `"a"`, ``))
+	if _, err := Load(writeConfig(t, dupHash)); err == nil {
+		t.Error("重复 key_hash 应报错")
+	}
+
+	// 反向锁：合法双 key + 预算 + 无配额（rate_limit 省略 = 不限流）也必须放行。
+	okFull := `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
+      "callers": [{"name": "harness", "keys": [` + key(hashA, future) + `,` + key(hashB, future) + `],
+      "scope": {"models": ["m-a"], "endpoints": ["a"], "token_budget": 5000}}]}`
+	if _, err := Load(writeConfig(t, okFull)); err != nil {
+		t.Fatalf("合法双 key + 预算登记不应报错: %v", err)
 	}
 }
 

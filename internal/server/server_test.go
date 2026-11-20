@@ -336,7 +336,7 @@ func primaryEP(base string) epSpec {
 }
 
 // writeRegistry 写注册表配置并加载（strategy=priority；chains 可空；extraTop 可注入
-// 顶层附加节，如 caller_rate_limits）。
+// 顶层附加节，如 callers）。
 func writeRegistry(t *testing.T, eps []epSpec, chains map[string][]string, extraTop ...map[string]any) *registry.Registry {
 	t.Helper()
 	epsWire := make([]map[string]any, 0, len(eps))
@@ -381,7 +381,7 @@ type env struct {
 
 // newEnv 装配测试环境：假上游 → 注册表 → server.New → httptest 真实监听。
 // tweak 在 New 之前改 Options（限流 / 预算 / 护栏 / 取消窗口等）；
-// extraTop 注入注册表顶层附加节（如 caller_rate_limits）。
+// extraTop 注入注册表顶层附加节（如 callers）。
 func newEnv(t *testing.T, eps func(base string) []epSpec, chains map[string][]string, tweak func(o *Options), extraTop ...map[string]any) *env {
 	t.Helper()
 	t.Setenv("TEST_KEY_OPENAI", "sk-gw-openai-0001")

@@ -51,17 +51,10 @@ type Options struct {
 	// AllowLoopbackEgress 控制出网校验是否放行环回地址（本地 Ollama 等，统一 SDD 8.2）。
 	AllowLoopbackEgress bool
 
-	// ---- 调用方 API key 与令牌桶（与上游自有令牌解耦）----
-
-	// CallerKeys 是调用方 API key 白名单（Authorization: Bearer <key>）。
-	// 空 = 开放模式（不校验）；非空 ⇒ /v1/* 强制鉴权，缺失 / 无效 401（统一 SDD 8.1）。
-	CallerKeys []string
-	// CallerBucketCapacity / CallerBucketRefill 是每调用方令牌桶的**全局兜底**参数（token 维，
-	// ≤ 0 = 不启用）。契约级配额走注册表 caller_rate_limits（key_ref 按 key 逐个登记，
-	// 未登记不限流，统一 SDD 7.2 锚点分离）——⛔ 本字段不再有默认值（旧默认
-	// 60000/10000 实测在小请求形态下造出 ≈454 rps 隐藏天花板）。
-	CallerBucketCapacity int64
-	CallerBucketRefill   float64
+	// ---- 调用方校验（registry callers 单源，R-43 / AC-36）----
+	// 调用方登记（哈希 key + 过期 + scope + 配额）全部来自注册表 callers 节：
+	// callers 为空 ⇒ 开放模式（不校验，向后兼容本地形态）；非空 ⇒ /v1/* 强制鉴权，
+	// 缺失 / 无效 / 过期 401、超 scope 403（鉴权面见 caller.go）。
 
 	// MaxInFlight 是过载保护的在途请求数上限（load shedding，锚定实测容量，统一 SDD 7.2
 	// 锚点分离：限流护套餐配额、过载闸护网关自身容量）；≤ 0 = 不启用。
@@ -263,8 +256,6 @@ func New(opts Options) (*Server, error) {
 		}
 		s.limitGroups[key] = g
 	}
-	// 每调用方契约配额（caller_rate_limits：key_ref = 环境变量名，⛔ 不存明文）。
-	// key_ref 环境变量未设置 ⇒ 启动报错（⛔ 不静默忽略登记）。
 	// 上游令牌池契约配额（多 key：per_key 每 key 一份桶 / shared 全池共享 / key_limits 逐 key 覆盖）。
 	// key_ref 环境变量未设置 ⇒ 启动报错（⛔ 不静默忽略登记）。
 	poolLim := make(map[string]*poolLimits, len(opts.Registry.CredentialRateLimits))
@@ -290,21 +281,9 @@ func New(opts Options) (*Server, error) {
 		poolLim[crl.KeyRef] = pl
 	}
 
-	callerRL := make(map[string]*policy.RateLimitBuckets, len(opts.Registry.CallerRateLimits))
-	for _, crl := range opts.Registry.CallerRateLimits {
-		key := strings.TrimSpace(os.Getenv(crl.KeyRef))
-		if key == "" {
-			return nil, fmt.Errorf("server: caller_rate_limits 的 key_ref %q 未在环境变量中取到值（⛔ 不静默忽略登记）", crl.KeyRef)
-		}
-		if opts.Share != nil {
-			callerRL[key] = policy.NewSharedRateLimitBuckets(opts.Share, "fg:rl:caller:"+crl.KeyRef, onShareError,
-				crl.TPM, crl.RPM, crl.BurstS)
-		} else {
-			callerRL[key] = policy.NewRateLimitBuckets(crl.TPM, crl.RPM, crl.BurstS)
-		}
-	}
 	s.pools = newPoolManager(opts.UpstreamBucketCapacity, opts.UpstreamBucketRefill, opts.RateLimitCooldown, poolLim, opts.Share, onShareError)
-	s.callers = newCallerAuth(opts.CallerKeys, opts.CallerBucketCapacity, opts.CallerBucketRefill, callerRL, opts.Share, onShareError)
+	// 调用方校验面（registry callers 单源）：哈希 key + 过期 + scope + 配额随登记构造。
+	s.callers = newCallerAuth(opts.Registry.Callers, s.logger, opts.Share, onShareError)
 	// 端点熔断器（统一 SDD 7.3）：逐端点按注册表 breaker 配置构造（缺省 = 默认 5/30s/1）。
 	s.breakers = make(map[string]*EndpointBreaker, len(opts.Registry.List()))
 	for _, ep := range opts.Registry.List() {
@@ -326,7 +305,7 @@ func New(opts Options) (*Server, error) {
 }
 
 // Handler 返回数据面路由（统一 SDD 2.1 ①）。
-// /v1/* 经调用方鉴权（CallerKeys 非空时强制）；/health 保持开放（存活探针）。
+// /v1/* 经调用方鉴权（注册表 callers 非空时强制）；/health 保持开放（存活探针）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.callers.wrap(s.handleChatCompletions))
@@ -592,7 +571,7 @@ type ReloadOutcome struct {
 //
 // ⛔ 需重启（显式拒绝并列出，⛔ 不静默半生效）：端点增删、rate_limit /
 // concurrency_limit / limits_group / breaker / credential_rate_limits /
-// caller_rate_limits 变更 —— 这些在启动时构建运行时组件（令牌池 / 配额组 / 熔断器 /
+// callers 变更 —— 这些在启动时构建运行时组件（令牌池 / 配额组 / 熔断器 /
 // 调用方桶），热换组件会把桶余额、429 冷却、熔断状态一并洗掉或产生半应用态。
 func (s *Server) Reload() ReloadOutcome {
 	if s.regPath == "" {
@@ -662,8 +641,8 @@ func restartRequiredDiffs(oldReg, newReg *registry.Registry) []string {
 	if !reflect.DeepEqual(oldReg.CredentialRateLimits, newReg.CredentialRateLimits) {
 		rr = append(rr, "credential_rate_limits")
 	}
-	if !reflect.DeepEqual(oldReg.CallerRateLimits, newReg.CallerRateLimits) {
-		rr = append(rr, "caller_rate_limits")
+	if !reflect.DeepEqual(oldReg.Callers, newReg.Callers) {
+		rr = append(rr, "callers")
 	}
 	sort.Strings(rr)
 	return rr

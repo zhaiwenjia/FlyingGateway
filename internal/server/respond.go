@@ -302,6 +302,8 @@ func (s *Server) finalizeExec(h *execHandle, req *core.Request, caller string, s
 			// 预算按**调用方**累计（调用方 key 与上游令牌解耦后的计费口径）。
 			s.budget.Record(caller, u.NormalizedTokens())
 		}
+		// scope token 预算同口径记实际消耗（Allow 预占、这里落账；R-43 预算闸）。
+		s.callers.recordUsage(caller, u.NormalizedTokens())
 		if s.curRates() != nil {
 			rate := s.curRates().Lookup(h.upstreamModelName())
 			c := cost.CalculateCost(u, rate, startTime)

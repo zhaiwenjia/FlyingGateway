@@ -90,12 +90,25 @@
     "timeout": ["backup"],
     "upstream_error": ["backup", "local"]
   },
-  "caller_rate_limits": [
+  "callers": [
     {
-      "key_ref": "CALLER_KEY_FRONTEND",
-      "tpm": 600000,
-      "rpm": 600,
-      "burst_s": 10
+      "name": "frontend",
+      "keys": [
+        {
+          "key_hash": "9c2e0b6a4b5c1d8e7f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e",
+          "expires_at": "2027-02-18T00:00:00Z"
+        }
+      ],
+      "scope": {
+        "models": ["gpt-6-luna", "gpt-4o"],
+        "endpoints": ["primary", "backup"],
+        "token_budget": 0
+      },
+      "rate_limit": {
+        "tpm": 600000,
+        "rpm": 600,
+        "burst_s": 10
+      }
     }
   ]
 }

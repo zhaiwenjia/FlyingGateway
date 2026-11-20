@@ -56,14 +56,13 @@ func TestSharedCooldownAcrossInstances(t *testing.T) {
 }
 
 // TestSharedCallerLimitAcrossServers 端到端钉住「两网关实例共享一份调用方配额」：
-// 两台 Server 同注册表（caller_rate_limits 登记 rpm=60/burst=1 ⇒ 请求桶深 1）共享
+// 两台 Server 同注册表（callers.rate_limit 登记 rpm=60/burst=1 ⇒ 请求桶深 1）共享
 // 同一 Redis ⇒ 实例 1 扣掉的配额实例 2 立即可见（实例 2 的请求被 429）。
 // 错误实现对照：共享没接上 ⇒ 实例 2 放行 ⇒ 红。
 func TestSharedCallerLimitAcrossServers(t *testing.T) {
 	rs := redisStoreForTest(t)
 	uniq := time.Now().Format("150405.000000000")
 	t.Setenv("TEST_KEY_MIMO", "sk-gw-mimo-0003")
-	t.Setenv("TEST_CALLER_RL_"+uniq, "caller-key-rl-"+uniq)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, ""+
@@ -78,9 +77,9 @@ func TestSharedCallerLimitAcrossServers(t *testing.T) {
 		provider: "xiaomi", credRef: "TEST_KEY_MIMO",
 		ctxWindow: 128000, maxOut: 1024, priority: 0, timeoutS: 5,
 	}}, nil, map[string]any{
-		"caller_rate_limits": []map[string]any{
-			{"key_ref": "TEST_CALLER_RL_" + uniq, "tpm": 0, "rpm": 60, "burst_s": 1},
-		},
+		"callers": []map[string]any{callersWire("rl", "caller-key-rl-"+uniq, time.Now().Add(24*time.Hour),
+			[]string{"m"}, []string{"primary"}, 0,
+			map[string]any{"tpm": 0, "rpm": 60, "burst_s": 1})},
 	})
 	mk := func() *httptest.Server {
 		srv, err := New(Options{
@@ -90,7 +89,6 @@ func TestSharedCallerLimitAcrossServers(t *testing.T) {
 			AllowLoopbackEgress: true,
 			Logger:              testLogger(),
 			Share:               rs,
-			CallerKeys:          []string{"caller-key-rl-" + uniq},
 		})
 		if err != nil {
 			t.Fatalf("server.New 失败: %v", err)
