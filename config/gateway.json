@@ -1,0 +1,124 @@
+{
+  "strategy": "priority",
+  "endpoints": [
+    {
+      "name": "qwen-flash",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen3.8-flash",
+      "upstream_model": "qwen3.8-flash",
+      "provider_name": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "QWEN_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "glm-flash",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "glm-5.3-flash",
+      "upstream_model": "glm-5.3-flash",
+      "provider_name": "zhipu",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "ZHIPU_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "deepseek-flash",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-flash",
+      "upstream_model": "deepseek-flash",
+      "provider_name": "deepseek",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": false
+      },
+      "credential_ref": "DEEPSEEK_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "kimi-k3",
+      "base_url": "https://api.moonshot.cn/v1",
+      "model": "kimi-k3.1-pro",
+      "upstream_model": "kimi-k3.1-pro",
+      "provider_name": "moonshot",
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "MOONSHOT_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "mimo-flash",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "model": "mimo-v2.6-flash",
+      "upstream_model": "mimo-v2.6-flash",
+      "provider_name": "xiaomi",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "MIMO_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "minimax-m31-flash",
+      "base_url": "https://api.minimax.cn/v1",
+      "model": "MiniMax-M3.1-Flash",
+      "upstream_model": "MiniMax-M3.1-Flash",
+      "provider_name": "minimax",
+      "context_window": 1000000,
+      "max_output_tokens": 0,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "MINIMAX_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    },
+    {
+      "name": "openai-luna",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-6-luna",
+      "upstream_model": "gpt-6-luna",
+      "provider_name": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "supports_tools": true,
+        "supports_stream": true,
+        "supports_vision": true
+      },
+      "credential_ref": "OPENAI_API_KEY",
+      "timeout_s": 60,
+      "priority": 0
+    }
+  ]
+}
