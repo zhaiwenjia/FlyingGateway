@@ -101,19 +101,20 @@ func TestLoadRatesReconcileOpenAI(t *testing.T) {
 	}
 }
 
-// TestLoadRatesReconcileAnthropic 对账 5.4.3 Anthropic 五行逐字（含 haiku 两档），
-// 缓存写入 5m（cache_write_cny）/ 1h（cache_write_long_cny）分列；
-// haiku >100K 档行 key = claude-haiku-5.5@prompt-gt-100k（表内「claude-haiku-5.5（prompt >100K）」行）。
+// TestLoadRatesReconcileAnthropic 对账 5.4.3 Anthropic 四行逐字，
+// 缓存写入 5m（cache_write_cny）/ 1h（cache_write_long_cny）分列。
+// 2026-11-21 移除「claude-haiku-5.5（prompt >100K）」行（key = claude-haiku-5.5@prompt-gt-100k）：
+// Lookup 按精确模型名索引（rates.go Lookup）且全仓无代码构造该 key ⇒ 运行期不可达的死数据；
+// SDD 5.4.3 与 docs/20261113-供应商模型费率表.md 仍记录官方两档价（调研事实，未改）。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/cost/ -run TestLoadRatesReconcileAnthropic -v
 func TestLoadRatesReconcileAnthropic(t *testing.T) {
 	rs := loadTestRates(t)
 	want := map[string][5]float64{
 		// {输入, 写入5m, 写入1h, 命中, 输出}（5.4.3 逐字）
-		"claude-fable-5.2":                {56.0000, 70.0000, 112.0000, 1.4000, 280.0000},
-		"claude-opus-5.5":                 {28.0000, 35.0000, 56.0000, 1.4000, 140.0000},
-		"claude-sonnet-5.5":               {14.0000, 17.5000, 28.0000, 0.7000, 70.0000},
-		"claude-haiku-5.5":                {0.7000, 0.8750, 1.4000, 0.0700, 3.5000},
-		"claude-haiku-5.5@prompt-gt-100k": {3.5000, 4.3750, 7.0000, 0.3500, 17.5000},
+		"claude-fable-5.2":  {56.0000, 70.0000, 112.0000, 1.4000, 280.0000},
+		"claude-opus-5.5":   {28.0000, 35.0000, 56.0000, 1.4000, 140.0000},
+		"claude-sonnet-5.5": {14.0000, 17.5000, 28.0000, 0.7000, 70.0000},
+		"claude-haiku-5.5":  {0.7000, 0.8750, 1.4000, 0.0700, 3.5000},
 	}
 	for model, w := range want {
 		r := rs.Lookup(model)
@@ -329,14 +330,14 @@ func TestLoadRatesReconcileOllama(t *testing.T) {
 	}
 }
 
-// TestLoadRatesRowCount 钉住费率表行数与字段结构：11 张表 26 个数据行
-// （DeepSeek 2 + OpenAI 4 + Anthropic 5 含 haiku 两档 + Gemini 4 + Kimi 1 + 智谱 2 +
+// TestLoadRatesRowCount 钉住费率表行数与字段结构：11 张表 25 个数据行
+// （DeepSeek 2 + OpenAI 4 + Anthropic 4（haiku >100K 档行 2026-11-21 移除）+ Gemini 4 + Kimi 1 + 智谱 2 +
 // MiniMax 1 + Grok 1 + Qwen 3 + MiMo 2 + Ollama 1），命中 / 写入字段分列互不共用。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/cost/ -run TestLoadRatesRowCount -v
 func TestLoadRatesRowCount(t *testing.T) {
 	rs := loadTestRates(t)
-	if len(rs.rows) != 26 {
-		t.Fatalf("费率行数 = %d，期望 26（SDD 5.4 十一张表数据行合计）", len(rs.rows))
+	if len(rs.rows) != 25 {
+		t.Fatalf("费率行数 = %d，期望 25（SDD 5.4 十一张表数据行合计）", len(rs.rows))
 	}
 	// 缓存命中 / 写入分列：qwen3.8-27b 三个字段值互不相同 ⇒ 不是同一个字段记三个名字
 	r := rs.Lookup("qwen3.8-27b")
