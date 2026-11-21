@@ -2,7 +2,7 @@
   "strategy": "priority",
   "endpoints": [
     {
-      "name": "qwen-flash",
+      "name": "qwen3.8-flash",
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "model": "qwen3.8-flash",
       "upstream_model": "qwen3.8-flash",
@@ -19,7 +19,7 @@
       "priority": 0
     },
     {
-      "name": "glm-flash",
+      "name": "glm-5.3-flash",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
       "model": "glm-5.3-flash",
       "upstream_model": "glm-5.3-flash",
@@ -53,7 +53,7 @@
       "priority": 0
     },
     {
-      "name": "kimi-k3",
+      "name": "kimi-k3.1-pro",
       "base_url": "https://api.moonshot.cn/v1",
       "model": "kimi-k3.1-pro",
       "upstream_model": "kimi-k3.1-pro",
@@ -70,7 +70,7 @@
       "priority": 0
     },
     {
-      "name": "mimo-flash",
+      "name": "mimo-v2.6-flash",
       "base_url": "https://api.xiaomimimo.com/v1",
       "model": "mimo-v2.6-flash",
       "upstream_model": "mimo-v2.6-flash",
@@ -87,7 +87,7 @@
       "priority": 0
     },
     {
-      "name": "minimax-m31-flash",
+      "name": "MiniMax-M3.1-Flash",
       "base_url": "https://api.minimax.cn/v1",
       "model": "MiniMax-M3.1-Flash",
       "upstream_model": "MiniMax-M3.1-Flash",
@@ -104,7 +104,7 @@
       "priority": 0
     },
     {
-      "name": "openai-luna",
+      "name": "gpt-6-luna",
       "base_url": "https://api.openai.com/v1",
       "model": "gpt-6-luna",
       "upstream_model": "gpt-6-luna",

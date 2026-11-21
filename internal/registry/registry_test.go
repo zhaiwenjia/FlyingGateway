@@ -385,8 +385,9 @@ func TestLoadExampleConfig(t *testing.T) {
 }
 
 // TestLoadGatewayConfig 断言 config/gateway.json（2026-11-17 全 key 实测 7/7 PASS 的注册表）
-// 能被 Load 成功加载，且每个端点都无别名（model == upstream_model，真名直出）——
-// 别名只在 gateway.example.json 里演示，正式配置不带别名（2026-11-21 口径）。
+// 能被 Load 成功加载，且每个端点「端点名 = 模型名 = 上游模型名」三者逐字相同 ——
+// 正式配置真名直出：不设别名（model != upstream_model 即别名），端点名也不另起；
+// 别名与独立端点名只在 gateway.example.json 里演示（2026-11-21 口径）。
 // 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/registry/ -run TestLoadGatewayConfig -v
 func TestLoadGatewayConfig(t *testing.T) {
 	r, err := Load(filepath.Join("..", "..", "config", "gateway.json"))
@@ -398,6 +399,9 @@ func TestLoadGatewayConfig(t *testing.T) {
 		t.Fatalf("正式配置端点数 = %d, want 7", len(list))
 	}
 	for _, ep := range list {
+		if ep.Name != ep.Model {
+			t.Errorf("端点名与模型名不同: name = %q, model = %q（端点名须与模型名相同）", ep.Name, ep.Model)
+		}
 		if ep.Model != ep.UpstreamModel {
 			t.Errorf("端点 %q 用别名: model = %q, upstream_model = %q（正式配置要求同值）", ep.Name, ep.Model, ep.UpstreamModel)
 		}
