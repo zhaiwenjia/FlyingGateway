@@ -63,6 +63,7 @@ FlyingGateway/                  ← 仓库根
 │   └── version/                版本载体（-ldflags 注入点）
 ├── config/
 │   ├── gateway.example.json    端点注册表样例
+│   ├── gateway.json            端点注册表（正式配置，7 端点）
 │   └── rates.json              费率表（费用计量数据源）
 ```
 

@@ -384,6 +384,38 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 }
 
+// TestLoadGatewayConfig 断言 config/gateway.json（2026-11-17 全 key 实测 7/7 PASS 的注册表）
+// 能被 Load 成功加载，且每个端点「端点名 = 模型名 = 上游模型名」三者逐字相同 ——
+// 正式配置真名直出：不设别名（model != upstream_model 即别名），端点名也不另起；
+// 别名与独立端点名只在 gateway.example.json 里演示（2026-11-21 口径）。
+// 手动复核：export PATH="/opt/homebrew/bin:$PATH" && go test ./internal/registry/ -run TestLoadGatewayConfig -v
+func TestLoadGatewayConfig(t *testing.T) {
+	r, err := Load(filepath.Join("..", "..", "config", "gateway.json"))
+	if err != nil {
+		t.Fatalf("正式配置加载失败: %v", err)
+	}
+	list := r.List()
+	if len(list) != 7 {
+		t.Fatalf("正式配置端点数 = %d, want 7", len(list))
+	}
+	for _, ep := range list {
+		if ep.Name != ep.Model {
+			t.Errorf("端点名与模型名不同: name = %q, model = %q（端点名须与模型名相同）", ep.Name, ep.Model)
+		}
+		if ep.Model != ep.UpstreamModel {
+			t.Errorf("端点 %q 用别名: model = %q, upstream_model = %q（正式配置要求同值）", ep.Name, ep.Model, ep.UpstreamModel)
+		}
+		got, err := r.Lookup(ep.Model)
+		if err != nil {
+			t.Errorf("Lookup(%q) 报错: %v", ep.Model, err)
+			continue
+		}
+		if got.Name != ep.Name {
+			t.Errorf("Lookup(%q) = 端点 %q, want %q", ep.Model, got.Name, ep.Name)
+		}
+	}
+}
+
 // names 取端点名列表（测试辅助）。
 func names(eps []Endpoint) []string {
 	out := make([]string, len(eps))
