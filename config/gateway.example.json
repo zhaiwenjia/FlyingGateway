@@ -7,8 +7,8 @@
       "model": "gpt-6-luna",
       "upstream_model": "gpt-6-luna",
       "provider_name": "openai",
-      "context_window": 128000,
-      "max_output_tokens": 16384,
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -34,10 +34,10 @@
       "name": "backup",
       "base_url": "https://api.deepseek.com/v1",
       "model": "gpt-6-luna",
-      "upstream_model": "deepseek-chat",
+      "upstream_model": "deepseek-flash",
       "provider_name": "deepseek",
-      "context_window": 64000,
-      "max_output_tokens": 8192,
+      "context_window": 1048576,
+      "max_output_tokens": 393216,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -51,10 +51,10 @@
       "name": "local",
       "base_url": "http://127.0.0.1:8000/v1",
       "model": "gpt-6-luna",
-      "upstream_model": "qwen2.5-7b-instruct",
-      "provider_name": "qwen",
-      "context_window": 32768,
-      "max_output_tokens": 8192,
+      "upstream_model": "mimo-v2.6-flash",
+      "provider_name": "xiaomi",
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -66,29 +66,44 @@
     },
     {
       "name": "large-context",
-      "base_url": "https://api.openai.com/v1",
-      "model": "gpt-4o",
-      "upstream_model": "gpt-4o",
-      "provider_name": "openai",
-      "context_window": 128000,
-      "max_output_tokens": 16384,
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-flash",
+      "upstream_model": "deepseek-flash",
+      "provider_name": "deepseek",
+      "context_window": 1048576,
+      "max_output_tokens": 393216,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
         "supports_vision": true
       },
-      "credential_ref": "OPENAI_API_KEY",
+      "credential_ref": "DEEPSEEK_API_KEY",
       "timeout_s": 60,
       "priority": 0
     }
   ],
   "fallback_chains": {
-    "general": ["backup", "local"],
-    "context_window": ["large-context"],
-    "content_policy": ["backup"],
-    "rate_limit": ["backup", "local"],
-    "timeout": ["backup"],
-    "upstream_error": ["backup", "local"]
+    "general": [
+      "backup",
+      "local"
+    ],
+    "context_window": [
+      "large-context"
+    ],
+    "content_policy": [
+      "backup"
+    ],
+    "rate_limit": [
+      "backup",
+      "local"
+    ],
+    "timeout": [
+      "backup"
+    ],
+    "upstream_error": [
+      "backup",
+      "local"
+    ]
   },
   "callers": [
     {
@@ -100,8 +115,14 @@
         }
       ],
       "scope": {
-        "models": ["gpt-6-luna", "gpt-4o"],
-        "endpoints": ["primary", "backup"],
+        "models": [
+          "gpt-6-luna",
+          "deepseek-flash"
+        ],
+        "endpoints": [
+          "primary",
+          "backup"
+        ],
         "token_budget": 0
       },
       "rate_limit": {
