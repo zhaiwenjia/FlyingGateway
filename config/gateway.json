@@ -8,7 +8,7 @@
       "upstream_model": "qwen3.8-flash",
       "provider_name": "qwen",
       "context_window": 1000000,
-      "max_output_tokens": 128000,
+      "max_output_tokens": 131072,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -24,8 +24,8 @@
       "model": "glm-5.3-flash",
       "upstream_model": "glm-5.3-flash",
       "provider_name": "zhipu",
-      "context_window": 128000,
-      "max_output_tokens": 16384,
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -41,8 +41,8 @@
       "model": "deepseek-flash",
       "upstream_model": "deepseek-flash",
       "provider_name": "deepseek",
-      "context_window": 128000,
-      "max_output_tokens": 16384,
+      "context_window": 1048576,
+      "max_output_tokens": 393216,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -75,8 +75,8 @@
       "model": "mimo-v2.6-flash",
       "upstream_model": "mimo-v2.6-flash",
       "provider_name": "xiaomi",
-      "context_window": 1000000,
-      "max_output_tokens": 128000,
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -93,7 +93,7 @@
       "upstream_model": "MiniMax-M3.1-Flash",
       "provider_name": "minimax",
       "context_window": 1000000,
-      "max_output_tokens": 0,
+      "max_output_tokens": 524288,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
@@ -109,8 +109,8 @@
       "model": "gpt-6-luna",
       "upstream_model": "gpt-6-luna",
       "provider_name": "openai",
-      "context_window": 128000,
-      "max_output_tokens": 16384,
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
       "capabilities": {
         "supports_tools": true,
         "supports_stream": true,
