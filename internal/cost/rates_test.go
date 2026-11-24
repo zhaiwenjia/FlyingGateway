@@ -307,8 +307,12 @@ func TestLoadRatesReconcileMiMo(t *testing.T) {
 		assertPrice(t, model, "缓存命中（5.4.10）", r.CacheReadExplicitCNY, w[1])
 		assertPrice(t, model, "输出（5.4.10）", r.OutputPriceCNY, w[2])
 		assertPrice(t, model, "缓存写入（5.4.10 限时免费）", r.CacheWriteCNY, 0.0000)
-		if r.ContextWindow != 1000000 {
-			t.Fatalf("%s context_window = %d，期望 1000000（5.4.10：1M）", model, r.ContextWindow)
+		// ⭐ 2026-11-24 订正（老宅「不能随便写一个数字」）：原钉 1000000 是把
+		// 5.4.10 的「1M」简写当精确值；小米平台官方目录逐字 `context_length:
+		// 1048576`（platform.xiaomimimo.com/api/v1/models，2026-11-24 实测）⇒
+		// 钉官方实数。简写 ≠ 精确值——测试要钉能指回官方来源的数。
+		if r.ContextWindow != 1048576 {
+			t.Fatalf("%s context_window = %d，期望 1048576（官方 context_length 实测）", model, r.ContextWindow)
 		}
 	}
 }
