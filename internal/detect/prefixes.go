@@ -32,8 +32,13 @@ var prefixRules = []prefixRule{
 	{prefixes: []string{"kimi", "moonshot"}, provider: core.ProviderMoonshot},
 	// 第 3 行：`glm` ⇒ 智谱。
 	{prefixes: []string{"glm"}, provider: core.ProviderZhipu},
-	// 第 4 行：`deepseek` / `deepseek-chat` / `deepseek-reasoner` ⇒ DeepSeek。
-	{prefixes: []string{"deepseek", "deepseek-chat", "deepseek-reasoner"}, provider: core.ProviderDeepSeek},
+	// 第 4 行：`deepseek` ⇒ DeepSeek。
+	// ⭐ 2026-11-24 清死数据（老宅「数据过时了就没用了，不保留」）：原条目还挂着
+	// `deepseek-chat` / `deepseek-reasoner` 两个**已退役**模型名——它们本就被
+	// `deepseek` 前缀覆盖（HasPrefix 匹配），纯冗余；模型名下线后连「兼容旧名」
+	// 的意义都没有（调用方发废名走的是 4xx，不该靠识别表兜）。
+	// 注：Ollama 行的 `deepseek-r1` 保留——那是开源权重的本地库名，不算过时。
+	{prefixes: []string{"deepseek"}, provider: core.ProviderDeepSeek},
 	// 第 5 行：`mimo` ⇒ 小米 MiMo。
 	{prefixes: []string{"mimo"}, provider: core.ProviderXiaomi},
 	// 第 6 行：`MiniMax` / `minimax` / `abab` ⇒ MiniMax。
