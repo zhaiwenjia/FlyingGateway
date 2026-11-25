@@ -61,7 +61,27 @@ type Endpoint struct {
 	Capabilities *Capabilities `json:"capabilities"`
 	// CredentialRef 是凭据来源引用（环境变量名 / 密钥别名），⛔ 不存明文。
 	CredentialRef string `json:"credential_ref"`
-	// TimeoutS 是默认超时（秒）。
+	// TimeoutS 是单次上游尝试的墙钟超时（秒）——从 StreamStart 到帧循环收口，
+	// **含流式输出全程**（不只是连接建立），到点取消 attemptCtx（execute.go）。
+	//
+	// ⭐ 2026-11-25 实测教训（铁律 3，配600 的依据）：
+	// 【现象】此前活配置两 endpoint 均为 60 —— NGAS 侧 model_calls 实测
+	//   3819 次调用里 306 次（8.0%）落在 59-62s，且 **306 次全部**
+	//   `response.choices[0].message.content` 为空（100% 残缺）；对应 agent
+	//   轨迹表现为「连续多轮只有 reasoning、无正文」⇒ 空轮循环 ⇒ 收尾兜底
+	//   把工具摘录当答案交出（GAIA 全量第一轮 3 题实测）。
+	// 【根因】推理型模型（mimo/glm/deepseek 等）对难题的思考时长可超 60s；
+	//   60s 到点掐断上游流后，chat 形状按 codec 契约**静默终止流、不发错误帧**
+	//   （execute.go 收口分支）⇒ 客户端收到 HTTP 200 + 空 content，无从区分
+	//   「模型没说话」与「流被掐」⇒ 不重试、原样喂回 ⇒ 反复被掐。
+	// 【为什么改配置而不是只改客户端】客户端永远无法可靠识别静默断流
+	//   （200 + 空 body 与合法空响应不可分）；把超时提到覆盖长推理的量级
+	//   才是从源头消除。600 有本仓实测依据：next_gen_agent_system 仓
+	//   src/llm/client.py 注释记录「timeout 提到 600 后同一份输入一次就成功」。
+	//   故障上游仍由 probe 探针（3s）与 breaker（failure_threshold/cooldown）
+	//   负责剔除，attempt 超时不是唯一防线 ⇒ 拉长到 600 不拖累故障转移。
+	// 【不修会怎样】任何需要 >60s 的任务（长推理、长输出、大上下文）被系统性
+	//   掐断，8% 调用空返回且**症状与「模型偷懒」完全一样**，极难归因。
 	TimeoutS float64 `json:"timeout_s"`
 	// Priority 是优先级，数值越小越优先。
 	Priority int `json:"priority"`
