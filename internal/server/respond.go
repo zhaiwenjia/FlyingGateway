@@ -255,7 +255,15 @@ func (s *Server) writeFinalError(w http.ResponseWriter, h *execHandle, detail *c
 	// 本地闸拒绝（token 池 / 契约桶 / 并发位）：分类为 rate_limit 的终态错误带
 	// Retry-After = 最短等待（统一 SDD 2.3 治理三件套；hint 由 setRetryAfterHint 记录）。
 	if detail != nil && detail.Category == core.ErrRateLimit && h.retryAfterHint() > 0 {
-		writeRetryAfter(w, h.retryAfterHint(), string(detail.Category), detail.Code, detail.Message)
+		// 等待信号 F1（⭐ 2026-11-26，NGAS SDD spec-waiting-signal AC-04）：
+		// 并发位满等拒绝带 error.wait{phase, retry_after_s} —— 调用方据 phase
+		// 区分「在等」与「真失败」；phase 为空 = 老路径无 wait（只增不改）。
+		if ph := h.waitPhaseOf(); ph != "" {
+			writeRetryAfterWait(w, h.retryAfterHint(), string(detail.Category),
+				detail.Code, detail.Message, ph)
+		} else {
+			writeRetryAfter(w, h.retryAfterHint(), string(detail.Category), detail.Code, detail.Message)
+		}
 		return
 	}
 	s.writeDetail(w, detail)

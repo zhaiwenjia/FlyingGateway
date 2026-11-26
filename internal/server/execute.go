@@ -80,8 +80,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, mode inboundMode
 	if s.maxInFlight > 0 {
 		if s.inFlight.Add(1) > s.maxInFlight {
 			s.inFlight.Add(-1)
-			writeRetryAfter(w, time.Second, string(core.ErrRateLimit), "overloaded",
-				fmt.Sprintf("网关过载：在途请求已达上限 %d（max-in-flight），请稍后重试", s.maxInFlight))
+			writeRetryAfterWait(w, time.Second, string(core.ErrRateLimit), "overloaded",
+				fmt.Sprintf("网关过载：在途请求已达上限 %d（max-in-flight），请稍后重试", s.maxInFlight),
+				"overloaded")
 			return
 		}
 		defer s.inFlight.Add(-1)
@@ -459,16 +460,18 @@ func (s *Server) checkGovernance(w http.ResponseWriter, r *http.Request, h *exec
 
 	if s.bucket != nil {
 		if ok, retryAfter := s.bucket.Allow(est); !ok {
-			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
-				fmt.Sprintf("token 级限流超限（预估 %d 归一化 token），请稍后重试", est))
+			writeRetryAfterWait(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
+				fmt.Sprintf("token 级限流超限（预估 %d 归一化 token），请稍后重试", est),
+				"rate_limited")
 			return false
 		}
 	}
 	// 调用方契约配额（registry callers.rate_limit）：省略 ⇒ 不限流（⛔ 不套默认值）。
 	if ce := callerEntryOf(r); ce != nil && ce.rl != nil {
 		if ok, retryAfter := ce.rl.Allow(est); !ok {
-			writeRetryAfter(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
-				fmt.Sprintf("调用方契约配额超限（预估 %d 归一化 token），请稍后重试", est))
+			writeRetryAfterWait(w, retryAfter, string(core.ErrRateLimit), "rate_limit",
+				fmt.Sprintf("调用方契约配额超限（预估 %d 归一化 token），请稍后重试", est),
+				"rate_limited")
 			return false
 		}
 	}
@@ -814,6 +817,7 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 		ok, wait, concurrency := g.acquire(est)
 		if !ok {
 			h.setRetryAfterHint(wait)
+			h.setWaitPhase("waiting_for_concurrency") // 等待信号 F1（并发位满）
 			gate := "契约桶不足"
 			if concurrency {
 				gate = fmt.Sprintf("在途并发位已满（上限 %d）", g.maxInFlight)
@@ -824,6 +828,23 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 			return nil, degs, detail
 		}
 		defer g.release()
+	}
+
+	// 调用方在途并发位（⭐ 2026-11-26 老宅架构定界：并发/配额/流量归 FG，
+	// 上游框架认证/装配后直发 —— 本闸按**调用方身份**限并发，单个调用方
+	// 打满不挤占其他调用方；0 = 不限（callerEntry.tryAcquire 直接放行）。
+	// 拒绝给 429 + Retry-After 进重试/降级决策（⛔ 不静默排队）；release
+	// 与端点并发位同款 defer 恰好一次（本尝试收口才释放 —— 流式长调用
+	// 占位到流收口）。
+	if ce := callerEntryOf(r); ce != nil && !ce.tryAcquire() {
+		h.setRetryAfterHint(time.Second)
+		h.setWaitPhase("waiting_for_concurrency") // 等待信号 F1
+		detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, "rate_limit",
+			fmt.Sprintf("调用方 %q 在途并发位已满（上限 %d），请稍后重试", ce.name, ce.maxInFlight))
+		s.observeExec(ep, req, nil, resultForDetail(detail))
+		return nil, degs, detail
+	} else if ce != nil {
+		defer ce.release()
 	}
 
 	// 自有令牌选择 + 凭据注入（8.4 三种形态按 provider 分派；⛔ 不透传调用方凭据 ——

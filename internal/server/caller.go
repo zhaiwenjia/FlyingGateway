@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhaiwenjia/FlyingGateway/internal/core"
@@ -54,6 +55,33 @@ type callerEntry struct {
 	scope  registry.CallerScope
 	rl     *policy.RateLimitBuckets // nil ⇒ 不限流（rate_limit 省略，⛔ 不套默认值）
 	budget *policy.Budget           // nil ⇒ token 预算不限（token_budget = 0）
+	// 调用方在途并发位（⭐ 2026-11-26 老宅架构定界，见 registry.Caller.ConcurrencyLimit）。
+	// maxInFlight = 0 ⇒ 不限（与端点级 concurrency_limit 同语义）。
+	maxInFlight int64
+	inFlight    atomic.Int64
+}
+
+// tryAcquire 占一个调用方在途位（满 ⇒ false，调用方给 429+Retry-After）。
+// 语义与 limitGroup.acquire 的并发位一致：先占位、收口 defer release 恰好一次。
+func (e *callerEntry) tryAcquire() bool {
+	if e.maxInFlight <= 0 {
+		return true
+	}
+	// ⚠️ 超限必须回退位（与 limitGroup.acquire 同款）：Add(1) 超上限时
+	// 位已自增 ⇒ 不回退就泄漏 —— 单元钉 TestCallerConcurrencyGateUnit
+	// 「拒绝不泄漏位」实测抓到过这个 bug（inFlight 卡在 3/2）。
+	if e.inFlight.Add(1) > e.maxInFlight {
+		e.inFlight.Add(-1)
+		return false
+	}
+	return true
+}
+
+// release 归还一个调用方在途位（幂等由调用方 defer 保证；不限时 no-op）。
+func (e *callerEntry) release() {
+	if e.maxInFlight > 0 {
+		e.inFlight.Add(-1)
+	}
 }
 
 // callerAuth 是调用方鉴权 + scope 三闸 + 审计（registry callers 单源）。
@@ -70,7 +98,7 @@ func newCallerAuth(callers []registry.Caller, logger *slog.Logger, store share.S
 	}
 	c := &callerAuth{logger: logger}
 	for _, cl := range callers {
-		e := &callerEntry{name: cl.Name, scope: cl.Scope}
+		e := &callerEntry{name: cl.Name, scope: cl.Scope, maxInFlight: cl.ConcurrencyLimit}
 		for _, k := range cl.Keys {
 			// 注册表已验 key_hash 形状（64 位小写 hex），此处解码不会失败。
 			raw, _ := hex.DecodeString(k.KeyHash)

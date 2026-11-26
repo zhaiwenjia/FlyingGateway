@@ -15,7 +15,7 @@
         "supports_vision": true
       },
       "credential_ref": "OPENAI_API_KEY",
-      "timeout_s": 30,
+      "timeout_s": 600,
       "priority": 0,
       "breaker": {
         "failure_threshold": 5,
@@ -44,7 +44,7 @@
         "supports_vision": false
       },
       "credential_ref": "DEEPSEEK_API_KEY",
-      "timeout_s": 45,
+      "timeout_s": 600,
       "priority": 1
     },
     {
@@ -61,7 +61,7 @@
         "supports_vision": false
       },
       "credential_ref": "VLLM_API_KEY",
-      "timeout_s": 60,
+      "timeout_s": 600,
       "priority": 2
     },
     {
@@ -78,7 +78,7 @@
         "supports_vision": true
       },
       "credential_ref": "DEEPSEEK_API_KEY",
-      "timeout_s": 60,
+      "timeout_s": 600,
       "priority": 0
     }
   ],
