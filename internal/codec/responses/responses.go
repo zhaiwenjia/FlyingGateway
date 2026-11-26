@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +113,21 @@ type respContentPart struct {
 // input 字符串 ⇒ Messages[0]{Role:"user"}；item 数组逐项映射；
 // instructions ⇒ core.Instructions（⛔ 不并进 messages）；reasoning ⇒ core.ReasoningConfig。
 // 未知 item 类型容忍跳过（4.3.1 输出联合有 29 种 item，规范模型只承载语义四类）。
+// knownResponsesTopLevelKeys 返回 responsesRequest 的 JSON 顶层键集
+// （反射自结构体 tag，单一真源）。CAC-11（2026-11-26）：白名单外顶层键进
+// core.Request.Extra 透传（供应商特有参数通道）。
+func knownResponsesTopLevelKeys() map[string]bool {
+	t := reflect.TypeOf(responsesRequest{})
+	keys := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
 func DecodeRequest(body []byte) (*core.Request, error) {
 	var req responsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -126,6 +142,24 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		MaxOutputTokens:    req.MaxOutputTokens,
 		PreviousResponseID: req.PreviousResponseID,
 		PromptCacheKey:     req.PromptCacheKey,
+	}
+	// CAC-11：白名单外顶层键进 Extra 透传（与 chat 入口同款语义）。
+	var rawTop map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawTop); err == nil {
+		known := knownResponsesTopLevelKeys()
+		for k, v := range rawTop {
+			if known[k] {
+				continue
+			}
+			var val any
+			if err := json.Unmarshal(v, &val); err != nil {
+				continue
+			}
+			if out.Extra == nil {
+				out.Extra = map[string]any{}
+			}
+			out.Extra[k] = val
+		}
 	}
 	conv, err := decodeConversation(req.Conversation)
 	if err != nil {

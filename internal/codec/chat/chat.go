@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,9 @@ type chatRequest struct {
 	Tools               []chatToolIn    `json:"tools"`
 	ToolChoice          json.RawMessage `json:"tool_choice"` // string 或对象
 	ReasoningEffort     string          `json:"reasoning_effort"`
+	// PromptCacheKey 是缓存亲和键（CAC-09，2026-11-26）：优化字段始终透传
+	// （execute.go 统一 SDD 3.5 口径），chat 入口原先入站即丢。
+	PromptCacheKey string `json:"prompt_cache_key"`
 }
 
 // chatMessageIn 是 messages[] 元素；reasoning_content 是各家扩展（Qwen/Kimi/MiMo/
@@ -98,6 +102,23 @@ type chatContentPartIn struct {
 	} `json:"file"`
 }
 
+// knownTopLevelKeys 返回 chatRequest 的 JSON 顶层键集（反射自结构体 tag，
+// 单一真源 —— 加字段不用改两处，防「注册表靠人维护」坑）。
+// CAC-11（2026-11-26）：白名单外顶层键进 core.Request.Extra 透传
+// （如 moonshot 的 prompt_cache_options —— 供应商缓存 TTL 参数原先无入口）。
+func knownTopLevelKeys() map[string]bool {
+	t := reflect.TypeOf(chatRequest{})
+	keys := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
 // DecodeRequest 把 chat.completion 请求体解码为 core.Request（统一 SDD 3.4）。
 // messages[0].role=system 保留 system 角色（⛔ 不提升为 Instructions）；
 // 未知字段忽略（读侧宽容），非法 JSON 显式报错。
@@ -107,10 +128,30 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		return nil, fmt.Errorf("chat: 请求体不是合法 JSON: %w", err)
 	}
 	out := &core.Request{
-		Model:       req.Model,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
+		Model:          req.Model,
+		Stream:         req.Stream,
+		Temperature:    req.Temperature,
+		TopP:           req.TopP,
+		PromptCacheKey: req.PromptCacheKey,
+	}
+	// CAC-11：白名单外顶层键进 Extra 透传（供应商特有参数通道，如
+	// moonshot prompt_cache_options）；无越界键时 Extra 保持 nil（形态不变）。
+	var rawTop map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawTop); err == nil {
+		known := knownTopLevelKeys()
+		for k, v := range rawTop {
+			if known[k] {
+				continue
+			}
+			var val any
+			if err := json.Unmarshal(v, &val); err != nil {
+				continue
+			}
+			if out.Extra == nil {
+				out.Extra = map[string]any{}
+			}
+			out.Extra[k] = val
+		}
 	}
 	// 结构预分配：messages / tool_calls / tools 按入参条数预留，消掉 append
 	// 逐次扩容的重分配；仅条数 > 0 时预建（空入参保持 nil，序列化形态不变）。

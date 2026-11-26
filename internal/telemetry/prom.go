@@ -80,6 +80,20 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 		}
 	}
 
+	// ---- gateway_cache_tokens_total（counter，标签 phase；CAC-08，2026-11-26）----
+	var cachePhases []string
+	for k := range m.cacheTokens {
+		cachePhases = append(cachePhases, k)
+	}
+	sort.Strings(cachePhases)
+	if len(cachePhases) > 0 {
+		fmt.Fprintln(w, "# HELP gateway_cache_tokens_total 缓存 token 累计（read=命中 / write=写入）。")
+		fmt.Fprintln(w, "# TYPE gateway_cache_tokens_total counter")
+		for _, k := range cachePhases {
+			fmt.Fprintf(w, "gateway_cache_tokens_total{phase=%s} %d\n", quoteLabel(k), m.cacheTokens[k])
+		}
+	}
+
 	// ---- gateway_cancel_detected_latency_seconds（histogram）----
 	if m.latencyCount > 0 {
 		fmt.Fprintln(w, "# HELP gateway_cancel_detected_latency_seconds 断连检测延迟（SDD gateway.cancel.detected_latency）。")

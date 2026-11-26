@@ -29,6 +29,34 @@ func TestPromRequestsCounter(t *testing.T) {
 	}
 }
 
+// TestPromCacheTokensCounter（CAC-08，2026-11-26）：cached_tokens 打点进聚合
+// 指标 —— 原先只进 trace span，不采 trace 就算不出缓存命中率（90% 判据的
+// 测量基础）。钉住 counter 渲染与 ObserveCache 累计。
+func TestPromCacheTokensCounter(t *testing.T) {
+	m := NewMetrics()
+	m.ObserveCache(7232, 0)
+	m.ObserveCache(11904, 512)
+	if got := m.CacheTokens("read"); got != 19136 {
+		t.Fatalf("CacheTokens(read)=%d，want 19136", got)
+	}
+	if got := m.CacheTokens("write"); got != 512 {
+		t.Fatalf("CacheTokens(write)=%d，want 512", got)
+	}
+	var b strings.Builder
+	m.WritePrometheus(&b)
+	out := b.String()
+	for _, want := range []string{
+		"# HELP gateway_cache_tokens_total ",
+		"# TYPE gateway_cache_tokens_total counter",
+		`gateway_cache_tokens_total{phase="read"} 19136`,
+		`gateway_cache_tokens_total{phase="write"} 512`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("渲染缺 %q：\n%s", want, out)
+		}
+	}
+}
+
 // TestPromHistogramCumulative 钉住直方图「独立计数 ⇒ 累计桶」转换（Prometheus histogram
 // 桶语义 cumulative）：样本 50ms / 300ms / 6000ms ⇒
 // le=0.1→1、le=0.25→1、le=0.5→2、le=1→2、le=2→2、le=5→2、+Inf→3；sum=6.35s；count=3。
