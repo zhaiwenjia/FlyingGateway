@@ -33,7 +33,77 @@
 
 技术栈 **Go 1.27**，核心链路纯标准库（供应商 SDK 仅 3 个官方库）。
 
-## 二、目录结构
+## 二、架构设计
+
+一次调用的分层路径（自上而下；注册表是横切的唯一真源）：
+
+```
+客户端（OpenAI / Anthropic SDK、智能体 Harness）
+  │  POST /v1/chat/completions · /v1/responses · /v1/messages
+  ▼
+┌ 入口层（server / codec）──────────────────────────────┐
+│ 三形解码归一为统一契约 → 调用方鉴权（key_hash → scope）│
+│ → 入站校验（模型别名 / 上下文估算 / 护栏 / 32MB 上限） │
+│ → 鉴权与 scope 判定写审计（caller_decision 四元组）     │
+├ 治理层（policy）─────────────────────────────────────┤
+│ 配额与过载裁决：调用方桶 / 契约桶 / 并发位 / 过载闸     │
+│ → 超限 429 + Retry-After（⛔ 网关不重试，调用方控制）  │
+├ 路由层（registry / routing / breaker）────────────────┤
+│ 注册表选端点（priority 降级链 / round_robin）          │
+│ 熔断三态（连续失败冷却 → 半开探测 → 期间跳过转降级链） │
+│ 七类失败类型 fallback_chains 分链降级                  │
+├ 适配层（adapter / stream）───────────────────────────┤
+│ 11 家供应商出站（Responses 形优先；Claude / Gemini 原生）│
+│ 多 key 令牌池选键（per_key / shared / key_limits）     │
+│ SSE 逐帧回传 + 断连检测 + 显式取消                     │
+├ 归一与观测（usage / cost / errors / telemetry）────────┤
+│ usage 逐家归一 → 费率表计费（预估扣减、收口结算）       │
+│ 错误九分类 · 异步批量日志与 Prometheus 指标             │
+└───────────────────────────────────────────────────────┘
+```
+
+**请求生命周期**（成功路径八步，错误锚点见 6.3）：
+
+1. **解码归一** —— 三形入口解码为统一请求契约；入口协议与模型族绑定在此判定（违配 400 `ingress_protocol_mismatch`）。
+2. **调用方鉴权** —— `callers` 非空时校验 key（401，三态同形防枚举）与 scope（模型集 / 端点集 / 预算，403 `scope_exceeded`），判定写审计。
+3. **入站校验** —— 模型别名查注册表（404 `model_not_found`）、估算输入 + 输出上限对上下文窗口（400 `context_exceeded`）、护栏（403）、请求体 32 MB（413）。
+4. **配额裁决** —— 按登记的契约桶（`tpm` / `rpm` / `burst_s`）、调用方桶、在途并发位与过载闸逐道判定；超限 429 + `Retry-After`；发起前按 `max_tokens` 预估扣减、收口按实际用量结算。
+5. **路由与熔断** —— `strategy` 选端点；熔断命中时跳过冷却端点转降级链；七类失败类型各走自己的 fallback 链，降级目标不可用显式报错。
+6. **出站适配** —— 按 `provider_name` 选适配器出站（同族协议零翻译）、多 key 池先探后扣选键、流式 SSE 逐帧回传。
+7. **计量结算** —— usage 逐家归一（缓存相分列），费率表计费；预估扣减收口退还差额。
+8. **收口观测** —— 错误九分类归一返回、断连检测收口、取消注册表兑现，日志与指标异步批量落出。
+
+**关键机制**：
+
+- **注册表唯一真源** —— 模型别名、端点、协议形状、配额、熔断参数全在 `-config` JSON；路由决策可复现（同输入 + 同注册表 ⇒ 同决策）。
+- **两态热加载** —— `SIGHUP` / `POST /admin/reload` 先校验后原子替换：费率表与路由参数可热更；端点增删与运行时组件（`rate_limit` / `concurrency_limit` / `breaker` / `callers` …）显式拒绝、需重启（保护桶余额 / 冷却 / 熔断状态）。
+- **两域解耦** —— 调用方令牌（管理本系统消费额度）与上游自有令牌互不相通，调用方凭据永不发给供应商。
+- **多实例共享配额** —— `-redis-addr` 接 Redis 后限流 / 预算 / 上游 429 冷却跨实例一份（Lua 原子扣减）；Redis 故障 fail-open 放行 + 告警。
+- **源码映射** —— 分层与包一一对应：入口 `server` + `codec`、治理 `policy`、路由 `registry` + `routing`、适配 `adapter` + `stream`、归一观测 `usage` + `cost` + `errors` + `telemetry`，横切安全在 `security`（出网校验 / 凭据 / 脱敏）。
+
+## 三、功能总览
+
+| 能力 | 要点 | 详见 |
+|---|---|---|
+| 三入口统一管线 | Chat / Responses / Anthropic Messages 同一转发管线，同族协议零翻译 | 6.1 |
+| 11 家供应商适配 | 出站优先 Responses 形，Claude 走 Anthropic Messages、Gemini 走原生 SDK；usage 逐家归一 | 6.4 |
+| 路由与降级 | `priority` 有序降级链 / `round_robin`，决策可复现，降级不可用显式报错 | 6.4 |
+| 熔断三态 | 连续可归因失败阈值 → 冷却 → 半开探测；期间跳过转降级链 | 6.4 |
+| 失败类型 fallback | 七类失败类型（`general` / `context_window` / `content_policy` / `budget` / `rate_limit` / `timeout` / `upstream_error`）各配降级链 | 6.4 |
+| 多层限流 | 契约桶（端点 / 调用方 `tpm·rpm·burst_s`）+ 并发位 + 过载闸；未登记不限流、无默认值 | 6.4、6.5 |
+| 多 key 令牌池 | 同供应商多 key 三层配额（`per_key` / `shared` / `key_limits`），N key = N 份容量 | 6.4 |
+| 预算与护栏 | 调用方 token 预算（触顶 403 / 429）、正则 + Webhook 护栏 | 6.5、七 |
+| 调用方鉴权与 scope | `key_hash` + 必填过期 + 模型 / 端点 / 预算 scope；审计四元组，明文与哈希不入日志 | 6.5 |
+| 流式与断连检测 | SSE 逐帧转发、断连延迟上界检测、usage 末帧归一 | 6.2 |
+| 显式取消 | `X-Client-Request-Id` + `/v1/cancel`，在途 409 语义、fire-and-forget | 6.1 |
+| 错误九分类 | 归一 type + 具体 code；429 一律带 `Retry-After`；网关不重试 | 6.3 |
+| 配置热加载 | 两态清单（可热更 / 需重启），先校验后原子替换 | 6.4 |
+| 多实例部署 | Redis 跨实例共享配额；故障 fail-open + 告警 | 6.4 |
+| 管理面与指标 | `/admin/*` + Prometheus `/metrics`（默认关闭，⛔ 不绑公网） | 6.4 |
+| 费用计量 | 费率表驱动，预估扣减、收口结算 | 6.4 |
+| 安全 | 凭据只存环境变量引用、日志轨迹统一脱敏、出网默认禁内网 | 一 |
+
+## 四、目录结构
 
 ```
 FlyingGateway/                  ← 仓库根
@@ -67,7 +137,7 @@ FlyingGateway/                  ← 仓库根
 │   └── rates.json              费率表（费用计量数据源）
 ```
 
-## 三、快速开始
+## 五、快速开始
 
 需 Go 1.27+（[go.dev](https://go.dev/dl/)）。
 
@@ -87,7 +157,7 @@ go build -o bin/gateway ./cmd/gateway
 
 **3. 配置文件**
 
-- `config/gateway.example.json` —— 端点注册表（字段说明见「四、出入口使用 / 出口」）；
+- `config/gateway.example.json` —— 端点注册表（字段说明见「六、出入口使用 / 出口」）；
 - `config/rates.json` —— 费率表（每模型各类 token 的绝对单价，费用计量数据源）。
 
 **4. 开启服务**
@@ -102,7 +172,7 @@ go run ./cmd/gateway -config config/gateway.example.json -rates config/rates.jso
 在仓库根目录下 `./bin/gateway` 一条命令即可起；启动日志走 stderr，`{"status":"ok"}` 出现即就绪。
 ⚠️ `-listen` 默认 `:8080` 是**全接口**监听，对外部署时显式给内网 IP（如示例的 `127.0.0.1:8080`）。
 
-可选开关（全表见「五、运行参数」）：
+可选开关（全表见「七、运行参数」）：
 
 - **管理面**（默认关闭）：`-admin-listen 127.0.0.1:8090` + 环境变量 `GATEWAY_ADMIN_TOKEN`
   （缺 token 拒启），提供 `/admin/*` 与 `/metrics`；监听地址须 IP 字面量（环回 / 私网），⛔ 不绑公网；
@@ -122,17 +192,17 @@ curl http://127.0.0.1:8080/health/readiness
 
 - 停止：`Ctrl+C`（SIGINT）或 SIGTERM ⇒ 在途请求以 `shutdown` 原因收口后优雅退出；
 - 热加载：`SIGHUP` 或管理面 `POST /admin/reload` 重读注册表 / 费率表（先校验后原子替换，
-  失败保留旧表；端点增删等需重启项会显式拒绝，见 4.4）。
+  失败保留旧表；端点增删等需重启项会显式拒绝，见 6.4）。
 
-## 四、出入口使用
+## 六、出入口使用
 
-入口是**调用面**（客户端怎么调），出口是**运维面**（上游怎么配）。调用顺序看 4.1 → 4.2 → 4.3；部署配置看 4.4。
+入口是**调用面**（客户端怎么调），出口是**运维面**（上游怎么配）。调用顺序看 6.1 → 6.2 → 6.3；部署配置看 6.4。
 
-### 4.1 入口（客户端 → 网关）
+### 6.1 入口（客户端 → 网关）
 
 OpenAI 兼容 HTTP API。注册表 `callers` 非空时，`/v1/*` 须带
 `Authorization: Bearer <key>`（缺失 / 无效 / 过期 ⇒ 401 通用错误，三态不区分防枚举；
-超 scope ⇒ 403 `scope_exceeded`）。调用方登记与密钥生命周期见 4.5。
+超 scope ⇒ 403 `scope_exceeded`）。调用方登记与密钥生命周期见 6.5。
 
 **入口协议与模型族绑定（强制）**：Claude 模型（`provider_name: "anthropic"`）**只走**
 `/v1/messages`（Anthropic 形，由始至终 Anthropic SDK）；其它供应商模型**只走**
@@ -173,9 +243,9 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 该 id 已进取消终态 ⇒ 409 `request_cancelled`。
 
 **请求上限**：请求体 32 MB（超出 413 `request_too_large`）。
-出错时的错误对象形状与全部错误码见 4.3。
+出错时的错误对象形状与全部错误码见 6.3。
 
-### 4.2 请求 / 响应 Schema（输入 / 输出）
+### 6.2 请求 / 响应 Schema（输入 / 输出）
 
 **通用 HTTP 头**（两个入口一致）：
 
@@ -316,7 +386,7 @@ usage）→ `message_stop`。
 | `POST /v1/cancel` | `{"client_request_id": "..."}` | `{"cancelled": true\|false}` |
 | `GET /health` | — | `{"status":"ok"}` |
 
-### 4.3 错误代码列表
+### 6.3 错误代码列表
 
 错误对象为 OpenAI 风格 `{"error": {"type", "code", "message"}}`：`type` 是归一化分类（九类），
 `code` 是具体错误码；429 一律带 `Retry-After`；上游错误对内保留原始上游状态码与请求 ID。
@@ -346,7 +416,7 @@ usage）→ `message_stop`。
 | 400 | `ingress_protocol_mismatch` | 入口协议与模型族错配（Claude 模型须走 `/v1/messages`，其它供应商须走 OpenAI 形入口） |
 | 400 | `invalid_content_part` / `invalid_tool_arguments` / `invalid_tool_schema` | 请求内容或工具定义不合法 |
 | 401 | `unauthorized` | 调用方 API key 缺失 / 无效 / 过期（注册表 `callers` 非空时；三态同形防枚举，归因见审计） |
-| 403 | `scope_exceeded` | 超调用方 scope（模型集 / 端点集 / token 预算，见 4.5） |
+| 403 | `scope_exceeded` | 超调用方 scope（模型集 / 端点集 / token 预算，见 6.5） |
 | 403 | `content_policy` | 护栏命中 |
 | 403 | `egress_denied` | 出网目标被拒（内网地址；本地环回需 `-allow-loopback`） |
 | 404 | `model_not_found` | 模型名不在注册表（⛔ 不透传任意模型名） |
@@ -370,7 +440,7 @@ usage）→ `message_stop`。
 `429` / `502` / `504` 可重试；`499` 取消后抑制令牌轮换与降级（⛔ 不再打上游）；
 其余 4xx 为请求问题，不值得重试。
 
-### 4.4 出口（网关 → 上游）
+### 6.4 出口（网关 → 上游）
 
 出口由**端点注册表**（`-config` 指定的 JSON）描述，`strategy` 定路由策略，
 `endpoints[]` 每条登记一个上游端点：
@@ -427,7 +497,7 @@ usage）→ `message_stop`。
   （Lua 原子扣减 + `TIME` 统一时钟；不设 = 内存单实例模式）；Redis 故障时限流/预算
   fail-open 放行 + warn 告警（业务可用性优先，恢复自动回归）。
 
-### 4.5 调用方校验（注册表 `callers`）
+### 6.5 调用方校验（注册表 `callers`）
 
 调用方的**身份 + 密钥 + 过期 + scope + 配额**在注册表 `callers` 节合一登记（单源）。
 `callers` 为空 ⇒ 开放模式（不校验，本地形态）；非空 ⇒ `/v1/*` 强制鉴权。
@@ -472,7 +542,7 @@ usage）→ `message_stop`。
 `X-Role` / `X-Tenant-Id` / `X-Forwarded-User`，⛔ 公网 header 直通），身份一律以 key
 鉴权结果为准（网关自设）。
 
-## 五、运行参数
+## 七、运行参数
 
 长选项与单字母缩写双形式等价（如 `--config` / `-c`）。
 
@@ -502,7 +572,7 @@ usage）→ `message_stop`。
 | `--guardrail-webhook`        | `-W` | 护栏 Webhook URL（空 = 只做正则）                                               | —                              |
 | `--version`                  | `-V`  | 打印版本号后退出                                                                | —                              |
 
-## 六、与 LiteLLM 的性能对比
+## 八、与 LiteLLM 的性能对比
 
 受控基准（固定 300ms 上游延迟，闭合式 1→16384 并发指数阶梯，2 轮取中位；两侧同假上游同压测器；
 生产形配置 = 契约桶开 + 并发闸 16000 + 过载闸 16500）：
@@ -522,7 +592,7 @@ usage）→ `message_stop`。
 - 口径注记：吞吐为**成功口径**；顶档（c≥8192）轮间方差大（一轮出 502 浪潮、一轮排队无失败），图为 2 轮中位。
 - 单源 IP 出站本地端口 bind 排他（16384 端口池）是超高并发的硬上限；部署建议：多源 IP / 多实例横向扩出站。
 
-## 七、测试与版本
+## 九、测试与版本
 
 ```bash
 gofmt -l .            # 格式门禁（有输出即失败）
