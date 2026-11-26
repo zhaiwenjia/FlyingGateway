@@ -826,6 +826,22 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 		defer g.release()
 	}
 
+	// 调用方在途并发位（⭐ 2026-11-26 老宅架构定界：并发/配额/流量归 FG，
+	// 上游框架认证/装配后直发 —— 本闸按**调用方身份**限并发，单个调用方
+	// 打满不挤占其他调用方；0 = 不限（callerEntry.tryAcquire 直接放行）。
+	// 拒绝给 429 + Retry-After 进重试/降级决策（⛔ 不静默排队）；release
+	// 与端点并发位同款 defer 恰好一次（本尝试收口才释放 —— 流式长调用
+	// 占位到流收口）。
+	if ce := callerEntryOf(r); ce != nil && !ce.tryAcquire() {
+		h.setRetryAfterHint(time.Second)
+		detail := gwerrors.New(core.ErrRateLimit, http.StatusTooManyRequests, "rate_limit",
+			fmt.Sprintf("调用方 %q 在途并发位已满（上限 %d），请稍后重试", ce.name, ce.maxInFlight))
+		s.observeExec(ep, req, nil, resultForDetail(detail))
+		return nil, degs, detail
+	} else if ce != nil {
+		defer ce.release()
+	}
+
 	// 自有令牌选择 + 凭据注入（8.4 三种形态按 provider 分派；⛔ 不透传调用方凭据 ——
 	// 调用方 API key 与自有令牌解耦，上游头永远是池内令牌）。
 	payload, waitHint, authDetail := buildUpstreamAuth(s.pools, ad, res.CredentialRef, est, s.maxTokenWait)

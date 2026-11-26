@@ -149,6 +149,13 @@ type Caller struct {
 	Keys      []CallerKey `json:"keys"`
 	Scope     CallerScope `json:"scope"`
 	RateLimit *RateLimit  `json:"rate_limit,omitempty"`
+	// ConcurrencyLimit 是该调用方的在途请求上限（0 = 不限）。
+	// ⭐ 2026-11-26（老宅架构定界：并发/配额/流量归 FG，上游框架只做
+	// 认证/鉴权/上下文装配后直发）：端点级 concurrency_limit 管「上游套餐
+	// 并发」，本字段管「调用方身份的并发」——多调用方形态下单个调用方
+	// 打满不应挤占其他调用方的在途位；语义与端点级一致（0 = 不限，
+	// 拒绝给 429 + Retry-After，⛔ 不静默排队）。
+	ConcurrencyLimit int64 `json:"concurrency_limit,omitempty"`
 }
 
 // CredentialRateLimit 是上游自有令牌池的契约配额登记（同供应商多 key 场景，统一 SDD 7.2
@@ -326,6 +333,9 @@ func Load(path string) (*Registry, error) {
 			}
 			if len(cl.Scope.Models) == 0 || len(cl.Scope.Endpoints) == 0 {
 				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.models / scope.endpoints 必须显式非空（⛔ 不设默认全集）", path, who, cl.Name)
+			}
+			if cl.ConcurrencyLimit < 0 {
+				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：concurrency_limit = %d 不得为负（0 = 不限）", path, who, cl.Name, cl.ConcurrencyLimit)
 			}
 			if cl.Scope.TokenBudget < 0 {
 				return nil, fmt.Errorf("registry: 配置 %s 自检失败：%s（%s）：scope.token_budget = %d 不得为负（0 = 不限）", path, who, cl.Name, cl.Scope.TokenBudget)

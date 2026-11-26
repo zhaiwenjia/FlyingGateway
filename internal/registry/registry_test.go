@@ -533,6 +533,17 @@ func TestLoadCallers(t *testing.T) {
 		t.Fatalf("callers 解析失真: %+v", reg.Callers)
 	}
 
+	// 合法：concurrency_limit（⭐ 2026-11-26 老宅架构定界：调用方在途并发）。
+	okConc := base(caller("harness", key(hashA, future), `"m-a"`, `"a"`,
+		`, "concurrency_limit": 4`))
+	regC, err := Load(writeConfig(t, okConc))
+	if err != nil {
+		t.Fatalf("合法 concurrency_limit 不应报错: %v", err)
+	}
+	if regC.Callers[0].ConcurrencyLimit != 4 {
+		t.Fatalf("concurrency_limit 解析失真: got %d, 期望 4", regC.Callers[0].ConcurrencyLimit)
+	}
+
 	// 合法：轮换窗口双 key（新旧并存）。
 	okDual := base(caller("harness", key(hashA, future)+","+key(hashB, future), `"m-a"`, `"a"`, ``))
 	if _, err := Load(writeConfig(t, okDual)); err != nil {
@@ -550,6 +561,7 @@ func TestLoadCallers(t *testing.T) {
 		"scope.endpoints 为空":          base(caller("harness", key(hashA, future), `"m-a"`, ``, ``)),
 		"scope.models 引用不存在的模型":       base(caller("harness", key(hashA, future), `"nope"`, `"a"`, ``)),
 		"scope.endpoints 引用不存在的端点":    base(caller("harness", key(hashA, future), `"m-a"`, `"nope"`, ``)),
+		"concurrency_limit 为负":        base(caller("harness", key(hashA, future), `"m-a"`, `"a"`, `, "concurrency_limit": -1`)),
 		"token_budget 为负": `{"strategy": "priority", "endpoints": [` + epJSON("a", "") + `],
       "callers": [{"name": "harness", "keys": [` + key(hashA, future) + `],
       "scope": {"models": ["m-a"], "endpoints": ["a"], "token_budget": -1}}]}`,

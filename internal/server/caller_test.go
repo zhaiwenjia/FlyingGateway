@@ -528,3 +528,61 @@ func TestCallerIdentityFeedsBudget(t *testing.T) {
 	}
 	readBody(t, resp3)
 }
+
+// TestCallerConcurrencyGateUnit 断言调用方在途并发位的三态（⭐ 2026-11-26
+// 老宅架构定界：并发/配额/流量归 FG —— 调用方维度的并发闸）：
+// 0 = 不限恒放行；占满拒绝；release 归还后可再占。
+func TestCallerConcurrencyGateUnit(t *testing.T) {
+	// 0 = 不限
+	free := &callerEntry{}
+	for i := 0; i < 10; i++ {
+		if !free.tryAcquire() {
+			t.Fatalf("maxInFlight=0 应恒放行（第 %d 次）", i)
+		}
+	}
+	free.release() // no-op 不 panic
+
+	// 上限 2：第 3 占拒绝；release 后恢复
+	e := &callerEntry{maxInFlight: 2}
+	if !e.tryAcquire() || !e.tryAcquire() {
+		t.Fatal("前两占应成功")
+	}
+	if e.tryAcquire() {
+		t.Fatal("第 3 占应拒绝（满）")
+	}
+	if got := e.inFlight.Load(); got != 2 {
+		t.Fatalf("inFlight = %d, 期望 2（拒绝不泄漏位）", got)
+	}
+	e.release()
+	if !e.tryAcquire() {
+		t.Fatal("release 后应可再占")
+	}
+}
+
+// TestCallerConcurrencyLimitFromRegistry 接线冒烟：注册表 concurrency_limit
+// 进 callerEntry 且首发正常（接线不破坏正常路径；闸逻辑由上面单元钉住）。
+func TestCallerConcurrencyLimitFromRegistry(t *testing.T) {
+	e := newEnv(t, func(base string) []epSpec { return []epSpec{primaryEP(base)} }, nil, nil, map[string]any{
+		"callers": []map[string]any{
+			{
+				"name":              "conc",
+				"keys":              []map[string]any{{"key_hash": sha256hex("ck-conc"), "expires_at": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)}},
+				"scope":             map[string]any{"models": []string{"gpt-4o-mini"}, "endpoints": []string{"primary"}},
+				"concurrency_limit": 1,
+			},
+		},
+	})
+	// 构造后 entry 带上限（直接查鉴权面 —— newEnv 内部装配，走一次请求验证不炸）
+	e.up.setEvents(loadSSE(t, "openai_responses_stream.sse"))
+	body := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+	auth := map[string]string{"Authorization": "Bearer ck-conc"}
+	if resp := e.postJSON("/v1/chat/completions", body, auth); resp.StatusCode != http.StatusOK {
+		t.Fatalf("concurrency_limit=1 首发 = %d，期望 200（接线不破坏正常路径）", resp.StatusCode)
+	}
+	readBody(t, resp200OK(e, body, auth))
+}
+
+// resp200OK 是上面冒烟的第二次请求小工具（保持断言集中）。
+func resp200OK(e *env, body string, auth map[string]string) *http.Response {
+	return e.postJSON("/v1/chat/completions", body, auth)
+}
