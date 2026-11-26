@@ -680,6 +680,16 @@ type errorBody struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    string `json:"code"`
+	// Wait 是可选的结构化等待信息（⭐ 2026-11-26 等待中信号 F1，NGAS SDD
+	// spec-waiting-signal AC-04）：仅 429 类拒绝携带；omitempty ⇒ 老路径
+	// 响应逐字节不变（向后兼容：不读 wait 的老客户端行为不变）。
+	Wait *waitBody `json:"wait,omitempty"`
+}
+
+// waitBody 是 429 的等待信息（协议与发送方解耦 I-4：字段是契约）。
+type waitBody struct {
+	Phase       string `json:"phase"`         // waiting_for_concurrency / rate_limited / overloaded
+	RetryAfterS int64  `json:"retry_after_s"` // 与 Retry-After 头同值（向上取整）
 }
 
 // writeJSON 写 JSON 响应。
@@ -697,6 +707,16 @@ func writeError(w http.ResponseWriter, status int, typ, code, msg string) {
 // writeRetryAfter 写 429 响应并带 Retry-After（统一 SDD 2.3 治理三件套）。
 // retryAfter 向上取整到秒（HTTP 头以秒为单位，⛔ 不给 0 误导客户端立即重打）。
 func writeRetryAfter(w http.ResponseWriter, retryAfter time.Duration, typ, code, msg string) {
+	// 老路径：不带 wait 字段（只增不改 —— 新增等待信息走 writeRetryAfterWait）。
+	writeRetryAfterWait(w, retryAfter, typ, code, msg, "")
+}
+
+// writeRetryAfterWait 写 429 + Retry-After + 结构化 wait 字段（⭐ 2026-11-26
+// 等待中信号 F1，NGAS SDD spec-waiting-signal AC-04）。
+// phase 非空时响应体 error.wait 携带 {phase, retry_after_s} —— 调用方（NGAS/
+// 第三方）据 wait.phase 区分「在等」与「真失败」；phase 为空 = 老行为（无 wait）。
+// I-2 fail-open 语义由调用方保证：本函数只写响应，不参与任务判定。
+func writeRetryAfterWait(w http.ResponseWriter, retryAfter time.Duration, typ, code, msg, phase string) {
 	secs := int64(retryAfter / time.Second)
 	if retryAfter%time.Second != 0 {
 		secs++
@@ -705,7 +725,11 @@ func writeRetryAfter(w http.ResponseWriter, retryAfter time.Duration, typ, code,
 		secs = 1
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
-	writeError(w, http.StatusTooManyRequests, typ, code, msg)
+	out := errorOut{Error: errorBody{Message: msg, Type: typ, Code: code}}
+	if phase != "" {
+		out.Error.Wait = &waitBody{Phase: phase, RetryAfterS: secs}
+	}
+	writeJSON(w, http.StatusTooManyRequests, out)
 }
 
 // normalizeHeaderName 归一头名大小写（鉴权头注入对账用）。

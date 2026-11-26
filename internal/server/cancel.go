@@ -117,6 +117,7 @@ type execHandle struct {
 	upstreamModel string        // 当前执行的上游模型标识（费率查询用）
 	finalUsageVal *core.Usage   // 终态用量（请求级记账用）
 	retryHint     time.Duration // 本地池闸拒绝的最短等待（Retry-After 头取值）
+	waitPhase     string        // 等待信号 F1：429 的 wait.phase（空=不带 wait，只增不改）
 	grace         func(provider string) time.Duration
 	timer         *time.Timer // 延迟窗口定时器（三路径清理，⛔ 不泄漏）
 	detectedAt    time.Time   // 取消触发（检测）时刻
@@ -181,6 +182,21 @@ func (h *execHandle) retryAfterHint() time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.retryHint
+}
+
+// setWaitPhase 记「在等」的阶段（⭐ 等待信号 F1）：并发位满等拒绝路径设置，
+// respond 侧 429 据此携带 error.wait（空 phase = 老行为无 wait，只增不改）。
+func (h *execHandle) setWaitPhase(phase string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.waitPhase = phase
+}
+
+// waitPhaseOf 返回等待阶段（空 = 不带 wait）。
+func (h *execHandle) waitPhaseOf() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.waitPhase
 }
 
 // markUpstreamStarted 登记上游执行已发起。
