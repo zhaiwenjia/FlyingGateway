@@ -808,6 +808,15 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 		return nil, degs, detail
 	}
 	if err := security.ValidateEgressURL(out.URL, s.allowLoopback); err != nil {
+		// ⭐ 2026-11-27（修「降级链与出网放行不一致」误判）：DNS 瞬断 = 基础设施
+		// 可重试（502 upstream_error），⛔ 不判安全拒——通勤断网窗口 7 例
+		// `egress_denied: … no such host` 实为断网，403 终断降级链 + 审计假拦截。
+		var dnsErr *security.DNSResolutionError
+		if errors.As(err, &dnsErr) {
+			detail := gwerrors.New(core.ErrUpstreamError, http.StatusBadGateway, "upstream_error", security.Redact(err.Error()))
+			s.observeExec(ep, req, nil, "failed")
+			return nil, degs, detail
+		}
 		detail := gwerrors.New(core.ErrInvalidRequest, http.StatusForbidden, "egress_denied", security.Redact(err.Error()))
 		s.observeExec(ep, req, nil, "failed")
 		return nil, degs, detail

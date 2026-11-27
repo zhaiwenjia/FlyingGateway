@@ -21,6 +21,29 @@ func (e *EgressError) Error() string {
 	return fmt.Sprintf("security: egress_denied: %s: %s", e.URL, e.Reason)
 }
 
+// DNSResolutionError 是 DNS 解析失败 / 结果为空的**基础设施错误**（2026-11-27）。
+//
+// 【现象】L2/L3 批 7 例 `egress_denied: … DNS 解析失败: no such host` ——
+//
+//	DNS 瞬断（夜间代理窗口）被包装成安全拒绝 ⇒ 403 语义污染、降级链终断，
+//	排查被误导成「出网放行配置问题」。
+//
+// 【根因】ValidateEgressURL 的 DNS 失败分支与私网拒绝共用 EgressError（安全拒）。
+// 【为什么这个修法】DNS 解析失败是**可重试的基础设施故障**，不是安全裁决
+//
+//	——拆成独立类型，上层映射 502 upstream_error（可重试），
+//	与 *EgressError（403 安全拒，不可重试）语义分离。
+//
+// 【不修会怎样】DNS 瞬断 ⇒ 403 终断降级链 + 审计里混入假「安全拦截」。
+type DNSResolutionError struct {
+	URL    string
+	Reason string
+}
+
+func (e *DNSResolutionError) Error() string {
+	return fmt.Sprintf("security: dns_resolution_failed: %s: %s", e.URL, e.Reason)
+}
+
 // deniedIPv4 是默认拒绝的私网 / 链路本地段（统一 SDD 8.2 表）。
 var deniedIPv4 = []net.IPNet{
 	mustCIDR("10.0.0.0/8"),
@@ -71,10 +94,12 @@ func ValidateEgressURL(rawURL string, allowLoopback bool) error {
 	} else {
 		resolved, lerr := lookupIP(host)
 		if lerr != nil {
-			return &EgressError{URL: rawURL, Reason: "DNS 解析失败: " + lerr.Error()}
+			// ⭐ 2026-11-27：DNS 失败 = 基础设施错误（*DNSResolutionError，502 可重试），
+			// ⛔ 不是安全拒（*EgressError）——语义分离见类型注释。
+			return &DNSResolutionError{URL: rawURL, Reason: "DNS 解析失败: " + lerr.Error()}
 		}
 		if len(resolved) == 0 {
-			return &EgressError{URL: rawURL, Reason: "DNS 解析结果为空"}
+			return &DNSResolutionError{URL: rawURL, Reason: "DNS 解析结果为空"}
 		}
 		ips = resolved
 	}
