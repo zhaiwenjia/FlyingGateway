@@ -944,3 +944,18 @@ func BenchmarkParseEvent(b *testing.B) {
 		})
 	}
 }
+
+// TestResponsesExtraPassthrough（CAC-11，2026-11-26）：白名单外顶层键进 Extra。
+func TestResponsesExtraPassthrough(t *testing.T) {
+	body := []byte(`{"model":"m","input":"hi","prompt_cache_options":{"mode":"readOnly"}}`)
+	out, err := DecodeRequest(body)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if _, ok := out.Extra["prompt_cache_options"]; !ok {
+		t.Fatalf("Extra 缺 prompt_cache_options：%v", out.Extra)
+	}
+	if _, leak := out.Extra["model"]; leak {
+		t.Fatalf("白名单键 model 泄进 Extra")
+	}
+}

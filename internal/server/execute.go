@@ -660,6 +660,10 @@ func (s *Server) runAttempts(w http.ResponseWriter, r *http.Request, h *execHand
 		}
 		kind := failureKind(detail.Category)
 		// 降级换端点（级间）：按失败类型分链；无链 ⇒ 显式失败（⛔ 不静默回落通用链）。
+		// ⚠️ CAC-10（2026-11-26）：**降级 = 缓存全价 miss** —— 换 source 后该端点
+		// 没见过本请求前缀（tokens.bd 硬边界 #2），且同一会话在端点间来回切会
+		// 斩断前缀缓存链 + 被 LRU 逐出。降级是可用性优先的正确行为，但选链/阈值
+		// 时要记得它的缓存成本（缓解：429 走令牌轮换优先于换端点——上一分支即是）。
 		chain, err := routing.SelectChain(s.curReg().FallbackChains, ep.Name, kind)
 		if err != nil || counters.FallbackCount >= len(chain) {
 			s.endEndpointSpan(span, h, resp, detail)
@@ -804,6 +808,15 @@ func (s *Server) runEndpoint(w http.ResponseWriter, r *http.Request, h *execHand
 		return nil, degs, detail
 	}
 	if err := security.ValidateEgressURL(out.URL, s.allowLoopback); err != nil {
+		// ⭐ 2026-11-27（修「降级链与出网放行不一致」误判）：DNS 瞬断 = 基础设施
+		// 可重试（502 upstream_error），⛔ 不判安全拒——通勤断网窗口 7 例
+		// `egress_denied: … no such host` 实为断网，403 终断降级链 + 审计假拦截。
+		var dnsErr *security.DNSResolutionError
+		if errors.As(err, &dnsErr) {
+			detail := gwerrors.New(core.ErrUpstreamError, http.StatusBadGateway, "upstream_error", security.Redact(err.Error()))
+			s.observeExec(ep, req, nil, "failed")
+			return nil, degs, detail
+		}
 		detail := gwerrors.New(core.ErrInvalidRequest, http.StatusForbidden, "egress_denied", security.Redact(err.Error()))
 		s.observeExec(ep, req, nil, "failed")
 		return nil, degs, detail
@@ -1156,6 +1169,8 @@ func (s *Server) observeExec(ep *registry.Endpoint, req *core.Request, u *core.U
 		s.metrics.ObserveTokens("input", u.InputTokens)
 		s.metrics.ObserveTokens("output", u.OutputTokens)
 		s.metrics.ObserveUsage(u.Estimated)
+		// CAC-08（2026-11-26）：缓存 token 进聚合指标（原先只进 trace ⇒ 命中率算不出）。
+		s.metrics.ObserveCache(u.CacheReadTokens, u.CacheWriteTokens)
 	} else {
 		s.metrics.ObserveUsage(true)
 	}

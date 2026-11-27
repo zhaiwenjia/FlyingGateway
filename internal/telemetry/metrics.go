@@ -24,6 +24,9 @@ type Metrics struct {
 	// usageMissing / usageTotal 供 gateway.usage_missing_rate。
 	usageMissing int64
 	usageTotal   int64
+	// cacheTokens: label key = phase（read / write）→ 累计（CAC-08，2026-11-26：
+	// cached_tokens 原先只进 trace span ⇒ 不采 trace 算不出缓存命中率）。
+	cacheTokens map[string]int64
 }
 
 // NewMetrics 构造指标集合。
@@ -33,6 +36,7 @@ func NewMetrics() *Metrics {
 		cancelled:      map[string]int64{},
 		tokens:         map[string]int64{},
 		latencyBuckets: map[float64]int64{},
+		cacheTokens:    map[string]int64{},
 	}
 }
 
@@ -55,6 +59,23 @@ func (m *Metrics) ObserveTokens(direction string, n int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens[direction] += n
+}
+
+// ObserveCache 记缓存 token（gateway.cache_tokens_total，按相 read / write）。
+// CAC-08（2026-11-26）：cached_tokens 原先只进 trace span ⇒ 不采 trace 就算不出
+// 缓存命中率；进聚合指标后 `/metrics` 直接可算 Σread/Σinput。
+func (m *Metrics) ObserveCache(read, write int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cacheTokens["read"] += read
+	m.cacheTokens["write"] += write
+}
+
+// CacheTokens 读缓存累计（相 = read / write）。
+func (m *Metrics) CacheTokens(phase string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cacheTokens[phase]
 }
 
 // ObserveCancelLatency 记断连检测延迟（gateway.cancel.detected_latency 直方图，毫秒）。

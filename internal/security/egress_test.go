@@ -4,6 +4,7 @@
 package security
 
 import (
+	"errors"
 	stderrors "errors"
 	"net"
 	"strings"
@@ -130,5 +131,49 @@ func TestValidateEgressURL_LoopbackViaDNS(t *testing.T) {
 	}
 	if err := ValidateEgressURL("https://local.example.test/", false); err == nil {
 		t.Fatal("allowLoopback=false 时解析到环回未被拒")
+	}
+}
+
+// TestValidateEgressURL_DNSFailureIsNotEgressDenied（2026-11-27 修复）：
+// 【现象】L2/L3 批 7 例 `egress_denied: … DNS 解析失败: no such host` ——
+//
+//	DNS 抖动（夜间代理窗口）被包装成安全拒绝 ⇒ 误归类 403、误导排查
+//	（「降级链与出网放行不一致」实为 DNS 瞬断）。
+//
+// 【根因】ValidateEgressURL 的 DNS 失败分支与私网拒绝共用 EgressError。
+// 【修法】DNS 失败/空结果 ⇒ *DNSResolutionError（基础设施可重试类），
+//
+//	与安全拒（*EgressError）分开；上层映射 502 upstream_error 而非 403。
+//
+// 【不修会怎样】DNS 瞬断判成安全拒 ⇒ 降级链终断、403 语义污染审计。
+func TestValidateEgressURL_DNSFailureIsNotEgressDenied(t *testing.T) {
+	withFakeDNS(t, map[string][]net.IP{"flaky.example": nil}) // map 缺省 ⇒ helper 返 no such host
+	err := ValidateEgressURL("https://flaky.example/v1", false)
+	var dnsErr *DNSResolutionError
+	if !errors.As(err, &dnsErr) {
+		t.Fatalf("DNS 失败应返回 *DNSResolutionError，得到 %T: %v", err, err)
+	}
+	var egressErr *EgressError
+	if errors.As(err, &egressErr) {
+		t.Fatalf("DNS 失败不得混入 *EgressError（安全拒语义）")
+	}
+}
+
+// TestValidateEgressURL_EmptyDNSResultIsDNSResolutionError：空解析结果同款。
+func TestValidateEgressURL_EmptyDNSResultIsDNSResolutionError(t *testing.T) {
+	withFakeDNS(t, map[string][]net.IP{"empty.example": {}})
+	err := ValidateEgressURL("https://empty.example/v1", false)
+	var dnsErr *DNSResolutionError
+	if !errors.As(err, &dnsErr) {
+		t.Fatalf("空解析应返回 *DNSResolutionError，得到 %T: %v", err, err)
+	}
+}
+
+// TestValidateEgressURL_PrivateStillEgressDenied：私网拒绝仍是安全拒（语义不变）。
+func TestValidateEgressURL_PrivateStillEgressDenied(t *testing.T) {
+	err := ValidateEgressURL("https://10.0.0.5/v1", false)
+	var egressErr *EgressError
+	if !errors.As(err, &egressErr) {
+		t.Fatalf("私网拒应仍是 *EgressError，得到 %T: %v", err, err)
 	}
 }

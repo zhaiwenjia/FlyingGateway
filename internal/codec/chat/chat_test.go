@@ -951,3 +951,37 @@ func BenchmarkPickFields(b *testing.B) {
 		}
 	})
 }
+
+// TestChatPromptCacheKeyPassthrough（CAC-09，2026-11-26）：chat 入口的
+// prompt_cache_key 必须落到 core.Request —— 原先 chatRequest 无此字段、
+// 入站即丢 ⇒ 出站 openai.go 的注入分支恒不成立。
+func TestChatPromptCacheKeyPassthrough(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"prompt_cache_key":"run_abc"}`)
+	out, err := DecodeRequest(body)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if out.PromptCacheKey != "run_abc" {
+		t.Fatalf("PromptCacheKey=%q，want run_abc", out.PromptCacheKey)
+	}
+}
+
+// TestChatExtraPassthrough（CAC-11，2026-11-26）：白名单外顶层键进 Extra。
+func TestChatExtraPassthrough(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"prompt_cache_options":{"mode":"readOnly"}}`)
+	out, err := DecodeRequest(body)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	v, ok := out.Extra["prompt_cache_options"]
+	if !ok {
+		t.Fatalf("Extra 缺 prompt_cache_options：%v", out.Extra)
+	}
+	if _, isMap := v.(map[string]any); !isMap {
+		t.Fatalf("prompt_cache_options 类型不对：%T", v)
+	}
+	// 白名单键不得进 Extra
+	if _, leak := out.Extra["model"]; leak {
+		t.Fatalf("白名单键 model 泄进 Extra")
+	}
+}
