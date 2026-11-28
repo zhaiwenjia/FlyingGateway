@@ -114,9 +114,10 @@ type anthropicBlock struct {
 }
 
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description,omitempty"`
+	InputSchema  json.RawMessage    `json:"input_schema"`
+	CacheControl *core.CacheControl `json:"cache_control,omitempty"`
 }
 
 // anthropicRequestBody 是 Anthropic 形请求体构造（MiniMax Anthropic 兼容端点使用，3.6 允许复用；
@@ -143,7 +144,11 @@ func anthropicRequestBody(r *core.Request) (*anthropicReq, []core.Degradation, e
 		// thinking 映射 core.ReasoningConfig（4.3.2：thinking: {type:"adaptive", display:"summarized"}）。
 		body.Thinking = map[string]any{"type": "adaptive", "display": "summarized"}
 	}
-	for _, m := range r.Messages {
+	// 断点位置映射：core.Messages 下标 → body.Messages 下标。
+	// ⚠️ system 被抽到顶层字符串、不进 body.Messages ⇒ 不复用同一套下标，
+	// 否则断点会落到错误的块上（CAC-12 的位置语义就失真了）。
+	bodyIndex := make(map[int]int, len(r.Messages))
+	for i, m := range r.Messages {
 		msgs, sys, err := anthropicMessageOf(m)
 		if err != nil {
 			return nil, nil, err
@@ -156,10 +161,39 @@ func anthropicRequestBody(r *core.Request) (*anthropicReq, []core.Degradation, e
 			}
 			continue
 		}
+		bodyIndex[i] = len(body.Messages)
 		body.Messages = append(body.Messages, msgs...)
 	}
-	// cache_control 断点（4.3.2）：core.Request.CacheControl 落到最后一个消息块（缓存整个前缀）。
-	if r.CacheControl != nil && len(body.Messages) > 0 {
+	// cache_control 断点（4.3.2 / CAC-12）：位置化断点优先 —— 每个断点落回它原本
+	// 所在的块（多断点不再被压成一个）。⚠️ 手工构造的 system 是字符串，块上的
+	// 断点无法表达 ⇒ 显式记降级（⛔ 不静默丢）。
+	if len(r.CacheMarks) > 0 {
+		for _, mk := range r.CacheMarks {
+			mark := mk.Mark
+			switch mk.Where {
+			case "messages":
+				bi, ok := bodyIndex[mk.MessageIndex]
+				if !ok || bi >= len(body.Messages) {
+					continue
+				}
+				blk := body.Messages[bi].Content
+				if mk.PartIndex >= 0 && mk.PartIndex < len(blk) {
+					blk[mk.PartIndex].CacheControl = &mark
+				}
+			case "tools":
+				if mk.PartIndex >= 0 && mk.PartIndex < len(body.Tools) {
+					body.Tools[mk.PartIndex].CacheControl = &mark
+				}
+			case "system":
+				degs = append(degs, core.Degradation{
+					Field:  "cache_control",
+					Reason: core.DegradationUpstreamShapeMismatch,
+					Detail: "system 断点无法表达（手写构造的 system 为字符串）",
+				})
+			}
+		}
+	} else if r.CacheControl != nil && len(body.Messages) > 0 {
+		// 兼容路径：只有单断点（或上游 codec 只给了 CacheControl）。
 		last := &body.Messages[len(body.Messages)-1]
 		if n := len(last.Content); n > 0 {
 			last.Content[n-1].CacheControl = r.CacheControl
@@ -477,8 +511,49 @@ func anthropicWireNormalize(raw []byte, r *core.Request, schemas []json.RawMessa
 			}
 		}
 	}
-	// ③ cache_control 断点落最后一个消息块（缓存整个前缀，4.3.2）。
-	if r.CacheControl != nil && len(msgs) > 0 {
+	// ③ cache_control 断点（4.3.2 / CAC-12）：位置化断点优先。
+	if len(r.CacheMarks) > 0 {
+		// system 在 raw body 里被折叠成顶层字符串 ⇒ 先算 core.Messages → raw 下标映射。
+		idx := make(map[int]int, len(r.Messages))
+		next := 0
+		for i, mm := range r.Messages {
+			if mm.Role == "system" {
+				continue
+			}
+			idx[i] = next
+			next++
+		}
+		for _, mk := range r.CacheMarks {
+			mark := mk.Mark
+			switch mk.Where {
+			case "messages":
+				bi, ok := idx[mk.MessageIndex]
+				if !ok || bi >= len(msgs) {
+					continue
+				}
+				msg, _ := msgs[bi].(map[string]any)
+				blocks, _ := msg["content"].([]any)
+				if mk.PartIndex >= 0 && mk.PartIndex < len(blocks) {
+					if blk, ok := blocks[mk.PartIndex].(map[string]any); ok {
+						blk["cache_control"] = map[string]any{"type": mark.Type, "ttl": mark.TTL}
+						if mark.TTL == "" {
+							delete(blk["cache_control"].(map[string]any), "ttl")
+						}
+					}
+				}
+			case "tools":
+				tools, _ := m["tools"].([]any)
+				if mk.PartIndex >= 0 && mk.PartIndex < len(tools) {
+					if tool, ok := tools[mk.PartIndex].(map[string]any); ok {
+						tool["cache_control"] = map[string]any{"type": mark.Type, "ttl": mark.TTL}
+						if mark.TTL == "" {
+							delete(tool["cache_control"].(map[string]any), "ttl")
+						}
+					}
+				}
+			}
+		}
+	} else if r.CacheControl != nil && len(msgs) > 0 {
 		msg, ok := msgs[len(msgs)-1].(map[string]any)
 		if ok {
 			if blocks, ok := msg["content"].([]any); ok && len(blocks) > 0 {
@@ -520,6 +595,15 @@ func (a *anthropicAdapter) BuildRequestWithDegradations(ctx context.Context, r *
 	params, degs, schemas, err := anthropicSDKParams(r, res)
 	if err != nil {
 		return nil, nil, err
+	}
+	for _, mk := range r.CacheMarks {
+		if mk.Where == "system" {
+			degs = append(degs, core.Degradation{
+				Field:  "cache_control",
+				Reason: core.DegradationUpstreamShapeMismatch,
+				Detail: "system 断点无法表达（system 折叠为字符串）",
+			})
+		}
 	}
 	raw, err := marshalBody(params)
 	if err != nil {

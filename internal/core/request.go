@@ -24,7 +24,12 @@ type Request struct {
 	Reasoning       *ReasoningConfig
 	Stream          bool
 	// CacheControl 是 Anthropic 的缓存断点（Chat 形状无对应物）。
+	// ⚠️ CAC-12（2026-11-29）：多断点用 CacheMarks 承载；本字段保留为
+	// 「最后一个断点」的兼容视图（旧编码路径与单断点场景继续用它）。
 	CacheControl *CacheControl
+	// CacheMarks 是带位置的缓存断点（CAC-12）：多断点必须保留「打在哪一块」，
+	// 否则缓存前缀边界会悄悄变样（⛔ 不静默取一）。
+	CacheMarks []CacheMark
 	// PreviousResponseID / Conversation 是 Responses 的服务端会话态。
 	PreviousResponseID string
 	Conversation       string
@@ -32,6 +37,16 @@ type Request struct {
 	PromptCacheKey string
 	// Extra 承载供应商特有的非标准参数（enable_thinking / prompt_cache_options / …）。
 	Extra map[string]any
+}
+
+// CacheMark 是带位置的缓存断点（CAC-12）。
+// Where: system / messages / tools；MessageIndex 仅在 Where=messages 时有效；
+// PartIndex 是 system 块下标 / 消息内容块下标 / 工具下标。
+type CacheMark struct {
+	Where        string
+	MessageIndex int
+	PartIndex    int
+	Mark         CacheControl
 }
 
 // Message 是规范消息（统一 SDD 3.1）。

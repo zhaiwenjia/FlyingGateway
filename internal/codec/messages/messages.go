@@ -122,12 +122,8 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 			return nil, err
 		}
 		if len(parts) > 0 {
-			cc2, err := takeCacheControl(req.CacheControl, cc)
-			if err != nil {
-				return nil, err
-			}
-			req.CacheControl = cc2
 			req.Messages = append(req.Messages, core.Message{Role: "system", Content: parts})
+			req.CacheMarks = append(req.CacheMarks, cc...)
 		}
 	}
 
@@ -146,16 +142,16 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 			if len(seg) == 0 {
 				return nil
 			}
-			msg, cc, err := messageOf(m.Role, seg)
+			msg, marks, err := messageOf(m.Role, seg)
 			if err != nil {
 				return err
 			}
-			cc2, err := takeCacheControl(req.CacheControl, cc)
-			if err != nil {
-				return err
-			}
-			req.CacheControl = cc2
+			idx := len(req.Messages)
 			req.Messages = append(req.Messages, msg)
+			for _, mk := range marks {
+				mk.MessageIndex = idx
+				req.CacheMarks = append(req.CacheMarks, mk)
+			}
 			seg = seg[:0]
 			return nil
 		}
@@ -164,16 +160,16 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 				if err := flush(); err != nil {
 					return nil, fmt.Errorf("messages: messages[%d]: %w", i, err)
 				}
-				tm, cc, err := toolResultOf(b)
+				tm, marks, err := toolResultOf(b)
 				if err != nil {
 					return nil, fmt.Errorf("messages: messages[%d]: %w", i, err)
 				}
-				cc2, err := takeCacheControl(req.CacheControl, cc)
-				if err != nil {
-					return nil, err
-				}
-				req.CacheControl = cc2
+				idx := len(req.Messages)
 				req.Messages = append(req.Messages, tm)
+				for _, mk := range marks {
+					mk.MessageIndex = idx
+					req.CacheMarks = append(req.CacheMarks, mk)
+				}
 				continue
 			}
 			seg = append(seg, b)
@@ -188,17 +184,21 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 		if t.Name == "" || len(t.InputSchema) == 0 {
 			return nil, fmt.Errorf("messages: tools[%d] 须含 name 与 input_schema", i)
 		}
+		if t.CacheControl != nil {
+			req.CacheMarks = append(req.CacheMarks, core.CacheMark{
+				Where: "tools", PartIndex: len(req.Tools), Mark: *t.CacheControl,
+			})
+		}
 		req.Tools = append(req.Tools, core.Tool{
 			Type: "function", Name: t.Name, Description: t.Description,
 			Parameters: json.RawMessage(t.InputSchema),
 		})
-		cc2, err := takeCacheControl(req.CacheControl, t.CacheControl)
-		if err != nil {
-			return nil, err
-		}
-		req.CacheControl = cc2
 	}
 
+	if n := len(req.CacheMarks); n > 0 {
+		last := req.CacheMarks[n-1].Mark
+		req.CacheControl = &last
+	}
 	// tool_choice：auto / any / tool / none ⇒ 规范四态。
 	if len(w.ToolChoice) > 0 {
 		var tc toolChoiceWire
@@ -225,7 +225,7 @@ func DecodeRequest(body []byte) (*core.Request, error) {
 }
 
 // decodeSystem 解析 system（string 或 text 块数组）。
-func decodeSystem(raw json.RawMessage) ([]core.ContentPart, *core.CacheControl, error) {
+func decodeSystem(raw json.RawMessage) ([]core.ContentPart, []core.CacheMark, error) {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
@@ -238,19 +238,19 @@ func decodeSystem(raw json.RawMessage) ([]core.ContentPart, *core.CacheControl, 
 		return nil, nil, fmt.Errorf("system: %w", err)
 	}
 	var parts []core.ContentPart
-	var cc *core.CacheControl
+	var marks []core.CacheMark
 	for _, b := range blocks {
 		if b.Type != "text" {
 			return nil, nil, fmt.Errorf("system 只允许 text 块，收到 %q", b.Type)
 		}
-		parts = append(parts, core.ContentPart{Type: "text", Text: b.Text})
-		cc2, err := takeCacheControl(cc, b.CacheControl)
-		if err != nil {
-			return nil, nil, err
+		if b.CacheControl != nil {
+			marks = append(marks, core.CacheMark{
+				Where: "system", PartIndex: len(parts), Mark: *b.CacheControl,
+			})
 		}
-		cc = cc2
+		parts = append(parts, core.ContentPart{Type: "text", Text: b.Text})
 	}
-	return parts, cc, nil
+	return parts, marks, nil
 }
 
 // decodeContent 解析消息内容（string 或块数组）。
@@ -270,15 +270,10 @@ func decodeContent(raw json.RawMessage) ([]blockWire, error) {
 }
 
 // messageOf 把非 tool_result 块段翻译成一条规范消息。
-func messageOf(role string, blocks []blockWire) (core.Message, *core.CacheControl, error) {
+func messageOf(role string, blocks []blockWire) (core.Message, []core.CacheMark, error) {
 	msg := core.Message{Role: role}
-	var cc *core.CacheControl
+	var marks []core.CacheMark
 	for _, b := range blocks {
-		cc2, err := takeCacheControl(cc, b.CacheControl)
-		if err != nil {
-			return msg, nil, err
-		}
-		cc = cc2
 		switch b.Type {
 		case "text":
 			msg.Content = append(msg.Content, core.ContentPart{Type: "text", Text: b.Text})
@@ -314,17 +309,32 @@ func messageOf(role string, blocks []blockWire) (core.Message, *core.CacheContro
 		default:
 			return msg, nil, fmt.Errorf("内容块类型 %q 不支持", b.Type)
 		}
+		if b.CacheControl != nil && len(msg.Content) > 0 {
+			marks = append(marks, core.CacheMark{
+				Where: "messages", PartIndex: len(msg.Content) - 1, Mark: *b.CacheControl,
+			})
+		}
 	}
-	return msg, cc, nil
+	return msg, marks, nil
 }
 
 // toolResultOf 把 tool_result 块翻译成 tool 消息（Chat 家族回填形态）。
-func toolResultOf(b blockWire) (core.Message, *core.CacheControl, error) {
+func toolResultOf(b blockWire) (core.Message, []core.CacheMark, error) {
 	parts, _, err := decodeResultContent(b.Content)
 	if err != nil {
 		return core.Message{}, nil, err
 	}
-	return core.Message{Role: "tool", ToolCallID: b.ToolUseID, Content: parts}, b.CacheControl, nil
+	var marks []core.CacheMark
+	if b.CacheControl != nil {
+		idx := len(parts) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		marks = append(marks, core.CacheMark{
+			Where: "messages", PartIndex: idx, Mark: *b.CacheControl,
+		})
+	}
+	return core.Message{Role: "tool", ToolCallID: b.ToolUseID, Content: parts}, marks, nil
 }
 
 // decodeResultContent 解析 tool_result 内容（string | 文本/图片块数组）。
@@ -341,13 +351,7 @@ func decodeResultContent(raw json.RawMessage) ([]core.ContentPart, *core.CacheCo
 		return nil, nil, err
 	}
 	var parts []core.ContentPart
-	var cc *core.CacheControl
 	for _, b := range blocks {
-		cc2, err := takeCacheControl(cc, b.CacheControl)
-		if err != nil {
-			return nil, nil, err
-		}
-		cc = cc2
 		switch b.Type {
 		case "text":
 			parts = append(parts, core.ContentPart{Type: "text", Text: b.Text})
@@ -363,22 +367,7 @@ func decodeResultContent(raw json.RawMessage) ([]core.ContentPart, *core.CacheCo
 			return nil, nil, fmt.Errorf("tool_result 内容块类型 %q 不支持", b.Type)
 		}
 	}
-	return parts, cc, nil
-}
-
-// takeCacheControl 归并 cache_control 断点：当前 core 只承载单断点 ⇒ 多个**不同**断点
-// 显式报错（⛔ 不静默取一 —— 静默取一会让缓存前缀边界悄悄变样）；重复相同断点容忍。
-func takeCacheControl(cur, next *core.CacheControl) (*core.CacheControl, error) {
-	if next == nil {
-		return cur, nil
-	}
-	if cur == nil {
-		return next, nil
-	}
-	if cur.Type == next.Type && cur.TTL == next.TTL {
-		return cur, nil
-	}
-	return cur, errors.New("messages: 当前仅支持单个 cache_control 断点（多断点的缓存前缀边界无法经 core 表达，⛔ 不静默取一）")
+	return parts, nil, nil
 }
 
 func joinNonEmpty(a, b string) string {

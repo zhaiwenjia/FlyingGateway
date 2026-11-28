@@ -442,3 +442,64 @@ func TestAnthropicStreamSignatureDelta(t *testing.T) {
 		t.Errorf("推理文本帧应与签名帧分离，正文 = %q", reasoning)
 	}
 }
+
+// TestAnthropicBuildRequestPlacesMultipleCacheMarks 钉 CAC-12：位置化断点必须落回
+// 它原本所在的块（多断点不再是「只给最后一个块」）；system 断点无法用字符串
+// system 表达 ⇒ 显式降级（⛔ 不静默丢）。
+func TestAnthropicBuildRequestPlacesMultipleCacheMarks(t *testing.T) {
+	a := NewAnthropic(http.DefaultClient)
+	r := &core.Request{
+		Messages: []core.Message{
+			{Role: "system", Content: []core.ContentPart{{Type: "text", Text: "sys"}}},
+			{Role: "user", Content: []core.ContentPart{
+				{Type: "text", Text: "第一块"}, {Type: "text", Text: "第二块"},
+			}},
+		},
+		Tools: []core.Tool{{Name: "f", Parameters: []byte(`{"type":"object"}`)}},
+		CacheMarks: []core.CacheMark{
+			{Where: "system", PartIndex: 0, Mark: core.CacheControl{Type: "ephemeral"}},
+			{Where: "messages", MessageIndex: 1, PartIndex: 0, Mark: core.CacheControl{Type: "ephemeral"}},
+			{Where: "messages", MessageIndex: 1, PartIndex: 1, Mark: core.CacheControl{Type: "ephemeral", TTL: "1h"}},
+			{Where: "tools", PartIndex: 0, Mark: core.CacheControl{Type: "ephemeral"}},
+		},
+	}
+	res := newAnthropicResolution("https://api.anthropic.com/v1")
+	out, degs, err := a.(*anthropicAdapter).BuildRequestWithDegradations(context.Background(), r, res)
+	if err != nil {
+		t.Fatalf("BuildRequest 报错: %v", err)
+	}
+	m := bodyMap(t, out)
+	msgs, _ := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages 数量 = %d，期望 1（system 抽顶层）", len(msgs))
+	}
+	content, _ := msgs[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content 块数 = %d，期望 2", len(content))
+	}
+	cc0, _ := content[0].(map[string]any)["cache_control"].(map[string]any)
+	if cc0 == nil || cc0["type"] != "ephemeral" || cc0["ttl"] != nil {
+		t.Fatalf("第 0 块断点 = %v，期望 {type:ephemeral}", cc0)
+	}
+	cc1, _ := content[1].(map[string]any)["cache_control"].(map[string]any)
+	if cc1 == nil || cc1["ttl"] != "1h" {
+		t.Fatalf("第 1 块断点 = %v，期望 ttl=1h", cc1)
+	}
+	tools, _ := m["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools 数量 = %d，期望 1", len(tools))
+	}
+	if tc, _ := tools[0].(map[string]any)["cache_control"].(map[string]any); tc == nil {
+		t.Fatalf("工具缺 cache_control: %v", tools[0])
+	}
+	// system 断点：显式降级，⛔ 不静默丢
+	found := false
+	for _, d := range degs {
+		if d.Field == "cache_control" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("system 断点应记降级，实 %+v", degs)
+	}
+}

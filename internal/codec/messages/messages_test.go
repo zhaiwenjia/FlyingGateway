@@ -78,13 +78,13 @@ func TestDecodeRequestBasics(t *testing.T) {
 }
 
 // TestDecodeRequestRejects 断言非法输入显式拒绝：缺 max_tokens、role 越界、
-// 多个不同 cache_control 断点（⛔ 不静默取一）、tool_choice 缺 name。
+// tool_choice 缺 name。
+// ⚠️ CAC-12（2026-11-29）：「多个不同 cache_control 断点」不再属于非法输入 ——
+// 位置化断点由 CacheMarks 承载，见 TestDecodeRequestKeepsMultipleCacheMarks。
 func TestDecodeRequestRejects(t *testing.T) {
 	for _, body := range []string{
-		`{"model":"m","messages":[{"role":"user","content":"x"}]}`,                  // 缺 max_tokens
-		`{"model":"m","max_tokens":1,"messages":[{"role":"system","content":"x"}]}`, // role 越界
-		`{"model":"m","max_tokens":1,"system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}],
-		  "messages":[{"role":"user","content":[{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`, // 多断点
+		`{"model":"m","messages":[{"role":"user","content":"x"}]}`,                                              // 缺 max_tokens
+		`{"model":"m","max_tokens":1,"messages":[{"role":"system","content":"x"}]}`,                             // role 越界
 		`{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"x"}],"tool_choice":{"type":"tool"}}`, // 缺 name
 	} {
 		if _, err := DecodeRequest([]byte(body)); err == nil {
@@ -183,5 +183,41 @@ func TestStopReasonMapping(t *testing.T) {
 		if got := stopReasonOf(in); got != want {
 			t.Errorf("stopReasonOf(%q) = %q，期望 %q", in, got, want)
 		}
+	}
+}
+
+// TestDecodeRequestKeepsMultipleCacheMarks 钉 CAC-12：多个不同 cache_control 断点
+// 必须按**位置**保留（system 第 0 块 / 消息第 0 条第 0 块 / 工具第 0 个），
+// ⛔ 不许静默取一，也不再报错。
+func TestDecodeRequestKeepsMultipleCacheMarks(t *testing.T) {
+	body := `{"model":"m","max_tokens":1,
+	  "system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}],
+	  "messages":[{"role":"user","content":[{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"5m"}}]}],
+	  "tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}`
+	req, err := DecodeRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("多断点应被接受（CAC-12）: %v", err)
+	}
+	if len(req.CacheMarks) != 3 {
+		t.Fatalf("CacheMarks = %d，期望 3: %+v", len(req.CacheMarks), req.CacheMarks)
+	}
+	want := []struct {
+		where string
+		mi    int
+		pi    int
+	}{
+		{"system", 0, 0},
+		{"messages", 1, 0},
+		{"tools", 0, 0},
+	}
+	for i, w := range want {
+		mk := req.CacheMarks[i]
+		if mk.Where != w.where || mk.MessageIndex != w.mi || mk.PartIndex != w.pi {
+			t.Fatalf("mark[%d] = %+v，期望 %+v", i, mk, w)
+		}
+	}
+	// 兼容视图：CacheControl = 最后一个断点（工具上的那个 ephemeral，无 ttl）
+	if req.CacheControl == nil || req.CacheControl.TTL != "" {
+		t.Fatalf("CacheControl 兼容视图失真: %+v", req.CacheControl)
 	}
 }
